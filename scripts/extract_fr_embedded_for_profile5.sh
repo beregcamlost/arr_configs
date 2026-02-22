@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LOCK_FILE="/tmp/extract_fr_profile5.lock"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { echo "Another instance is already running"; exit 0; }
+
 DB="/opt/bazarr/data/db/bazarr.db"
+PROFILE_ID="${PROFILE_ID:-5}"
+LOG="/config/berenstuff/automation/logs/extract_fr_embedded_for_profile5.log"
+
+log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
 mapfile -t EPISODES < <(
   sqlite3 "$DB" "
     SELECT e.path
     FROM table_episodes e
     JOIN table_shows s ON s.sonarrSeriesId = e.sonarrSeriesId
-    WHERE s.profileId = 5
+    WHERE s.profileId = $PROFILE_ID
       AND s.monitored = 'True'
       AND e.monitored = 'True'
     ORDER BY e.path;
@@ -16,7 +24,7 @@ mapfile -t EPISODES < <(
 )
 
 if [ "${#EPISODES[@]}" -eq 0 ]; then
-  echo "No monitored episodes found for profileId=5"
+  log "No monitored episodes found for profileId=$PROFILE_ID"
   exit 0
 fi
 
@@ -26,23 +34,23 @@ extract_stream() {
   local out_file="$3"
 
   if [ -f "$out_file" ]; then
-    echo "SKIP exists: $out_file"
+    log "SKIP exists: $out_file"
     return 0
   fi
 
   ffmpeg -nostdin -loglevel error -y -i "$file" -map "0:${stream_index}" -c:s srt "$out_file"
-  echo "WROTE: $out_file"
+  log "WROTE: $out_file"
 }
 
 for file in "${EPISODES[@]}"; do
   if [ ! -f "$file" ]; then
-    echo "MISS file: $file"
+    log "MISS file: $file"
     continue
   fi
 
   json="$(ffprobe -v error -print_format json -show_streams -select_streams s "$file" 2>/dev/null || true)"
   if [ -z "$json" ] || [ "$json" = "{}" ]; then
-    echo "NO-SUBS: $file"
+    log "NO-SUBS: $file"
     continue
   fi
 
@@ -74,6 +82,6 @@ for file in "${EPISODES[@]}"; do
   fi
 
   if [ -z "$forced_idx" ] && [ -z "$full_idx" ]; then
-    echo "NO-FR-MATCH: $file"
+    log "NO-FR-MATCH: $file"
   fi
 done

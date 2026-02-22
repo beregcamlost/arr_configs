@@ -1,26 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LOCK_FILE="/tmp/extract_zh_chinese.lock"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { echo "Another instance is already running"; exit 0; }
+
 DB="/opt/bazarr/data/db/bazarr.db"
+LOG="/config/berenstuff/automation/logs/extract_zh_embedded_for_chinese_profiles.log"
+
+log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
 # Find language profiles that include Chinese (zh or zt)
 mapfile -t PROFILE_IDS < <(
   sqlite3 "$DB" "
     SELECT profileId
     FROM table_languages_profiles
-    WHERE items LIKE '%\"language\": \"zh\"%'
-       OR items LIKE '%\"language\": \"zt\"%'
+    WHERE (items LIKE '%\"language\":\"zh\"%' OR items LIKE '%\"language\": \"zh\"%' OR items LIKE '%\"language\":\"zt\"%' OR items LIKE '%\"language\": \"zt\"%')
     ORDER BY profileId;
   "
 )
 
 if [ "${#PROFILE_IDS[@]}" -eq 0 ]; then
-  echo "No Chinese profiles found (zh/zt)."
+  log "No Chinese profiles found (zh/zt)."
   exit 0
 fi
 
 id_csv="$(IFS=,; echo "${PROFILE_IDS[*]}")"
-echo "Chinese profile IDs: $id_csv"
+log "Chinese profile IDs: $id_csv"
 
 mapfile -t EPISODES < <(
   sqlite3 "$DB" "
@@ -35,11 +41,11 @@ mapfile -t EPISODES < <(
 )
 
 if [ "${#EPISODES[@]}" -eq 0 ]; then
-  echo "No monitored episodes found for Chinese profiles: $id_csv"
+  log "No monitored episodes found for Chinese profiles: $id_csv"
   exit 0
 fi
 
-echo "Episodes to process: ${#EPISODES[@]}"
+log "Episodes to process: ${#EPISODES[@]}"
 
 extract_stream() {
   local file="$1"
@@ -47,23 +53,23 @@ extract_stream() {
   local out_file="$3"
 
   if [ -f "$out_file" ]; then
-    echo "SKIP exists: $out_file"
+    log "SKIP exists: $out_file"
     return 0
   fi
 
   ffmpeg -nostdin -loglevel error -y -i "$file" -map "0:${stream_index}" -c:s srt "$out_file"
-  echo "WROTE: $out_file"
+  log "WROTE: $out_file"
 }
 
 for file in "${EPISODES[@]}"; do
   if [ ! -f "$file" ]; then
-    echo "MISS file: $file"
+    log "MISS file: $file"
     continue
   fi
 
   json="$(ffprobe -v error -print_format json -show_streams -select_streams s "$file" 2>/dev/null || true)"
   if [ -z "$json" ] || [ "$json" = "{}" ]; then
-    echo "NO-SUBS: $file"
+    log "NO-SUBS: $file"
     continue
   fi
 

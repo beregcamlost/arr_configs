@@ -1,0 +1,23 @@
+# Edit this file to introduce tasks to be run by cron.
+# 
+# Each task to run has to be defined through a single line
+# indicating with different fields when the task will be run
+# and what command to run for the task
+# To define the time you can provide concrete values for
+# minute (m), hour (h), day of month (dom), month (mon),
+# and day of week (dow) or use '*' in these fields (for 'any').
+# Notice that tasks will be started based on the cron's system
+# daemon's notion of time and timezones.
+# Output of the crontab jobs (including errors) is sent through
+# email to the user the crontab file belongs to (unless redirected).
+# For example, you can run a backup of all your user accounts
+# at 5 a.m every week with:
+# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
+# For more information see the manual pages of crontab(5) and cron(8)
+# m h  dom mon dow   command
+0 */3 * * * /usr/bin/flock -n /tmp/arr_cleanup_importblocked.lock /config/berenstuff/automation/scripts/arr_cleanup_importblocked.sh >> /config/berenstuff/automation/logs/arr_cleanup_importblocked.log 2>&1
+45 * * * * /usr/bin/flock -n /tmp/library_codec_resume_media.lock /config/berenstuff/scripts/library_codec_manager.sh resume --state-dir /APPBOX_DATA/storage/.transcode-state-media --batch-size 1 --log-level info >> /APPBOX_DATA/storage/.transcode-state-media/cron-resume.log 2>&1
+*/30 * * * * /usr/bin/flock -n /tmp/library_codec_audit_plan_media.lock /bin/bash -lc 'for i in $(seq 1 10); do if pgrep -f "/config/berenstuff/scripts/library_codec_manager.sh resume --state-dir /APPBOX_DATA/storage/.transcode-state-media" >/dev/null; then echo "$(date +\%F\ \%T) audit+plan delayed: converter running (attempt $i/10)" >> /APPBOX_DATA/storage/.transcode-state-media/cron-audit-plan.log; sleep 300; else /config/berenstuff/scripts/library_codec_manager.sh audit --state-dir /APPBOX_DATA/storage/.transcode-state-media --path-prefix /APPBOX_DATA/storage/media --log-level info && /config/berenstuff/scripts/library_codec_manager.sh plan --state-dir /APPBOX_DATA/storage/.transcode-state-media --log-level info; exit $?; fi; done; echo "$(date +\%F\ \%T) audit+plan skipped after 10 retries (converter still running)" >> /APPBOX_DATA/storage/.transcode-state-media/cron-audit-plan.log' >> /APPBOX_DATA/storage/.transcode-state-media/cron-audit-plan.log 2>&1
+35 3 * * 2 /usr/bin/flock -n /tmp/emby_last_played_report.lock env EMBY_URL=https://emby.vhscave.appboxes.co EMBY_API_KEY=ad66103a340f4fa884c4d2587f45e680 /bin/bash /config/berenstuff/automation/scripts/emby_last_played_report.sh --path-prefix /APPBOX_DATA/storage/media --output-csv /config/berenstuff/automation/logs/emby_last_played_report.csv >> /config/berenstuff/automation/logs/emby_last_played_report.log 2>&1
+*/15 * * * * /usr/bin/flock -n /tmp/library_subtitle_dedupe.lock /bin/bash /config/berenstuff/automation/scripts/subtitles/library_subtitle_dedupe.sh --path-prefix /APPBOX_DATA/storage/media --state-dir /APPBOX_DATA/storage/.subtitle-dedupe-state --bazarr-db /opt/bazarr/data/db/bazarr.db --log /config/berenstuff/automation/logs/library_subtitle_dedupe.log >> /config/berenstuff/automation/logs/library_subtitle_dedupe.log 2>&1
+*/15 * * * * /usr/bin/flock -n /tmp/bazarr_subtitle_recovery.lock env BAZARR_API_KEY=209ddfabdea879b2bbff75b5dce0eccd RADARR_KEY=9e77f495e4ca474ea92c7069e02602cd SONARR_KEY=51bebcf0eb0142afb53bd4295c2d9905 /bin/bash /config/berenstuff/automation/scripts/subtitles/bazarr_subtitle_recovery.sh --bazarr-url http://127.0.0.1:6767/bazarr --bazarr-db /opt/bazarr/data/db/bazarr.db --radarr-url http://127.0.0.1:7878/radarr --sonarr-url http://127.0.0.1:8989/sonarr --state-dir /APPBOX_DATA/storage/.subtitle-recovery-state --log /config/berenstuff/automation/logs/bazarr_subtitle_recovery.log >> /config/berenstuff/automation/logs/bazarr_subtitle_recovery.log 2>&1

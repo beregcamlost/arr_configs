@@ -36,6 +36,12 @@ DISCORD_WEBHOOK_STATUS="${DISCORD_WEBHOOK_STATUS:-$DISCORD_WEBHOOK_AUDIT_DONE}"
 DEFAULT_TARGET_CONTAINER="mp4"
 MAX_ATTEMPTS_DEFAULT=30
 MAX_ATTEMPTS="$MAX_ATTEMPTS_DEFAULT"
+RETENTION_DAYS="$RETENTION_DAYS_DEFAULT"
+
+cleanup() {
+  rm -f "$TMP_DIR"/*.json "$TMP_DIR"/*.tmp 2>/dev/null || true
+}
+trap cleanup EXIT
 
 usage() {
   cat <<USAGE
@@ -62,6 +68,7 @@ Options:
   --include-series      Restrict scope to series only
   --include-movies      Restrict scope to movies only
   --max-attempts N      Max conversion attempts per media before skip (default: $MAX_ATTEMPTS_DEFAULT)
+  --retention-days N    Backup retention window in days for prune-backups (default: $RETENTION_DAYS_DEFAULT)
   --log-level LEVEL     info|debug (default: info)
   --help                Show help
 USAGE
@@ -303,6 +310,8 @@ parse_args() {
         INCLUDE_MOVIES=1; INCLUDE_SERIES=0; shift ;;
       --max-attempts)
         MAX_ATTEMPTS="$2"; shift 2 ;;
+      --retention-days)
+        RETENTION_DAYS="$2"; shift 2 ;;
       --log-level)
         LOG_LEVEL="$2"; shift 2 ;;
       --help|-h)
@@ -537,49 +546,51 @@ fps_to_float() {
 insert_probe_streams_from_json() {
   local media_id="$1" json_file="$2"
 
-  jq -c '.streams[]?' "$json_file" | while IFS= read -r s; do
-    local idx stype codec profile pix_fmt width height fps_raw fps channels sample_rate lang forced dflag hdr transfer primaries
-
-    idx="$(jq -r '.index // 0' <<<"$s")"
-    stype="$(jq -r '.codec_type // ""' <<<"$s")"
-    codec="$(jq -r '.codec_name // ""' <<<"$s")"
-    profile="$(jq -r '.profile // ""' <<<"$s")"
-    pix_fmt="$(jq -r '.pix_fmt // ""' <<<"$s")"
-    width="$(jq -r '.width // 0' <<<"$s")"
-    height="$(jq -r '.height // 0' <<<"$s")"
-    fps_raw="$(jq -r '.avg_frame_rate // "0/0"' <<<"$s")"
-    fps="$(fps_to_float "$fps_raw")"
-    channels="$(jq -r '.channels // 0' <<<"$s")"
-    sample_rate="$(jq -r '.sample_rate // 0' <<<"$s")"
-    lang="$(jq -r '.tags.language // ""' <<<"$s" | tr '[:upper:]' '[:lower:]')"
-    forced="$(jq -r '.disposition.forced // 0' <<<"$s")"
-    dflag="$(jq -r '.disposition.default // 0' <<<"$s")"
-    transfer="$(jq -r '.color_transfer // ""' <<<"$s" | tr '[:upper:]' '[:lower:]')"
-    primaries="$(jq -r '.color_primaries // ""' <<<"$s" | tr '[:upper:]' '[:lower:]')"
-
-    hdr=0
-    if [[ "$transfer" == "smpte2084" || "$transfer" == "arib-std-b67" || "$primaries" == "bt2020" ]]; then
-      hdr=1
-    fi
-
+  # Single jq call extracts all stream fields as TSV — eliminates ~15 jq forks per stream.
+  # HDR detection and fps calculation are done inside jq to avoid any extra subprocess calls.
+  jq -r '.streams[]? | [
+    (.index // 0),
+    ((.codec_type // "") | ascii_downcase),
+    ((.codec_name // "") | ascii_downcase),
+    (.profile // ""),
+    (.pix_fmt // ""),
+    (.width // 0),
+    (.height // 0),
+    ((.avg_frame_rate // "0/0") | split("/") |
+      if length == 2 and (.[1] | tonumber? // 0) > 0
+      then ((.[0] | tonumber) / (.[1] | tonumber) * 1000000 | floor) / 1000000
+      else 0
+      end),
+    (.channels // 0),
+    (.sample_rate // 0),
+    ((.tags.language // "") | ascii_downcase),
+    (.disposition.forced // 0),
+    (.disposition.default // 0),
+    (
+      ((.color_transfer // "") | ascii_downcase) as $ct |
+      ((.color_primaries // "") | ascii_downcase) as $cp |
+      if $ct == "smpte2084" or $ct == "arib-std-b67" or $cp == "bt2020" then 1 else 0 end
+    )
+  ] | @tsv' "$json_file" | while IFS=$'\t' read -r idx stype codec profile pix_fmt width height fps channels sample_rate lang forced dflag hdr; do
+    [[ -z "$idx" ]] && continue
     sqlite3 "$DB_PATH" <<SQL
 INSERT INTO probe_streams(media_id,stream_index,stream_type,codec,profile,pix_fmt,width,height,fps,channels,sample_rate,language,forced,default_flag,is_hdr)
 VALUES(
   $media_id,
-  $idx,
-  '$(sql_quote "$stype")',
-  '$(sql_quote "$codec")',
-  '$(sql_quote "$profile")',
-  '$(sql_quote "$pix_fmt")',
+  ${idx:-0},
+  '$(sql_quote "${stype:-}")',
+  '$(sql_quote "${codec:-}")',
+  '$(sql_quote "${profile:-}")',
+  '$(sql_quote "${pix_fmt:-}")',
   ${width:-0},
   ${height:-0},
   ${fps:-0},
   ${channels:-0},
   ${sample_rate:-0},
-  '$(sql_quote "$lang")',
+  '$(sql_quote "${lang:-}")',
   ${forced:-0},
   ${dflag:-0},
-  $hdr
+  ${hdr:-0}
 );
 SQL
   done
@@ -1154,7 +1165,7 @@ ORDER BY cp.media_id${limit_clause};
 }
 
 prune_backups_cmd() {
-  local days="$RETENTION_DAYS_DEFAULT"
+  local days="$RETENTION_DAYS"
   log "info" "Pruning backups older than ${days} days under $BACKUP_DIR"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     find "$BACKUP_DIR" -type f -mtime +"$days" -print | sed -n '1,200p'

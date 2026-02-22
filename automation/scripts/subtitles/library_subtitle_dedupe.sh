@@ -77,6 +77,9 @@ fi
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG_PATH")"
 
+source "$(dirname "$0")/lib_subtitle_common.sh"
+
+# Override lib_subtitle_common.sh log() — dedupe uses tee and LOG_PATH instead of LOG
 log() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_PATH" >/dev/null
 }
@@ -107,64 +110,6 @@ sql_escape() {
   local s="${1:-}"
   s="${s//\'/\'\'}"
   printf '%s' "$s"
-}
-
-file_size_bytes() {
-  stat -c '%s' "$1" 2>/dev/null || echo 0
-}
-
-media_duration_seconds() {
-  local file="$1"
-  ffprobe -v error -show_entries format=duration -of csv=p=0 "$file" 2>/dev/null | awk '{printf("%d\n",$1+0)}'
-}
-
-subtitle_quality_score() {
-  local sub_file="$1"
-  local media_seconds="$2"
-  local forced_num="$3"
-  awk -v media="$media_seconds" -v forced="$forced_num" '
-    function ts_to_s(ts, a) {
-      gsub(",", ".", ts)
-      split(ts, a, ":")
-      if (length(a) != 3) return 0
-      return (a[1] * 3600) + (a[2] * 60) + a[3]
-    }
-    BEGIN {
-      cues=0; text_lines=0; text_chars=0; shown=0.0
-    }
-    /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9],[0-9][0-9][0-9][[:space:]]+-->[[:space:]]+[0-9][0-9]:[0-9][0-9]:[0-9][0-9],[0-9][0-9][0-9]/ {
-      split($0, p, /[[:space:]]+-->[[:space:]]+/)
-      s = ts_to_s(p[1]); e = ts_to_s(p[2])
-      if (e > s) shown += (e - s)
-      cues++
-      next
-    }
-    NF > 0 && $0 !~ /^[0-9]+$/ {
-      text_lines++
-      text_chars += length($0)
-    }
-    END {
-      if (cues <= 0 || text_chars <= 0) {
-        print 0
-        exit
-      }
-      coverage = (media > 0) ? ((shown / media) * 100.0) : 0.0
-      score = (cues * 250) + (text_lines * 120) + text_chars
-      if (forced == 1) {
-        ideal = 8.0
-        if (coverage < 0.2) score -= 200000
-        if (coverage > 60.0) score -= int((coverage - 60.0) * 5000)
-      } else {
-        ideal = 35.0
-        if (coverage < 5.0) score -= int((5.0 - coverage) * 10000)
-        if (coverage > 98.0) score -= int((coverage - 98.0) * 5000)
-      }
-      diff = coverage - ideal
-      if (diff < 0) diff = -diff
-      score -= int(diff * 3000)
-      printf "%d\n", score
-    }
-  ' "$sub_file"
 }
 
 subtitle_group_key() {

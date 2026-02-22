@@ -13,3 +13,11 @@ apps/
 *.swo
 *~
 .DS_Store
+
+# Secrets
+.env
+
+# Real configs (contain secrets)
+automation/configs/sonarr-config.xml
+automation/configs/radarr-config.xml
+automation/configs/bazarr-config.yaml
