@@ -8,6 +8,7 @@ LOG_PATH="${LOG_PATH:-/config/berenstuff/automation/logs/library_subtitle_dedupe
 BAZARR_DB="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
 MAX_FILES=0
 DRY_RUN=0
+SINCE_MINUTES=0
 
 usage() {
   cat <<'EOF'
@@ -23,6 +24,7 @@ Options:
   --log PATH           Log file path (default: /config/berenstuff/automation/logs/library_subtitle_dedupe.log)
   --bazarr-db PATH     Bazarr SQLite db path (default: /opt/bazarr/data/db/bazarr.db)
   --max-files N        Process at most N video files this run (default: 0 = all)
+  --since MINUTES      Only scan media files modified in the last N minutes (default: 0 = all)
   --dry-run            Compute decisions but do not rename/remove files
   --help               Show help
 EOF
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       MAX_FILES="${2:-}"
       shift 2
       ;;
+    --since)
+      SINCE_MINUTES="${2:-}"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -72,6 +78,11 @@ done
 
 if ! [[ "$MAX_FILES" =~ ^[0-9]+$ ]]; then
   echo "--max-files must be an integer >= 0" >&2
+  exit 1
+fi
+
+if ! [[ "$SINCE_MINUTES" =~ ^[0-9]+$ ]]; then
+  echo "--since must be an integer >= 0" >&2
   exit 1
 fi
 
@@ -363,7 +374,11 @@ profile_allowed_keys_json() {
   printf '%s' "${PROFILE_KEYS_CACHE[$profile_id]}"
 }
 
-log "Start subtitle dedupe path_prefix=$PATH_PREFIX dry_run=$DRY_RUN max_files=$MAX_FILES"
+if [[ "$SINCE_MINUTES" -gt 0 ]]; then
+  log "Start subtitle dedupe path_prefix=$PATH_PREFIX dry_run=$DRY_RUN max_files=$MAX_FILES since=${SINCE_MINUTES}m"
+else
+  log "Start subtitle dedupe path_prefix=$PATH_PREFIX dry_run=$DRY_RUN max_files=$MAX_FILES since=all"
+fi
 load_language_map
 
 scanned=0
@@ -441,6 +456,27 @@ while IFS= read -r -d '' media; do
         removed_count=excluded.removed_count;
     "
   fi
-done < <(find "$PATH_PREFIX" -type f \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.avi' \) -print0)
+done < <(
+  if [[ "$SINCE_MINUTES" -gt 0 ]]; then
+    # Find directories with any recently modified media or subtitle files
+    mapfile -d '' -t recent_dirs < <(
+      find "$PATH_PREFIX" -type f \( \
+        -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.avi' \
+        -o -iname '*.srt' -o -iname '*.ass' -o -iname '*.ssa' -o -iname '*.vtt' \
+      \) -mmin "-${SINCE_MINUTES}" -printf '%h\0' | sort -uz
+    )
+    if [[ ${#recent_dirs[@]} -eq 0 ]]; then
+      # No recent changes — emit nothing so the while loop body never runs
+      true
+    else
+      # Scan only media files in those directories
+      for dir in "${recent_dirs[@]}"; do
+        find "$dir" -maxdepth 1 -type f \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.avi' \) -print0
+      done
+    fi
+  else
+    find "$PATH_PREFIX" -type f \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.avi' \) -print0
+  fi
+)
 
 log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed converted=$total_converted renamed=$total_renamed removed=$total_removed"
