@@ -3,7 +3,7 @@ set -euo pipefail
 
 DB="/opt/bazarr/data/db/bazarr.db"
 LOG="/config/berenstuff/automation/logs/sonarr_profile_extract_on_import.log"
-DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-https://discord.com/api/webhooks/1471677059360227478/REDACTED_WEBHOOK_TOKEN}"
+DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
 WRITES=0
 SKIPS=0

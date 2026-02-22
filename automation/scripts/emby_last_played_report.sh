@@ -11,6 +11,7 @@ JOBS=4
 REQUIRE_IDLE=1
 IDLE_RETRIES=10
 IDLE_RETRY_SLEEP=300
+SINCE_DAYS=0
 
 usage() {
   cat <<'EOF'
@@ -25,6 +26,7 @@ Options:
   --path-prefix PATH     Restrict to files under this prefix (default: /APPBOX_DATA/storage/media)
   --output-csv PATH      Output CSV path (default: /config/berenstuff/automation/logs/emby_last_played_report.csv)
   --exclude-never        Omit items never watched by any user
+  --since DAYS           Only include items watched in the last N days (0 = all, implies --exclude-never)
   --limit N              Emby page size per request (default: 500)
   --jobs N               Parallel user workers (default: 4)
   --allow-while-playing  Run even if Emby has active playback sessions
@@ -35,6 +37,7 @@ Options:
 Examples:
   EMBY_API_KEY=xxxxx emby_last_played_report.sh
   emby_last_played_report.sh --api-key xxxxx --path-prefix /APPBOX_DATA/storage/media
+  emby_last_played_report.sh --since 7   # Show only items watched in the last 7 days
 EOF
 }
 
@@ -134,6 +137,10 @@ while [[ $# -gt 0 ]]; do
       IDLE_RETRY_SLEEP="${2:-}"
       shift 2
       ;;
+    --since)
+      SINCE_DAYS="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -170,6 +177,15 @@ if ! [[ "$IDLE_RETRY_SLEEP" =~ ^[0-9]+$ ]] || [[ "$IDLE_RETRY_SLEEP" -le 0 ]]; t
   echo "--idle-retry-sleep must be a positive integer." >&2
   exit 1
 fi
+
+if ! [[ "$SINCE_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "--since must be a non-negative integer." >&2
+  exit 1
+fi
+
+LOCK_FILE="/tmp/emby_last_played_report.lock"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { echo "Another instance is already running"; exit 0; }
 
 EMBY_URL="${EMBY_URL%/}"
 mkdir -p "$(dirname "$OUTPUT_CSV")"
@@ -282,6 +298,13 @@ for item_id in "${!ITEM_PATH[@]}"; do
     status="never_watched"
   fi
 
+  # --since filter: skip never-watched items and items outside the window
+  if [[ "$SINCE_DAYS" -gt 0 ]]; then
+    if [[ "$status" == "never_watched" ]] || [[ "$days_since" -gt "$SINCE_DAYS" ]]; then
+      continue
+    fi
+  fi
+
   printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "$status" \
     "${days_since}" \
@@ -294,6 +317,8 @@ for item_id in "${!ITEM_PATH[@]}"; do
     "${ITEM_PATH[$item_id]}" \
     "$last_iso" >>"$tmp_tsv"
 done
+
+[[ -f "$OUTPUT_CSV" ]] && cp "$OUTPUT_CSV" "${OUTPUT_CSV}.prev"
 
 # Sort with never_watched first, then watched items by longest time since watched.
 {
@@ -322,3 +347,15 @@ echo "Report written: ${OUTPUT_CSV}"
 echo "Items in scope: ${total_items}"
 echo "Watched at least once: ${watched_items}"
 echo "Never watched: ${never_items}"
+
+if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+  discord_body="$(printf '[Emby Report] Weekly Last-Played Report\nItems: %s | Watched: %s | Never watched: %s\nReport: %s' \
+    "$total_items" "$watched_items" "$never_items" "$OUTPUT_CSV")"
+  discord_payload="$(python3 -c "import json, sys; print(json.dumps({'content': sys.stdin.read()}))" <<<"$discord_body")"
+  curl -fsS -X POST "$DISCORD_WEBHOOK_URL" \
+    -H "Content-Type: application/json" \
+    -d "$discord_payload" \
+    >/dev/null \
+    && echo "Discord notification sent." \
+    || echo "Discord notification failed (non-fatal)." >&2
+fi
