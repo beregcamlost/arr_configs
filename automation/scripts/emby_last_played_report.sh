@@ -349,13 +349,28 @@ echo "Watched at least once: ${watched_items}"
 echo "Never watched: ${never_items}"
 
 if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
-  discord_body="$(printf '[Emby Report] Weekly Last-Played Report\nItems: %s | Watched: %s | Never watched: %s\nReport: %s' \
-    "$total_items" "$watched_items" "$never_items" "$OUTPUT_CSV")"
-  discord_payload="$(python3 -c "import json, sys; print(json.dumps({'content': sys.stdin.read()}))" <<<"$discord_body")"
-  curl -fsS -X POST "$DISCORD_WEBHOOK_URL" \
+  discord_payload="$(jq -nc \
+    --arg total "$total_items" \
+    --arg watched "$watched_items" \
+    --arg never "$never_items" \
+    --arg report "$OUTPUT_CSV" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: "📺 Emby — Weekly Last-Played Report",
+      description: (
+        "📊 **Total items:** " + $total + "\n" +
+        "✅ **Watched:** " + $watched + "\n" +
+        "⏸️ **Never watched:** " + $never + "\n\n" +
+        "📁 `" + $report + "`"
+      ),
+      color: 10181046,
+      footer: {text: "Emby Last Played Report"},
+      timestamp: $ts
+    }]}')"
+  curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
     -H "Content-Type: application/json" \
     -d "$discord_payload" \
-    >/dev/null \
+    >/dev/null 2>&1 \
     && echo "Discord notification sent." \
     || echo "Discord notification failed (non-fatal)." >&2
 fi

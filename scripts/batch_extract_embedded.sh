@@ -275,21 +275,29 @@ process_file() {
 notify_discord() {
   local status="$1"
   local details="$2"
+  local color
 
   [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
 
+  if [[ $ERRORS -gt 0 ]]; then
+    color=15105570  # orange
+  else
+    color=3066993   # green
+  fi
+
   local payload
   payload="$(jq -nc \
-    --arg status "$status" \
-    --arg details "$details" \
-    '{
-      content: (
-        [
-          ("[Batch Extract] " + $status),
-          $details
-        ] | join("\n")
-      )
-    }')"
+    --arg title "📦 Batch Extract — $status" \
+    --arg desc "$details" \
+    --argjson color "$color" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: $title,
+      description: $desc,
+      color: $color,
+      footer: {text: "Batch Subtitle Extractor"},
+      timestamp: $ts
+    }]}')"
 
   curl -sS -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
@@ -385,7 +393,7 @@ main() {
 
   # Summary
   local summary
-  summary="Profiles: ${#profile_ids[@]} | Files scanned: $FILES_SCANNED | Writes: $WRITES | Skips: $SKIPS | Prunes: $PRUNES | Errors: $ERRORS"
+  summary="🏷️ **Profiles:** ${#profile_ids[@]} · 📂 **Files:** $FILES_SCANNED"$'\n'"✅ **Writes:** $WRITES · ⏭️ **Skips:** $SKIPS · 🗑️ **Prunes:** $PRUNES · ❌ **Errors:** $ERRORS"
   if [[ $DRY_RUN -eq 1 ]]; then
     summary="[DRY RUN] $summary"
   fi

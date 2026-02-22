@@ -206,7 +206,14 @@ notify_discord() {
   payload="$(jq -nc \
     --arg title "$title" \
     --arg body "$body" \
-    '{content: ([$title, "", $body] | join("\n"))}')"
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: $title,
+      description: $body,
+      color: 3066993,
+      footer: {text: "Bazarr Subtitle Recovery"},
+      timestamp: $ts
+    }]}')"
   curl -sS -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
@@ -700,16 +707,15 @@ log "Done scanned=$scanned handled=$handled bazarr_attempts=$bazarr_attempts tra
 # Discord summary notification (only if actions were taken)
 # ---------------------------------------------------------------------------
 if [[ $((bazarr_attempts + translations + arr_triggers)) -gt 0 ]]; then
-  discord_title="[Subtitle Recovery] Run Complete"
-  discord_body="Scanned: $scanned | Bazarr attempts: $bazarr_attempts | Translations: $translations | Arr triggers: $arr_triggers"
+  discord_title="🔄 Subtitle Recovery Complete"
+  discord_body="📊 **Scanned:** $scanned · 🎯 **Bazarr:** $bazarr_attempts · 🌐 **Translations:** $translations · 🔁 **Arr triggers:** $arr_triggers"
   if [[ "${#ACTION_DETAILS[@]}" -gt 0 ]]; then
     details_text=""
     for detail in "${ACTION_DETAILS[@]}"; do
-      details_text="${details_text}- ${detail}"$'\n'
+      details_text="${details_text}• ${detail}"$'\n'
     done
-    # Trim trailing newline
     details_text="${details_text%$'\n'}"
-    discord_body="${discord_body}"$'\n'"Details:"$'\n'"${details_text}"
+    discord_body="${discord_body}"$'\n\n'"📋 **Details:**"$'\n'"${details_text}"
   fi
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "[DRY-RUN] Would send Discord notification: $discord_title"

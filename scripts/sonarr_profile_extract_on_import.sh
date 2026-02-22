@@ -18,30 +18,40 @@ source "$(dirname "$0")/lib_subtitle_common.sh"
 notify_discord() {
   local status="$1"
   local details="$2"
-  local file_name payload
+  local file_name color emoji
 
   [ -z "${DISCORD_WEBHOOK_URL:-}" ] && return 0
 
-  file_name="$(basename "${EPISODE_PATH:-}")"
+  file_name="$(basename "${EPISODE_PATH:-unknown}")"
+
+  case "$status" in
+    SUCCESS) color=3066993;  emoji="✅" ;;  # green
+    SKIP)    color=15844367; emoji="⏭️" ;;  # yellow
+    *)       color=3447003;  emoji="ℹ️" ;;  # blue
+  esac
+
+  local payload
   payload="$(jq -nc \
-    --arg status "$status" \
+    --arg title "$emoji Subtitle Extract — Sonarr" \
+    --arg desc "$details" \
+    --argjson color "$color" \
     --arg event "${EVENT_TYPE:-unknown}" \
     --arg series_id "${SERIES_ID:-unknown}" \
     --arg profile_id "${PROFILE_ID:-unknown}" \
-    --arg file_name "${file_name:-n/a}" \
-    --arg details "$details" \
-    '{
-      content: (
-        [
-          ("[Bazarr Extract][Sonarr] " + $status),
-          ("Event: " + $event),
-          ("SeriesID: " + $series_id),
-          ("ProfileID: " + $profile_id),
-          ("File: " + $file_name),
-          $details
-        ] | join("\n")
-      )
-    }')"
+    --arg file_name "$file_name" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: $title,
+      description: $desc,
+      color: $color,
+      fields: [
+        {name: "📺 Series ID", value: $series_id, inline: true},
+        {name: "🏷️ Profile", value: $profile_id, inline: true},
+        {name: "📁 File", value: ("`" + $file_name + "`")}
+      ],
+      footer: {text: ("Event: " + $event)},
+      timestamp: $ts
+    }]}')"
 
   curl -sS -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
@@ -134,9 +144,9 @@ main() {
   done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
 
   if [ "$WRITES" -gt 0 ]; then
-    notify_discord "SUCCESS" "Extracted files: $WRITES (existing skipped: $SKIPS, duplicates pruned: $PRUNES)"
+    notify_discord "SUCCESS" "✅ **$WRITES** extracted · ⏭️ **$SKIPS** skipped · 🗑️ **$PRUNES** pruned"
   else
-    notify_discord "INFO" "No new files extracted (existing skipped: $SKIPS, duplicates pruned: $PRUNES)"
+    notify_discord "INFO" "No new extractions · ⏭️ **$SKIPS** skipped · 🗑️ **$PRUNES** pruned"
   fi
 
   log "Done"

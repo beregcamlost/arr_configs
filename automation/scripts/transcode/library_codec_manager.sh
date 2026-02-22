@@ -31,7 +31,7 @@ TARGET_SAMPLE_RATE=48000
 TARGET_AUDIO_BITRATE="192k"
 TARGET_CRF=19
 TARGET_PRESET="medium"
-DISCORD_WEBHOOK_AUDIT_DONE="${DISCORD_WEBHOOK_AUDIT_DONE:-https://discord.com/api/webhooks/1471699428581576747/REDACTED_WEBHOOK_TOKEN}"
+DISCORD_WEBHOOK_AUDIT_DONE="${DISCORD_WEBHOOK_AUDIT_DONE:-}"
 DISCORD_WEBHOOK_STATUS="${DISCORD_WEBHOOK_STATUS:-$DISCORD_WEBHOOK_AUDIT_DONE}"
 DEFAULT_TARGET_CONTAINER="mp4"
 MAX_ATTEMPTS_DEFAULT=30
@@ -97,25 +97,27 @@ notify_discord_audit_done() {
 
   local payload
   payload="$(jq -nc \
-    --arg p "$processed" \
+    --arg processed "$processed" \
     --arg ok "$probe_ok" \
-    --arg miss "$missing" \
+    --arg missing "$missing" \
     --arg fail "$probe_fail" \
     --arg elapsed "${elapsed}s" \
     --arg db "$DB_PATH" \
-    '{
-      content: (
-        [
-          "[Codec Manager] Audit complete",
-          ("Processed: " + $p),
-          ("Probe OK: " + $ok),
-          ("Missing: " + $miss),
-          ("Probe Fail: " + $fail),
-          ("Elapsed: " + $elapsed),
-          ("State DB: " + $db)
-        ] | join("\n")
-      )
-    }')"
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: "🔍 Codec Manager — Audit Complete",
+      description: (
+        "✅ **Probe OK:** " + $ok + " · ❓ **Missing:** " + $missing + " · ❌ **Probe Fail:** " + $fail
+      ),
+      color: 3066993,
+      fields: [
+        {name: "📊 Processed", value: $processed, inline: true},
+        {name: "⏱️ Elapsed", value: $elapsed, inline: true},
+        {name: "🗃️ State DB", value: ("`" + $db + "`")}
+      ],
+      footer: {text: "Codec Manager Audit"},
+      timestamp: $ts
+    }]}')"
 
   local resp_file err_file http_code resp_snippet err_snippet curl_rc
   resp_file="$(mktemp)"
@@ -182,26 +184,22 @@ notify_discord_daily_status() {
     --arg a24 "$attempt_limited_24h" \
     --arg rec24 "$recovered_24h" \
     --arg lr "$last_run" \
-    '{
-      content: (
-        [
-          "[Codec Manager] Daily status",
-          ("Time: " + $now),
-          ("State DB: " + $db),
-          ("Media tracked: " + $m),
-          ("Eligible in plan: " + $e),
-          ("Swapped total: " + $st),
-          ("Failed total: " + $ft),
-          ("Attempt limit reached: " + $at),
-          ("Running now: " + $r),
-          ("Swapped last 24h: " + $s24),
-          ("Failed last 24h: " + $f24),
-          ("Attempt limit reached last 24h: " + $a24),
-          ("Recovered stale last 24h: " + $rec24),
-          ("Last run: " + $lr)
-        ] | join("\n")
-      )
-    }')"
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: "📊 Codec Manager — Daily Status",
+      description: (
+        "🗃️ **Media tracked:** " + $m + " · 📋 **Eligible:** " + $e + "\n\n" +
+        "**All Time**\n" +
+        "✅ Swapped: " + $st + " · ❌ Failed: " + $ft + " · ⚠️ Attempt limited: " + $at + "\n\n" +
+        "**Last 24h**\n" +
+        "✅ Swapped: " + $s24 + " · ❌ Failed: " + $f24 + " · ⚠️ Attempt limited: " + $a24 + " · 🔧 Recovered: " + $rec24 + "\n\n" +
+        "🔄 **Running now:** " + $r + "\n" +
+        "📌 **Last run:** `" + $lr + "`"
+      ),
+      color: 3447003,
+      footer: {text: ("State DB: " + $db)},
+      timestamp: $ts
+    }]}')"
 
   local resp_file err_file http_code resp_snippet err_snippet curl_rc
   resp_file="$(mktemp)"
@@ -236,18 +234,19 @@ notify_discord_attempt_limit() {
     --arg attempts "$attempts" \
     --arg max "$max_attempts" \
     --arg db "$DB_PATH" \
-    '{
-      content: (
-        [
-          "[Codec Manager] Attempt limit reached",
-          ("Media ID: " + $media_id),
-          ("Attempts: " + $attempts + " (max=" + $max + ")"),
-          ("Path: " + $path),
-          ("State DB: " + $db),
-          "Action: Skipped for now; other files continue."
-        ] | join("\n")
-      )
-    }')"
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: "⚠️ Codec Manager — Attempt Limit Reached",
+      description: (
+        "🆔 **Media ID:** " + $media_id + "\n" +
+        "🔄 **Attempts:** " + $attempts + " / " + $max + "\n" +
+        "📁 `" + $path + "`\n\n" +
+        "_Skipped for now — other files continue processing._"
+      ),
+      color: 15105570,
+      footer: {text: "Codec Manager"},
+      timestamp: $ts
+    }]}')"
 
   curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
     -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_STATUS" >/dev/null 2>&1 || true

@@ -168,18 +168,40 @@ cleanup_transmission() {
 }
 
 send_discord_summary() {
-  [[ -z "$DISCORD_WEBHOOK_URL" ]] && return 0
-  local msg
-  msg="**arr_cleanup_importblocked** summary"$'\n'
-  msg+="Candidates found: ${total_candidates}"$'\n'
-  msg+="Queue entries removed: ${total_removed}"$'\n'
-  msg+="Transmission torrents removed: ${transmission_removed}"
+  [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
+
+  local color title desc
   if [[ "$DRY_RUN" == true ]]; then
-    msg+=$'\n'"_(dry-run — no changes made)_"
+    color=15844367  # yellow
+    title="🧹 Arr Cleanup — Dry Run"
+  else
+    color=3066993   # green
+    title="🧹 Arr Cleanup — Complete"
   fi
+
+  desc="📊 **Candidates:** $total_candidates"$'\n'
+  desc+="🗑️ **Queue removed:** $total_removed"$'\n'
+  desc+="📡 **Transmission removed:** $transmission_removed"
+  if [[ "$DRY_RUN" == true ]]; then
+    desc+=$'\n\n'"_⚠️ Dry run — no changes made_"
+  fi
+
+  local payload
+  payload="$(jq -nc \
+    --arg title "$title" \
+    --arg desc "$desc" \
+    --argjson color "$color" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: $title,
+      description: $desc,
+      color: $color,
+      footer: {text: "Import Blocked Cleanup"},
+      timestamp: $ts
+    }]}')"
+
   curl -sS -X POST -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg content "$msg" '{content:$content}')" \
-    "$DISCORD_WEBHOOK_URL" >/dev/null || true
+    -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null || true
 }
 
 log "arr_cleanup_importblocked start${DRY_RUN:+ [dry-run]}"
