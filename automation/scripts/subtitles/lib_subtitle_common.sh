@@ -104,6 +104,133 @@ convert_subtitle_to_srt() {
 }
 
 # ---------------------------------------------------------------------------
+# SRT watermark stripping (YIFY/YTS/opensubtitles ads + <font> tags)
+# ---------------------------------------------------------------------------
+
+# Strip watermark cue blocks and <font> HTML tags from an SRT file.
+# A cue block is removed if ALL its non-empty text lines (after HTML tag
+# removal) match known watermark patterns.
+# Remaining cues are renumbered sequentially.
+#
+# Returns: 0 = modified, 1 = no changes, 2 = file deleted (entirely watermarks)
+strip_srt_watermarks() {
+  local srt_file="$1"
+  [[ -f "$srt_file" ]] || return 1
+
+  local tmp
+  tmp="$(mktemp --suffix=.srt)"
+
+  awk '
+    BEGIN {
+      cue_num = 0; in_cue = 0; is_watermark = 1
+      text_lines = 0; had_changes = 0; kept_cues = 0
+      cue_idx = ""; cue_ts = ""; cue_text = ""
+    }
+
+    function is_wm_line(line,   clean) {
+      # Strip all HTML tags for matching
+      clean = line
+      gsub(/<[^>]*>/, "", clean)
+      # Trim whitespace
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", clean)
+      if (clean == "") return 1  # empty after tag strip = watermark
+      # Case-insensitive match
+      clean_lower = tolower(clean)
+      if (clean_lower ~ /yts\.(lt|mx|am|ag)/) return 1
+      if (clean_lower ~ /yify/) return 1
+      if (clean_lower ~ /opensubtitles\.org/) return 1
+      if (clean_lower ~ /^downloaded from/) return 1
+      if (clean_lower ~ /official.*movies.*site/) return 1
+      if (clean_lower ~ /\[?[[:space:]]*yts/) return 1
+      return 0
+    }
+
+    function strip_font_tags(line) {
+      gsub(/<\/?font[^>]*>/, "", line)
+      return line
+    }
+
+    function flush_cue() {
+      if (cue_ts == "") return
+      if (is_watermark && text_lines > 0) {
+        # Entire cue is watermark — drop it
+        had_changes = 1
+        cue_ts = ""; cue_text = ""; text_lines = 0; is_watermark = 1
+        return
+      }
+      # Strip <font> tags from kept cue text
+      cleaned = strip_font_tags(cue_text)
+      if (cleaned != cue_text) had_changes = 1
+      kept_cues++
+      printf "%d\n%s\n%s\n\n", kept_cues, cue_ts, cleaned
+      cue_ts = ""; cue_text = ""; text_lines = 0; is_watermark = 1
+    }
+
+    # Cue index line (just a number)
+    /^[0-9]+[[:space:]]*$/ && !in_cue {
+      flush_cue()
+      cue_idx = $0
+      in_cue = 1
+      next
+    }
+
+    # Timestamp line
+    in_cue && /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9],[0-9][0-9][0-9][[:space:]]+-->[[:space:]]+[0-9][0-9]:[0-9][0-9]:[0-9][0-9],[0-9][0-9][0-9]/ {
+      cue_ts = $0
+      in_cue = 0
+      next
+    }
+
+    # Blank line = end of cue block
+    /^[[:space:]]*$/ {
+      if (cue_ts != "") {
+        flush_cue()
+      }
+      in_cue = 0
+      next
+    }
+
+    # Text line within a cue
+    cue_ts != "" {
+      text_lines++
+      if (!is_wm_line($0)) is_watermark = 0
+      if (cue_text == "")
+        cue_text = $0
+      else
+        cue_text = cue_text "\n" $0
+      next
+    }
+
+    # Non-cue line (BOM, etc) — skip
+  END {
+    flush_cue()
+    if (!had_changes) exit 10
+    if (kept_cues == 0) exit 20
+  }
+  ' "$srt_file" > "$tmp"
+
+  local rc=$?
+  if [[ $rc -eq 10 ]]; then
+    # No changes needed
+    rm -f "$tmp"
+    return 1
+  elif [[ $rc -eq 20 ]]; then
+    # File was entirely watermarks — delete it
+    rm -f "$tmp" "$srt_file"
+    log "DELETED all-watermark subtitle: $srt_file"
+    return 2
+  fi
+
+  # Modified — replace original atomically, preserving permissions
+  local orig_mode
+  orig_mode="$(stat -c '%a' "$srt_file" 2>/dev/null || echo 644)"
+  mv -f "$tmp" "$srt_file"
+  chmod "$orig_mode" "$srt_file"
+  log "STRIPPED watermarks/font-tags: ${srt_file##*/}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Subtitle quality scoring (SRT cue/coverage analysis)
 # ---------------------------------------------------------------------------
 
@@ -404,4 +531,32 @@ extract_target() {
   if [ "${#existing[@]}" -gt 0 ]; then
     prune_candidates_keep "$best_existing" "${existing[@]}"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Bazarr scan-disk API helpers
+# ---------------------------------------------------------------------------
+
+# Trigger Bazarr to rescan subtitles on disk for a movie.
+# $1=radarrId  $2=bazarr_url  $3=api_key
+bazarr_scan_disk_movie() {
+  local radarr_id="$1" bazarr_url="$2" api_key="$3"
+  local http_code
+  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+    -H "X-API-KEY: ${api_key}" \
+    "${bazarr_url}/api/movies?radarrid=${radarr_id}&action=scan-disk")"
+  log "BAZARR_RESCAN movie id=${radarr_id} http=${http_code}"
+  [[ "$http_code" == "204" || "$http_code" == "200" ]]
+}
+
+# Trigger Bazarr to rescan subtitles on disk for a series.
+# $1=sonarrSeriesId  $2=bazarr_url  $3=api_key
+bazarr_scan_disk_series() {
+  local sonarr_id="$1" bazarr_url="$2" api_key="$3"
+  local http_code
+  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+    -H "X-API-KEY: ${api_key}" \
+    "${bazarr_url}/api/series?seriesid=${sonarr_id}&action=scan-disk")"
+  log "BAZARR_RESCAN series id=${sonarr_id} http=${http_code}"
+  [[ "$http_code" == "204" || "$http_code" == "200" ]]
 }

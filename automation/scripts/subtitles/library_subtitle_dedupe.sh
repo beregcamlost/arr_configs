@@ -6,6 +6,8 @@ STATE_DIR="${STATE_DIR:-/APPBOX_DATA/storage/.subtitle-dedupe-state}"
 DB_PATH="${DB_PATH:-$STATE_DIR/subtitle_dedupe.db}"
 LOG_PATH="${LOG_PATH:-/config/berenstuff/automation/logs/library_subtitle_dedupe.log}"
 BAZARR_DB="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
+BAZARR_URL="${BAZARR_URL:-http://127.0.0.1:6767/bazarr}"
+BAZARR_API_KEY="${BAZARR_API_KEY:-}"
 MAX_FILES=0
 DRY_RUN=0
 SINCE_MINUTES=0
@@ -23,6 +25,8 @@ Options:
   --db-path PATH       SQLite db path (default: <state-dir>/subtitle_dedupe.db)
   --log PATH           Log file path (default: /config/berenstuff/automation/logs/library_subtitle_dedupe.log)
   --bazarr-db PATH     Bazarr SQLite db path (default: /opt/bazarr/data/db/bazarr.db)
+  --bazarr-url URL     Bazarr API base URL (default: http://127.0.0.1:6767/bazarr)
+  --bazarr-api-key KEY Bazarr API key for scan-disk rescans (default: from env BAZARR_API_KEY)
   --max-files N        Process at most N video files this run (default: 0 = all)
   --since MINUTES      Only scan media files modified in the last N minutes (default: 0 = all)
   --dry-run            Compute decisions but do not rename/remove files
@@ -50,6 +54,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bazarr-db)
       BAZARR_DB="${2:-}"
+      shift 2
+      ;;
+    --bazarr-url)
+      BAZARR_URL="${2:-}"
+      shift 2
+      ;;
+    --bazarr-api-key)
+      BAZARR_API_KEY="${2:-}"
       shift 2
       ;;
     --max-files)
@@ -186,16 +198,26 @@ subtitle_signature() {
 dedupe_video_subtitles() {
   local media="$1"
   local stem media_seconds
-  local converted=0 renamed=0 removed=0
+  local converted=0 renamed=0 removed=0 stripped=0
   local files=()
   local key f score size
-  local profile_id allowed_json
+  local media_info media_type media_id profile_id allowed_json
   local -a allowed_keys=()
   declare -A allowed_map=()
 
   stem="${media%.*}"
   media_seconds="$(media_duration_seconds "$media")"
   [[ -z "$media_seconds" ]] && media_seconds=0
+
+  # Resolve media info (type|media_id|profile_id) for profile filtering + Bazarr rescan
+  media_info="$(resolve_media_info "$media")"
+  if [[ -n "$media_info" ]]; then
+    IFS='|' read -r media_type media_id profile_id <<<"$media_info"
+  else
+    media_type=""
+    media_id=""
+    profile_id=""
+  fi
 
   # --- Phase 1: Convert non-SRT text subtitles to SRT ---
   local convert_files=()
@@ -213,13 +235,30 @@ dedupe_video_subtitles() {
     fi
   done
 
+  # --- Phase 1.5: Strip watermarks and <font> tags from SRT files ---
+  local strip_rc
+  shopt -s nullglob
+  local srt_files=("${stem}"*.srt)
+  shopt -u nullglob
+  for f in "${srt_files[@]}"; do
+    [[ -f "$f" ]] || continue
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+      strip_rc=0
+      strip_srt_watermarks "$f" || strip_rc=$?
+      if [[ $strip_rc -eq 0 ]]; then
+        stripped=$((stripped + 1))
+      elif [[ $strip_rc -eq 2 ]]; then
+        removed=$((removed + 1))
+      fi
+    fi
+  done
+
   # --- Phase 2: Deduplicate .srt files ---
   shopt -s nullglob
   files=("${stem}"*.srt)
   shopt -u nullglob
-  [[ "${#files[@]}" -eq 0 ]] && { printf '%s|0|0|no_subtitles' "$converted"; return 0; }
+  [[ "${#files[@]}" -eq 0 ]] && { printf '%s|0|%s|%s|%s|%s|no_subtitles' "$converted" "$removed" "$stripped" "$media_type" "$media_id"; return 0; }
 
-  profile_id="$(resolve_profile_id_for_media "$media")"
   if [[ -n "$profile_id" ]]; then
     allowed_json="$(profile_allowed_keys_json "$profile_id")"
     if [[ -n "$allowed_json" ]]; then
@@ -244,7 +283,7 @@ dedupe_video_subtitles() {
     shopt -s nullglob
     files=("${stem}"*.srt)
     shopt -u nullglob
-    [[ "${#files[@]}" -eq 0 ]] && { printf '%s|%s|%s|profile_filtered' "$converted" "$renamed" "$removed"; return 0; }
+    [[ "${#files[@]}" -eq 0 ]] && { printf '%s|%s|%s|%s|%s|%s|profile_filtered' "$converted" "$renamed" "$removed" "$stripped" "$media_type" "$media_id"; return 0; }
   fi
 
   declare -A best_file best_score best_size
@@ -287,7 +326,7 @@ dedupe_video_subtitles() {
     done
   done
 
-  printf '%s|%s|%s|done' "$converted" "$renamed" "$removed"
+  printf '%s|%s|%s|%s|%s|%s|done' "$converted" "$renamed" "$removed" "$stripped" "$media_type" "$media_id"
 }
 
 normalize_lang_code() {
@@ -323,20 +362,22 @@ load_language_map() {
   return 0
 }
 
-resolve_profile_id_for_media() {
+# Returns type|media_id|profile_id for Bazarr rescan + profile filtering.
+# type = movie|episode, media_id = radarrId or sonarrSeriesId
+resolve_media_info() {
   local media="$1"
   local esc out
   [[ -f "$BAZARR_DB" ]] || { printf ''; return 0; }
   esc="$(sql_escape "$media")"
-  out="$(sqlite3 "$BAZARR_DB" "
-    SELECT profileId FROM table_movies WHERE path='$esc' LIMIT 1;
+  out="$(sqlite3 -separator '|' "$BAZARR_DB" "
+    SELECT 'movie', radarrId, profileId FROM table_movies WHERE path='$esc' LIMIT 1;
   " 2>/dev/null | head -n1 || true)"
   if [[ -n "$out" ]]; then
     printf '%s' "$out"
     return 0
   fi
-  out="$(sqlite3 "$BAZARR_DB" "
-    SELECT s.profileId
+  out="$(sqlite3 -separator '|' "$BAZARR_DB" "
+    SELECT 'episode', s.sonarrSeriesId, s.profileId
     FROM table_episodes e
     JOIN table_shows s ON s.sonarrSeriesId=e.sonarrSeriesId
     WHERE e.path='$esc'
@@ -388,6 +429,9 @@ changed=0
 total_converted=0
 total_renamed=0
 total_removed=0
+total_stripped=0
+declare -A rescan_movies=()
+declare -A rescan_series=()
 
 while IFS= read -r -d '' media; do
   scanned=$((scanned + 1))
@@ -420,15 +464,25 @@ while IFS= read -r -d '' media; do
   fi
 
   processed=$((processed + 1))
-  IFS='|' read -r converted renamed removed status <<<"$(dedupe_video_subtitles "$media")"
+  IFS='|' read -r converted renamed removed stripped m_type m_id status <<<"$(dedupe_video_subtitles "$media")"
   sig_after="$(subtitle_signature "$stem")"
 
-  if [[ "$converted" -gt 0 || "$renamed" -gt 0 || "$removed" -gt 0 ]]; then
+  if [[ "$converted" -gt 0 || "$renamed" -gt 0 || "$removed" -gt 0 || "$stripped" -gt 0 ]]; then
     changed=$((changed + 1))
     total_converted=$((total_converted + converted))
     total_renamed=$((total_renamed + renamed))
     total_removed=$((total_removed + removed))
-    log "CLEANED media=$(basename "$media") converted=$converted renamed=$renamed removed=$removed"
+    total_stripped=$((total_stripped + stripped))
+    log "CLEANED media=$(basename "$media") converted=$converted renamed=$renamed removed=$removed stripped=$stripped"
+  fi
+
+  # Track media IDs that need Bazarr rescan (when subs were removed)
+  if [[ "$removed" -gt 0 && -n "$m_id" ]]; then
+    if [[ "$m_type" == "movie" ]]; then
+      rescan_movies["$m_id"]=1
+    elif [[ "$m_type" == "episode" ]]; then
+      rescan_series["$m_id"]=1
+    fi
   fi
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
@@ -479,4 +533,19 @@ done < <(
   fi
 )
 
-log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed converted=$total_converted renamed=$total_renamed removed=$total_removed"
+# --- Bazarr rescan: notify Bazarr to refresh subtitle state on disk ---
+rescan_count=0
+if [[ "$DRY_RUN" -eq 0 && -n "$BAZARR_API_KEY" ]]; then
+  for mid in "${!rescan_movies[@]}"; do
+    bazarr_scan_disk_movie "$mid" "$BAZARR_URL" "$BAZARR_API_KEY" || true
+    rescan_count=$((rescan_count + 1))
+  done
+  for sid in "${!rescan_series[@]}"; do
+    bazarr_scan_disk_series "$sid" "$BAZARR_URL" "$BAZARR_API_KEY" || true
+    rescan_count=$((rescan_count + 1))
+  done
+elif [[ "$DRY_RUN" -eq 0 && -z "$BAZARR_API_KEY" && ( "${#rescan_movies[@]}" -gt 0 || "${#rescan_series[@]}" -gt 0 ) ]]; then
+  log "SKIP Bazarr rescan: BAZARR_API_KEY not set (${#rescan_movies[@]} movies, ${#rescan_series[@]} series pending)"
+fi
+
+log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed converted=$total_converted renamed=$total_renamed removed=$total_removed stripped=$total_stripped rescans=$rescan_count"
