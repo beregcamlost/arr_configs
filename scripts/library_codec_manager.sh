@@ -545,8 +545,10 @@ fps_to_float() {
 insert_probe_streams_from_json() {
   local media_id="$1" json_file="$2"
 
-  # Single jq call extracts all stream fields as TSV — eliminates ~15 jq forks per stream.
+  # Single jq call extracts all stream fields — eliminates ~15 jq forks per stream.
   # HDR detection and fps calculation are done inside jq to avoid any extra subprocess calls.
+  # Uses pipe-delimited output (not @tsv) because bash read with IFS=$'\t' collapses
+  # consecutive tabs, dropping empty fields like pix_fmt on audio/subtitle streams.
   jq -r '.streams[]? | [
     (.index // 0),
     ((.codec_type // "") | ascii_downcase),
@@ -570,7 +572,7 @@ insert_probe_streams_from_json() {
       ((.color_primaries // "") | ascii_downcase) as $cp |
       if $ct == "smpte2084" or $ct == "arib-std-b67" or $cp == "bt2020" then 1 else 0 end
     )
-  ] | @tsv' "$json_file" | while IFS=$'\t' read -r idx stype codec profile pix_fmt width height fps channels sample_rate lang forced dflag hdr; do
+  ] | join("|")' "$json_file" | while IFS='|' read -r idx stype codec profile pix_fmt width height fps channels sample_rate lang forced dflag hdr; do
     [[ -z "$idx" ]] && continue
     sqlite3 "$DB_PATH" <<SQL
 INSERT INTO probe_streams(media_id,stream_index,stream_type,codec,profile,pix_fmt,width,height,fps,channels,sample_rate,language,forced,default_flag,is_hdr)
