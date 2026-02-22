@@ -1,0 +1,15 @@
+# Logs
+automation/logs/*.log
+scripts/*.log
+
+# Backups (large, local-only)
+backups/
+
+# Symlinks to external services
+apps/
+
+# Editor/OS
+*.swp
+*.swo
+*~
+.DS_Store
