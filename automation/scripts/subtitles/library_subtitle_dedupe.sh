@@ -156,7 +156,7 @@ subtitle_signature() {
   local stem="$1"
   local files=()
   shopt -s nullglob
-  files=("${stem}"*.srt)
+  files=("${stem}"*.srt "${stem}"*.ass "${stem}"*.ssa "${stem}"*.vtt)
   shopt -u nullglob
 
   if [[ "${#files[@]}" -eq 0 ]]; then
@@ -175,7 +175,7 @@ subtitle_signature() {
 dedupe_video_subtitles() {
   local media="$1"
   local stem media_seconds
-  local renamed=0 removed=0
+  local converted=0 renamed=0 removed=0
   local files=()
   local key f score size
   local profile_id allowed_json
@@ -186,10 +186,27 @@ dedupe_video_subtitles() {
   media_seconds="$(media_duration_seconds "$media")"
   [[ -z "$media_seconds" ]] && media_seconds=0
 
+  # --- Phase 1: Convert non-SRT text subtitles to SRT ---
+  local convert_files=()
+  shopt -s nullglob
+  convert_files=("${stem}"*.ass "${stem}"*.ssa "${stem}"*.vtt)
+  shopt -u nullglob
+
+  for f in "${convert_files[@]}"; do
+    [[ -f "$f" ]] || continue
+    if convert_subtitle_to_srt "$f"; then
+      if [[ "$DRY_RUN" -eq 0 ]]; then
+        rm -f -- "$f"
+      fi
+      converted=$((converted + 1))
+    fi
+  done
+
+  # --- Phase 2: Deduplicate .srt files ---
   shopt -s nullglob
   files=("${stem}"*.srt)
   shopt -u nullglob
-  [[ "${#files[@]}" -eq 0 ]] && { printf '0|0|no_subtitles'; return 0; }
+  [[ "${#files[@]}" -eq 0 ]] && { printf '%s|0|0|no_subtitles' "$converted"; return 0; }
 
   profile_id="$(resolve_profile_id_for_media "$media")"
   if [[ -n "$profile_id" ]]; then
@@ -216,7 +233,7 @@ dedupe_video_subtitles() {
     shopt -s nullglob
     files=("${stem}"*.srt)
     shopt -u nullglob
-    [[ "${#files[@]}" -eq 0 ]] && { printf '%s|%s|profile_filtered' "$renamed" "$removed"; return 0; }
+    [[ "${#files[@]}" -eq 0 ]] && { printf '%s|%s|%s|profile_filtered' "$converted" "$renamed" "$removed"; return 0; }
   fi
 
   declare -A best_file best_score best_size
@@ -259,7 +276,7 @@ dedupe_video_subtitles() {
     done
   done
 
-  printf '%s|%s|done' "$renamed" "$removed"
+  printf '%s|%s|%s|done' "$converted" "$renamed" "$removed"
 }
 
 normalize_lang_code() {
@@ -353,6 +370,7 @@ scanned=0
 processed=0
 skipped_unchanged=0
 changed=0
+total_converted=0
 total_renamed=0
 total_removed=0
 
@@ -387,14 +405,15 @@ while IFS= read -r -d '' media; do
   fi
 
   processed=$((processed + 1))
-  IFS='|' read -r renamed removed status <<<"$(dedupe_video_subtitles "$media")"
+  IFS='|' read -r converted renamed removed status <<<"$(dedupe_video_subtitles "$media")"
   sig_after="$(subtitle_signature "$stem")"
 
-  if [[ "$renamed" -gt 0 || "$removed" -gt 0 ]]; then
+  if [[ "$converted" -gt 0 || "$renamed" -gt 0 || "$removed" -gt 0 ]]; then
     changed=$((changed + 1))
+    total_converted=$((total_converted + converted))
     total_renamed=$((total_renamed + renamed))
     total_removed=$((total_removed + removed))
-    log "CLEANED media=$(basename "$media") renamed=$renamed removed=$removed"
+    log "CLEANED media=$(basename "$media") converted=$converted renamed=$renamed removed=$removed"
   fi
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
@@ -424,4 +443,4 @@ while IFS= read -r -d '' media; do
   fi
 done < <(find "$PATH_PREFIX" -type f \( -iname '*.mkv' -o -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.avi' \) -print0)
 
-log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed renamed=$total_renamed removed=$total_removed"
+log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed converted=$total_converted renamed=$total_renamed removed=$total_removed"

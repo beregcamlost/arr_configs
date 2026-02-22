@@ -17,6 +17,11 @@
 
 : "${DB:=/opt/bazarr/data/db/bazarr.db}"
 
+# Subtitle extensions that can be converted to SRT (text-based formats)
+CONVERTIBLE_SUB_EXTS="ass ssa vtt"
+# All subtitle extensions we care about (convertible + srt)
+ALL_TEXT_SUB_EXTS="srt ass ssa vtt"
+
 # ---------------------------------------------------------------------------
 # Logging — writes to $LOG if set, otherwise to stderr
 # ---------------------------------------------------------------------------
@@ -50,6 +55,52 @@ file_size_bytes() {
 media_duration_seconds() {
   local file="$1"
   ffprobe -v error -show_entries format=duration -of csv=p=0 "$file" 2>/dev/null | awk '{printf("%d\n",$1+0)}'
+}
+
+# ---------------------------------------------------------------------------
+# Subtitle format conversion (non-SRT text -> SRT via ffmpeg)
+# ---------------------------------------------------------------------------
+
+# Convert a non-SRT text subtitle to SRT using ffmpeg.
+# Returns 0 on success, 1 on failure.
+# On success, the .srt file exists and caller should remove the original.
+convert_subtitle_to_srt() {
+  local src="$1"
+  local ext="${src##*.}"
+  local base="${src%.*}"
+  local dest="${base}.srt"
+
+  # Skip if already SRT
+  [[ "${ext,,}" == "srt" ]] && return 1
+
+  # Only convert text-based formats
+  case "${ext,,}" in
+    ass|ssa|vtt) ;;
+    *) return 1 ;;
+  esac
+
+  # Don't overwrite existing SRT
+  if [[ -f "$dest" ]]; then
+    log "SKIP convert $src -> .srt already exists"
+    return 1
+  fi
+
+  # Convert
+  if ffmpeg -y -loglevel error -i "$src" "$dest" 2>/dev/null; then
+    # Verify output is non-empty
+    if [[ -s "$dest" ]]; then
+      log "CONVERTED ${src##*/} -> ${dest##*/}"
+      return 0
+    else
+      rm -f "$dest"
+      log "WARN convert produced empty output: ${src##*/}"
+      return 1
+    fi
+  else
+    rm -f "$dest" 2>/dev/null
+    log "WARN convert failed: ${src##*/}"
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
