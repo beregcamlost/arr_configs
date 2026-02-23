@@ -510,6 +510,143 @@ trigger_arr_search_movie() {
     "$RADARR_URL/api/v3/command?apikey=$RADARR_KEY"
 }
 
+# ---------------------------------------------------------------------------
+# Post-regrab import verification
+# When Sonarr/Radarr re-grabs a torrent already in the download client (same
+# hash), the download is instantly 100% but Sonarr/Radarr won't process the
+# import event. These helpers wait briefly, then force a ManualImport if the
+# file hasn't been imported but the search completed.
+# ---------------------------------------------------------------------------
+verify_and_force_import_episode() {
+  local episode_id="$1"
+  local wait_secs=30 check_interval=10 elapsed=0
+  # Wait for Sonarr to process the search grab
+  while [[ "$elapsed" -lt "$wait_secs" ]]; do
+    sleep "$check_interval"
+    elapsed=$((elapsed + check_interval))
+    local has_file
+    has_file="$(curl -sS "$SONARR_URL/api/v3/episode/$episode_id?apikey=$SONARR_KEY" 2>/dev/null | jq -r '.hasFile // false')"
+    if [[ "$has_file" == "true" ]]; then
+      log "REGRAB_IMPORT_OK type=episode id=$episode_id (imported within ${elapsed}s)"
+      return 0
+    fi
+  done
+  # File not imported — check if it's in the queue (still downloading)
+  local in_queue
+  in_queue="$(curl -sS "$SONARR_URL/api/v3/queue?page=1&pageSize=200&apikey=$SONARR_KEY" 2>/dev/null \
+    | jq -r "[.records[] | select(.episodeId == $episode_id)] | length" 2>/dev/null || echo 0)"
+  if [[ "$in_queue" -gt 0 ]]; then
+    log "REGRAB_IMPORTING type=episode id=$episode_id (in download queue, will import on completion)"
+    return 0
+  fi
+  # Not in queue and not imported — likely the same-torrent-hash issue.
+  # Use remote path mapping to find the download directory.
+  local series_id mi_json mi_path mi_quality mi_langs mi_group mi_release_type
+  series_id="$(curl -sS "$SONARR_URL/api/v3/episode/$episode_id?apikey=$SONARR_KEY" 2>/dev/null | jq -r '.seriesId')"
+  local dl_local_path
+  dl_local_path="$(curl -sS "$SONARR_URL/api/v3/remotepathmapping?apikey=$SONARR_KEY" 2>/dev/null \
+    | jq -r '.[0].localPath // empty')"
+  if [[ -n "$dl_local_path" ]]; then
+    mi_json="$(curl -sS "$SONARR_URL/api/v3/manualimport?folder=${dl_local_path}&filterExistingFiles=false&seriesId=$series_id&apikey=$SONARR_KEY" 2>/dev/null \
+      | jq -c "[.[] | select(.episodes[]?.id == $episode_id)] | .[0] // empty" 2>/dev/null)"
+  fi
+  if [[ -z "$mi_json" || "$mi_json" == "null" ]]; then
+    log "REGRAB_IMPORT_MISS type=episode id=$episode_id reason=no_file_in_download_dir"
+    return 0
+  fi
+  # Extract fields for ManualImport command
+  mi_path="$(printf '%s' "$mi_json" | jq -r '.path')"
+  mi_quality="$(printf '%s' "$mi_json" | jq -c '.quality')"
+  mi_langs="$(printf '%s' "$mi_json" | jq -c '.languages')"
+  mi_group="$(printf '%s' "$mi_json" | jq -r '.releaseGroup // ""')"
+  mi_release_type="$(printf '%s' "$mi_json" | jq -r '.releaseType // "singleEpisode"')"
+  local import_http
+  import_http="$(curl -sS -o "$TMPDIR_RECOVERY/sonarr_manualimport.out" -w "%{http_code}" \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+      --arg path "$mi_path" \
+      --argjson sid "$series_id" \
+      --argjson eids "[$episode_id]" \
+      --argjson quality "$mi_quality" \
+      --argjson langs "$mi_langs" \
+      --arg group "$mi_group" \
+      --arg rtype "$mi_release_type" \
+      '{name:"ManualImport",importMode:"auto",files:[{path:$path,seriesId:$sid,episodeIds:$eids,quality:$quality,languages:$langs,releaseGroup:$group,releaseType:$rtype,indexerFlags:0}]}')" \
+    "$SONARR_URL/api/v3/command?apikey=$SONARR_KEY")"
+  log "REGRAB_FORCE_IMPORT type=episode id=$episode_id path=$mi_path http=$import_http"
+  add_action "FORCE_IMPORT episode $episode_id http=$import_http"
+  # Brief wait and final check
+  sleep 15
+  local final_check
+  final_check="$(curl -sS "$SONARR_URL/api/v3/episode/$episode_id?apikey=$SONARR_KEY" 2>/dev/null | jq -r '.hasFile // false')"
+  if [[ "$final_check" == "true" ]]; then
+    log "REGRAB_IMPORT_OK type=episode id=$episode_id (force-imported)"
+  else
+    log "REGRAB_IMPORT_PENDING type=episode id=$episode_id (import queued, will complete soon)"
+  fi
+}
+
+verify_and_force_import_movie() {
+  local movie_id="$1"
+  local wait_secs=30 check_interval=10 elapsed=0
+  while [[ "$elapsed" -lt "$wait_secs" ]]; do
+    sleep "$check_interval"
+    elapsed=$((elapsed + check_interval))
+    local has_file
+    has_file="$(curl -sS "$RADARR_URL/api/v3/movie/$movie_id?apikey=$RADARR_KEY" 2>/dev/null | jq -r '.hasFile // false')"
+    if [[ "$has_file" == "true" ]]; then
+      log "REGRAB_IMPORT_OK type=movie id=$movie_id (imported within ${elapsed}s)"
+      return 0
+    fi
+  done
+  local in_queue
+  in_queue="$(curl -sS "$RADARR_URL/api/v3/queue?page=1&pageSize=200&apikey=$RADARR_KEY" 2>/dev/null \
+    | jq -r "[.records[] | select(.movieId == $movie_id)] | length" 2>/dev/null || echo 0)"
+  if [[ "$in_queue" -gt 0 ]]; then
+    log "REGRAB_IMPORTING type=movie id=$movie_id (in download queue, will import on completion)"
+    return 0
+  fi
+  local mi_json mi_path mi_quality mi_langs mi_group
+  local dl_local_path
+  dl_local_path="$(curl -sS "$RADARR_URL/api/v3/remotepathmapping?apikey=$RADARR_KEY" 2>/dev/null \
+    | jq -r '.[0].localPath // empty')"
+  if [[ -n "$dl_local_path" ]]; then
+    mi_json="$(curl -sS "$RADARR_URL/api/v3/manualimport?folder=${dl_local_path}&filterExistingFiles=false&movieId=$movie_id&apikey=$RADARR_KEY" 2>/dev/null \
+      | jq -c "[.[] | select(.movie.id == $movie_id)] | .[0] // empty" 2>/dev/null)"
+  fi
+  if [[ -z "$mi_json" || "$mi_json" == "null" ]]; then
+    log "REGRAB_IMPORT_MISS type=movie id=$movie_id reason=no_file_in_download_dir"
+    return 0
+  fi
+  mi_path="$(printf '%s' "$mi_json" | jq -r '.path')"
+  mi_quality="$(printf '%s' "$mi_json" | jq -c '.quality')"
+  mi_langs="$(printf '%s' "$mi_json" | jq -c '.languages')"
+  mi_group="$(printf '%s' "$mi_json" | jq -r '.releaseGroup // ""')"
+  local import_http
+  import_http="$(curl -sS -o "$TMPDIR_RECOVERY/radarr_manualimport.out" -w "%{http_code}" \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+      --arg path "$mi_path" \
+      --argjson mid "$movie_id" \
+      --argjson quality "$mi_quality" \
+      --argjson langs "$mi_langs" \
+      --arg group "$mi_group" \
+      '{name:"ManualImport",importMode:"auto",files:[{path:$path,movieId:$mid,quality:$quality,languages:$langs,releaseGroup:$group,indexerFlags:0}]}')" \
+    "$RADARR_URL/api/v3/command?apikey=$RADARR_KEY")"
+  log "REGRAB_FORCE_IMPORT type=movie id=$movie_id path=$mi_path http=$import_http"
+  add_action "FORCE_IMPORT movie $movie_id http=$import_http"
+  sleep 15
+  local final_check
+  final_check="$(curl -sS "$RADARR_URL/api/v3/movie/$movie_id?apikey=$RADARR_KEY" 2>/dev/null | jq -r '.hasFile // false')"
+  if [[ "$final_check" == "true" ]]; then
+    log "REGRAB_IMPORT_OK type=movie id=$movie_id (force-imported)"
+  else
+    log "REGRAB_IMPORT_PENDING type=movie id=$movie_id (import queued, will complete soon)"
+  fi
+}
+
 delete_and_regrab_episode() {
   local episode_id="$1"
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -531,6 +668,8 @@ delete_and_regrab_episode() {
   log "REGRAB_DELETE type=episode id=$episode_id fileId=$file_id http=$del_http"
   # Trigger a fresh search
   trigger_arr_search_episode "$episode_id" >/dev/null 2>&1
+  # Post-regrab: verify import or force it (handles already-complete torrents)
+  verify_and_force_import_episode "$episode_id"
 }
 
 delete_and_regrab_movie() {
@@ -554,6 +693,8 @@ delete_and_regrab_movie() {
   log "REGRAB_DELETE type=movie id=$movie_id fileId=$file_id http=$del_http"
   # Trigger a fresh search
   trigger_arr_search_movie "$movie_id" >/dev/null 2>&1
+  # Post-regrab: verify import or force it (handles already-complete torrents)
+  verify_and_force_import_movie "$movie_id"
 }
 
 # ---------------------------------------------------------------------------
