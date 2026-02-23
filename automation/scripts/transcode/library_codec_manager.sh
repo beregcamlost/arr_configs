@@ -155,10 +155,12 @@ notify_discord_audit_done() {
 notify_discord_daily_status() {
   [[ -z "${DISCORD_WEBHOOK_STATUS:-}" ]] && return 0
 
-  local media_count eligible_count swapped_total failed_total running_now attempt_limited_total
+  local media_count eligible_count audio_only_count video_tx_count swapped_total failed_total running_now attempt_limited_total
   local swapped_24h failed_24h recovered_24h attempt_limited_24h last_run
   media_count="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM media_files;")"
   eligible_count="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
+  audio_only_count="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;")"
+  video_tx_count="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;")"
   swapped_total="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';")"
   failed_total="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='failed';")"
   attempt_limited_total="$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached';")"
@@ -175,6 +177,8 @@ notify_discord_daily_status() {
     --arg db "$DB_PATH" \
     --arg m "$media_count" \
     --arg e "$eligible_count" \
+    --arg ao "$audio_only_count" \
+    --arg vt "$video_tx_count" \
     --arg st "$swapped_total" \
     --arg ft "$failed_total" \
     --arg at "$attempt_limited_total" \
@@ -188,7 +192,7 @@ notify_discord_daily_status() {
     '{embeds: [{
       title: "📊 Codec Manager — Daily Status",
       description: (
-        "🗃️ **Media tracked:** " + $m + " · 📋 **Eligible:** " + $e + "\n\n" +
+        "🗃️ **Media tracked:** " + $m + " · 📋 **Eligible:** " + $e + " (🔊 audio-only: " + $ao + " · 🎬 video: " + $vt + ")\n\n" +
         "**All Time**\n" +
         "✅ Swapped: " + $st + " · ❌ Failed: " + $ft + " · ⚠️ Attempt limited: " + $at + "\n\n" +
         "**Last 24h**\n" +
@@ -396,6 +400,7 @@ CREATE TABLE IF NOT EXISTS conversion_plan (
   media_id INTEGER NOT NULL UNIQUE,
   plan_ts TEXT,
   eligible INTEGER DEFAULT 0,
+  priority INTEGER DEFAULT 10,
   reason TEXT,
   target_video TEXT,
   target_audio TEXT,
@@ -440,6 +445,14 @@ CREATE TABLE IF NOT EXISTS events (
   context_json TEXT
 );
 SQL
+
+  # Migration: add priority column if missing (existing DBs)
+  local has_priority
+  has_priority="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM pragma_table_info('conversion_plan') WHERE name='priority';")"
+  if [[ "$has_priority" -eq 0 ]]; then
+    sqlite3 "$DB_PATH" "ALTER TABLE conversion_plan ADD COLUMN priority INTEGER DEFAULT 10;"
+    log "info" "Migrated conversion_plan: added priority column"
+  fi
 }
 
 insert_event() {
@@ -721,6 +734,7 @@ ORDER BY m.path${where_limit};
       target_container="$DEFAULT_TARGET_CONTAINER"
     fi
 
+    local priority=10
     if [[ "$exists_flag" -ne 1 ]]; then
       skip_reason="missing_file"
     elif [[ "$probe_ok" -ne 1 ]]; then
@@ -734,16 +748,24 @@ ORDER BY m.path${where_limit};
         skip_reason="already_compliant"
       else
         eligible=1
-        reason="needs_transcode"
+        if [[ "$total_v" -gt 0 && "$h264_v" -eq "$total_v" ]]; then
+          reason="audio_only"
+          priority=1
+        else
+          reason="needs_transcode"
+          priority=10
+        fi
       fi
     fi
 
     sqlite3 "$DB_PATH" <<SQL
-INSERT INTO conversion_plan(media_id,plan_ts,eligible,reason,target_video,target_audio,target_container,skip_reason)
+.timeout 5000
+INSERT INTO conversion_plan(media_id,plan_ts,eligible,priority,reason,target_video,target_audio,target_container,skip_reason)
 VALUES(
   $media_id,
   CURRENT_TIMESTAMP,
   $eligible,
+  $priority,
   '$(sql_quote "$reason")',
   '$TARGET_VIDEO_CODEC',
   '$TARGET_AUDIO_CODEC',
@@ -824,6 +846,8 @@ ORDER BY cr.id DESC;
     echo "- Audit ok: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM audit_status WHERE probe_ok=1;")"
     echo "- Missing files: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM audit_status WHERE exists_flag=0;")"
     echo "- Eligible for convert: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
+    echo "  - Audio-only (priority 1): $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;")"
+    echo "  - Video transcode (priority 10): $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;")"
     echo "- Completed swaps: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';")"
     echo "- Failures: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='failed';")"
     echo "- Attempt limit reached: $(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached';")"
@@ -1174,7 +1198,7 @@ LEFT JOIN (
 LEFT JOIN conversion_runs cr ON cr.id=rmax.max_id
 WHERE cp.eligible=1
   AND COALESCE(cr.status,'') NOT IN ('swapped','running','attempt_limit_reached')
-ORDER BY cp.media_id${limit_clause};
+ORDER BY cp.priority, cp.media_id${limit_clause};
 ")
 
   log "info" "Convert run complete run_id=$run_id processed=$processed"
