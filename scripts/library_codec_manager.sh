@@ -606,7 +606,7 @@ audit_cmd() {
   local query
   query="$(fetch_sources_query)"
 
-  local total=0 ok=0 missing=0 probe_fail=0
+  local total=0 ok=0 missing=0 probe_fail=0 skipped=0
 
   local sources_tmp
   sources_tmp="$(mktemp)"
@@ -642,6 +642,21 @@ audit_cmd() {
       continue
     fi
 
+    # Incremental: skip ffprobe if mtime unchanged and probe data already exists
+    local stored_mtime has_probes
+    stored_mtime="$(sqlite3 "$DB_PATH" "SELECT mtime FROM media_files WHERE id=$media_id LIMIT 1;" 2>/dev/null)"
+    if [[ "$stored_mtime" == "$mtime" && -n "$stored_mtime" ]]; then
+      has_probes="$(sqlite3 "$DB_PATH" "SELECT 1 FROM probe_streams WHERE media_id=$media_id LIMIT 1;" 2>/dev/null)"
+      if [[ "$has_probes" == "1" ]]; then
+        skipped=$((skipped + 1))
+        ok=$((ok + 1))
+        if (( total % 500 == 0 )); then
+          log "info" "Audit progress: $total processed ($skipped unchanged)"
+        fi
+        continue
+      fi
+    fi
+
     local tmp_json tmp_err
     tmp_json="$(mktemp)"
     tmp_err="$(mktemp)"
@@ -661,12 +676,12 @@ audit_cmd() {
     rm -f "$tmp_json" "$tmp_err"
 
     if (( total % 100 == 0 )); then
-      log "info" "Audit progress: $total processed"
+      log "info" "Audit progress: $total processed ($skipped unchanged)"
     fi
   done <"$sources_tmp"
   rm -f "$sources_tmp"
 
-  log "info" "Audit completed. processed=$total probe_ok=$ok missing=$missing probe_fail=$probe_fail"
+  log "info" "Audit completed. processed=$total probe_ok=$ok skipped=$skipped missing=$missing probe_fail=$probe_fail"
   end_ts="$(date +%s)"
   elapsed="$((end_ts - start_ts))"
   notify_discord_audit_done "$total" "$ok" "$missing" "$probe_fail" "$elapsed"
