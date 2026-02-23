@@ -14,8 +14,9 @@ STATE_DB="${STATE_DB:-$STATE_DIR/recovery_state.db}"
 LOG_PATH="${LOG_PATH:-/config/berenstuff/automation/logs/bazarr_subtitle_recovery.log}"
 MAX_ITEMS="${MAX_ITEMS:-0}"
 BAZARR_RETRY_COOLDOWN_SEC="${BAZARR_RETRY_COOLDOWN_SEC:-21600}"   # 6h
-ARR_RETRY_COOLDOWN_SEC="${ARR_RETRY_COOLDOWN_SEC:-86400}"         # 24h
+ARR_RETRY_COOLDOWN_SEC="${ARR_RETRY_COOLDOWN_SEC:-10800}"         # 3h
 TRANSLATE_RETRY_COOLDOWN_SEC="${TRANSLATE_RETRY_COOLDOWN_SEC:-86400}" # 24h
+MAX_ARR_ATTEMPTS="${MAX_ARR_ATTEMPTS:-2}"
 MAX_REGRABS="${MAX_REGRABS:-2}"
 REGRAB_COOLDOWN_SEC="${REGRAB_COOLDOWN_SEC:-604800}"                  # 7d
 DRY_RUN=0
@@ -49,6 +50,7 @@ Options:
   --bazarr-retry-cooldown-sec N
   --arr-retry-cooldown-sec N
   --translate-retry-cooldown-sec N
+  --max-arr-attempts N  Arr search attempts before delete-and-regrab (default 2)
   --max-regrabs N       Max delete-and-regrab cycles per item (default 2, 0 disables)
   --regrab-cooldown-sec N  Cooldown between regrabs (default 604800 = 7 days)
   --dry-run             Show what would be done without making any API calls
@@ -72,6 +74,7 @@ while [[ $# -gt 0 ]]; do
     --bazarr-retry-cooldown-sec) BAZARR_RETRY_COOLDOWN_SEC="${2:-}"; shift 2 ;;
     --arr-retry-cooldown-sec) ARR_RETRY_COOLDOWN_SEC="${2:-}"; shift 2 ;;
     --translate-retry-cooldown-sec) TRANSLATE_RETRY_COOLDOWN_SEC="${2:-}"; shift 2 ;;
+    --max-arr-attempts) MAX_ARR_ATTEMPTS="${2:-}"; shift 2 ;;
     --max-regrabs) MAX_REGRABS="${2:-}"; shift 2 ;;
     --regrab-cooldown-sec) REGRAB_COOLDOWN_SEC="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -81,7 +84,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for n in "$MAX_ITEMS" "$BAZARR_RETRY_COOLDOWN_SEC" "$ARR_RETRY_COOLDOWN_SEC" "$TRANSLATE_RETRY_COOLDOWN_SEC" "$MAX_REGRABS" "$REGRAB_COOLDOWN_SEC"; do
+for n in "$MAX_ITEMS" "$BAZARR_RETRY_COOLDOWN_SEC" "$ARR_RETRY_COOLDOWN_SEC" "$TRANSLATE_RETRY_COOLDOWN_SEC" "$MAX_ARR_ATTEMPTS" "$MAX_REGRABS" "$REGRAB_COOLDOWN_SEC"; do
   [[ "$n" =~ ^[0-9]+$ ]] || { echo "Numeric option expected, got: $n" >&2; exit 1; }
 done
 
@@ -157,14 +160,14 @@ if [[ "$REPORT_MODE" -eq 1 ]]; then
   # Items by recovery stage
   stage1="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE bazarr_attempts < 5 AND COALESCE(last_arr_try_ts,0)=0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
   stage2="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE bazarr_attempts >= 5 AND COALESCE(last_arr_try_ts,0)=0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
-  stage3="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(last_arr_try_ts,0)>0 AND COALESCE(arr_attempts,0)<5 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
-  stage4="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(arr_attempts,0)>=5 AND COALESCE(regrab_attempts,0)>0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
+  stage3="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(last_arr_try_ts,0)>0 AND COALESCE(arr_attempts,0)<$MAX_ARR_ATTEMPTS AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
+  stage4="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(arr_attempts,0)>=$MAX_ARR_ATTEMPTS AND COALESCE(regrab_attempts,0)>0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
   exhausted="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(last_result,'')='exhausted_all_stages';")"
   echo "Items by recovery stage (in state DB):"
   echo "  Stage 1 (bazarr attempts 0-4):  $stage1"
   echo "  Stage 2 (bazarr attempts 5+):   $stage2"
-  echo "  Stage 3 (arr search triggered): $stage3"
-  echo "  Stage 4 (regrab triggered):     $stage4"
+  echo "  Stage 3 (arr search <$MAX_ARR_ATTEMPTS): $stage3"
+  echo "  Stage 4 (regrab triggered):       $stage4"
   echo "  Exhausted (gave up):            $exhausted"
   echo ""
 
@@ -705,7 +708,7 @@ process_item() {
       prev_stage="stage1_bazarr"
     elif [[ -z "$last_arr" || "$last_arr" -eq 0 ]]; then
       prev_stage="stage2_translate"
-    elif [[ "$arr_att" -lt 5 ]]; then
+    elif [[ "$arr_att" -lt "$MAX_ARR_ATTEMPTS" ]]; then
       prev_stage="stage3_arr"
     else
       prev_stage="stage4_regrab"
@@ -828,7 +831,7 @@ process_item() {
     fi
 
     # -- Stage 4: Delete & re-grab --
-    if [[ "$arr_att" -ge 5 && "$regrab_att" -lt "$MAX_REGRABS" && "$MAX_REGRABS" -gt 0 ]] \
+    if [[ "$arr_att" -ge "$MAX_ARR_ATTEMPTS" && "$regrab_att" -lt "$MAX_REGRABS" && "$MAX_REGRABS" -gt 0 ]] \
        && should_run_with_cooldown "$last_regrab" "$REGRAB_COOLDOWN_SEC" "$now_ts"; then
       new_stage="stage4_regrab"
       if [[ "$prev_stage" != "$new_stage" ]]; then
@@ -855,7 +858,7 @@ process_item() {
     fi
 
     # Mark exhausted if regrabs maxed out
-    if [[ "$regrab_att" -ge "$MAX_REGRABS" && "$MAX_REGRABS" -gt 0 && "$arr_att" -ge 5 ]]; then
+    if [[ "$regrab_att" -ge "$MAX_REGRABS" && "$MAX_REGRABS" -gt 0 && "$arr_att" -ge "$MAX_ARR_ATTEMPTS" ]]; then
       if [[ "$last_result_val" != "exhausted_all_stages" ]]; then
         state_set "$media_type" "$media_id" "$lang" "$forced" "$hi" "$last_baz" "$last_tr" "$last_arr" "exhausted_all_stages"
         log "EXHAUSTED type=$media_type id=$media_id lang=$token bazarr=$baz_attempts arr=$arr_att regrabs=$regrab_att"
