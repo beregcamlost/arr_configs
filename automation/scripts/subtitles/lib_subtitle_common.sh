@@ -2,9 +2,9 @@
 # lib_subtitle_common.sh — Shared functions for subtitle extraction and deduplication.
 #
 # Sourced by:
-#   sonarr_profile_extract_on_import.sh
-#   radarr_profile_extract_on_import.sh
+#   arr_profile_extract_on_import.sh
 #   library_subtitle_dedupe.sh
+#   bazarr_subtitle_recovery.sh
 #
 # Do not execute directly.
 #
