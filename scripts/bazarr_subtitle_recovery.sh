@@ -97,6 +97,8 @@ fi
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG_PATH")"
 
+source "$(dirname "$0")/lib_subtitle_common.sh"
+
 TMPDIR_RECOVERY="$(mktemp -d /tmp/bazarr_subtitle_recovery.XXXXXXXXXX)"
 cleanup_tmp() { rm -rf "$TMPDIR_RECOVERY"; }
 trap cleanup_tmp EXIT
@@ -246,12 +248,29 @@ notify_discord() {
   curl -sS -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
-state_get_ts() {
+state_get_col() {
   local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5" col="$6"
   sqlite3 "$STATE_DB" "
     SELECT COALESCE($col,0) FROM recovery_state
     WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi
     LIMIT 1;
+  "
+}
+
+state_inc_col() {
+  local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5" col="$6"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] state_inc_col $media_type $media_id $lang forced=$forced hi=$hi col=$col"
+    return 0
+  fi
+  sqlite3 "$STATE_DB" "
+    INSERT INTO recovery_state
+      (media_type, media_id, lang_code, forced, hi, $col, updated_at)
+    VALUES
+      ('$media_type', $media_id, '$lang', $forced, $hi, 1, datetime('now'))
+    ON CONFLICT(media_type, media_id, lang_code, forced, hi) DO UPDATE SET
+      $col=COALESCE($col,0)+1,
+      updated_at=datetime('now');
   "
 }
 
@@ -280,32 +299,6 @@ state_set() {
   "
 }
 
-state_get_bazarr_attempts() {
-  local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5"
-  sqlite3 "$STATE_DB" "
-    SELECT COALESCE(bazarr_attempts,0) FROM recovery_state
-    WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi
-    LIMIT 1;
-  "
-}
-
-state_inc_bazarr_attempts() {
-  local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5"
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] state_inc_bazarr_attempts $media_type $media_id $lang forced=$forced hi=$hi"
-    return 0
-  fi
-  sqlite3 "$STATE_DB" "
-    INSERT INTO recovery_state
-      (media_type, media_id, lang_code, forced, hi, bazarr_attempts, updated_at)
-    VALUES
-      ('$media_type', $media_id, '$lang', $forced, $hi, 1, datetime('now'))
-    ON CONFLICT(media_type, media_id, lang_code, forced, hi) DO UPDATE SET
-      bazarr_attempts=COALESCE(bazarr_attempts,0)+1,
-      updated_at=datetime('now');
-  "
-}
-
 state_reset_bazarr_attempts() {
   local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5"
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -316,58 +309,6 @@ state_reset_bazarr_attempts() {
     UPDATE recovery_state
     SET bazarr_attempts=0, updated_at=datetime('now')
     WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi;
-  "
-}
-
-state_get_arr_attempts() {
-  local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5"
-  sqlite3 "$STATE_DB" "
-    SELECT COALESCE(arr_attempts,0) FROM recovery_state
-    WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi
-    LIMIT 1;
-  "
-}
-
-state_inc_arr_attempts() {
-  local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5"
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] state_inc_arr_attempts $media_type $media_id $lang forced=$forced hi=$hi"
-    return 0
-  fi
-  sqlite3 "$STATE_DB" "
-    INSERT INTO recovery_state
-      (media_type, media_id, lang_code, forced, hi, arr_attempts, updated_at)
-    VALUES
-      ('$media_type', $media_id, '$lang', $forced, $hi, 1, datetime('now'))
-    ON CONFLICT(media_type, media_id, lang_code, forced, hi) DO UPDATE SET
-      arr_attempts=COALESCE(arr_attempts,0)+1,
-      updated_at=datetime('now');
-  "
-}
-
-state_get_regrab_attempts() {
-  local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5"
-  sqlite3 "$STATE_DB" "
-    SELECT COALESCE(regrab_attempts,0) FROM recovery_state
-    WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi
-    LIMIT 1;
-  "
-}
-
-state_inc_regrab_attempts() {
-  local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5"
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] state_inc_regrab_attempts $media_type $media_id $lang forced=$forced hi=$hi"
-    return 0
-  fi
-  sqlite3 "$STATE_DB" "
-    INSERT INTO recovery_state
-      (media_type, media_id, lang_code, forced, hi, regrab_attempts, updated_at)
-    VALUES
-      ('$media_type', $media_id, '$lang', $forced, $hi, 1, datetime('now'))
-    ON CONFLICT(media_type, media_id, lang_code, forced, hi) DO UPDATE SET
-      regrab_attempts=COALESCE(regrab_attempts,0)+1,
-      updated_at=datetime('now');
   "
 }
 
@@ -821,17 +762,17 @@ process_item() {
     [[ "$forced" -eq 1 ]] && token="${token}:forced"
     [[ "$hi" -eq 1 ]] && token="${token}:hi"
 
-    last_baz="$(state_get_ts "$media_type" "$media_id" "$lang" "$forced" "$hi" "last_bazarr_try_ts")"
-    last_tr="$(state_get_ts "$media_type" "$media_id" "$lang" "$forced" "$hi" "last_translate_try_ts")"
-    last_arr="$(state_get_ts "$media_type" "$media_id" "$lang" "$forced" "$hi" "last_arr_try_ts")"
+    last_baz="$(state_get_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "last_bazarr_try_ts")"
+    last_tr="$(state_get_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "last_translate_try_ts")"
+    last_arr="$(state_get_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "last_arr_try_ts")"
     local last_regrab
-    last_regrab="$(state_get_ts "$media_type" "$media_id" "$lang" "$forced" "$hi" "last_regrab_ts")"
-    baz_attempts="$(state_get_bazarr_attempts "$media_type" "$media_id" "$lang" "$forced" "$hi")"
+    last_regrab="$(state_get_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "last_regrab_ts")"
+    baz_attempts="$(state_get_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "bazarr_attempts")"
     [[ -n "$baz_attempts" ]] || baz_attempts=0
     local arr_att regrab_att last_result_val
-    arr_att="$(state_get_arr_attempts "$media_type" "$media_id" "$lang" "$forced" "$hi")"
+    arr_att="$(state_get_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "arr_attempts")"
     [[ -n "$arr_att" ]] || arr_att=0
-    regrab_att="$(state_get_regrab_attempts "$media_type" "$media_id" "$lang" "$forced" "$hi")"
+    regrab_att="$(state_get_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "regrab_attempts")"
     [[ -n "$regrab_att" ]] || regrab_att=0
     last_result_val="$(sqlite3 "$STATE_DB" "
       SELECT COALESCE(last_result,'') FROM recovery_state
@@ -863,7 +804,7 @@ process_item() {
         dl_http="$(try_bazarr_download_movie "$media_id" "$lang" "$([[ "$forced" -eq 1 ]] && echo true || echo false)" "$([[ "$hi" -eq 1 ]] && echo true || echo false)")"
       fi
       bazarr_attempts=$((bazarr_attempts + 1))
-      state_inc_bazarr_attempts "$media_type" "$media_id" "$lang" "$forced" "$hi"
+      state_inc_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "bazarr_attempts"
       baz_attempts=$((baz_attempts + 1))
       state_set "$media_type" "$media_id" "$lang" "$forced" "$hi" "$now_ts" "$last_tr" "$last_arr" "bazarr_dl_http_$dl_http"
       log "BAZARR_TRY type=$media_type id=$media_id lang=$token attempt=$baz_attempts http=$dl_http"
@@ -966,7 +907,7 @@ process_item() {
         arr_http="dedup_skip"
         log "ARR_RETRY_DEDUP type=$media_type id=$media_id lang=$token (already searched this run)"
       fi
-      state_inc_arr_attempts "$media_type" "$media_id" "$lang" "$forced" "$hi"
+      state_inc_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "arr_attempts"
       arr_att=$((arr_att + 1))
       state_set "$media_type" "$media_id" "$lang" "$forced" "$hi" "$last_baz" "$last_tr" "$now_ts" "arr_search_http_$arr_http"
     fi
@@ -993,7 +934,7 @@ process_item() {
       else
         log "REGRAB_DEDUP type=$media_type id=$media_id lang=$token (already regrabbed this run)"
       fi
-      state_inc_regrab_attempts "$media_type" "$media_id" "$lang" "$forced" "$hi"
+      state_inc_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "regrab_attempts"
       state_reset_for_regrab "$media_type" "$media_id" "$lang" "$forced" "$hi"
       regrab_att=$((regrab_att + 1))
     fi
