@@ -21,6 +21,7 @@ MAX_REGRABS="${MAX_REGRABS:-2}"
 REGRAB_COOLDOWN_SEC="${REGRAB_COOLDOWN_SEC:-259200}"                  # 3d
 DRY_RUN=0
 REPORT_MODE=0
+SINCE_MINUTES=0
 
 usage() {
   cat <<'EOF'
@@ -53,6 +54,7 @@ Options:
   --max-arr-attempts N  Arr search attempts before delete-and-regrab (default 2)
   --max-regrabs N       Max delete-and-regrab cycles per item (default 2, 0 disables)
   --regrab-cooldown-sec N  Cooldown between regrabs (default 604800 = 7 days)
+  --since MINUTES       Only process items not touched in last N minutes (default: 0 = all)
   --dry-run             Show what would be done without making any API calls
   --help
 EOF
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --max-arr-attempts) MAX_ARR_ATTEMPTS="${2:-}"; shift 2 ;;
     --max-regrabs) MAX_REGRABS="${2:-}"; shift 2 ;;
     --regrab-cooldown-sec) REGRAB_COOLDOWN_SEC="${2:-}"; shift 2 ;;
+    --since) SINCE_MINUTES="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --report) REPORT_MODE=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -84,7 +87,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for n in "$MAX_ITEMS" "$BAZARR_RETRY_COOLDOWN_SEC" "$ARR_RETRY_COOLDOWN_SEC" "$TRANSLATE_RETRY_COOLDOWN_SEC" "$MAX_ARR_ATTEMPTS" "$MAX_REGRABS" "$REGRAB_COOLDOWN_SEC"; do
+for n in "$MAX_ITEMS" "$BAZARR_RETRY_COOLDOWN_SEC" "$ARR_RETRY_COOLDOWN_SEC" "$TRANSLATE_RETRY_COOLDOWN_SEC" "$MAX_ARR_ATTEMPTS" "$MAX_REGRABS" "$REGRAB_COOLDOWN_SEC" "$SINCE_MINUTES"; do
   [[ "$n" =~ ^[0-9]+$ ]] || { echo "Numeric option expected, got: $n" >&2; exit 1; }
 done
 
@@ -694,9 +697,17 @@ add_action() {
 }
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  log "Start recovery max_items=$MAX_ITEMS [DRY-RUN]"
+  if [[ "$SINCE_MINUTES" -gt 0 ]]; then
+    log "Start recovery max_items=$MAX_ITEMS since=${SINCE_MINUTES}m [DRY-RUN]"
+  else
+    log "Start recovery max_items=$MAX_ITEMS [DRY-RUN]"
+  fi
 else
-  log "Start recovery max_items=$MAX_ITEMS"
+  if [[ "$SINCE_MINUTES" -gt 0 ]]; then
+    log "Start recovery max_items=$MAX_ITEMS since=${SINCE_MINUTES}m"
+  else
+    log "Start recovery max_items=$MAX_ITEMS"
+  fi
 fi
 
 load_active_arr_queue_ids() {
@@ -723,6 +734,20 @@ load_active_arr_queue_ids() {
 id_in_list() {
   local id="$1" list="$2"
   [[ " $list " == *" $id "* ]]
+}
+
+should_skip_since() {
+  local media_type="$1" media_id="$2"
+  [[ "$SINCE_MINUTES" -gt 0 ]] || return 1  # --since not set, don't skip
+  local cutoff_ts last_update_ts
+  cutoff_ts="$(date -d "$SINCE_MINUTES minutes ago" +%s)"
+  # Check if ANY lang for this media was updated recently
+  last_update_ts="$(sqlite3 "$STATE_DB" "
+    SELECT COALESCE(MAX(strftime('%s', updated_at)), 0)
+    FROM recovery_state
+    WHERE media_type='$media_type' AND media_id=$media_id;
+  ")"
+  [[ -n "$last_update_ts" && "$last_update_ts" -gt 0 && "$last_update_ts" -gt "$cutoff_ts" ]]
 }
 
 detect_bazarr_subtitle_jobs_busy() {
@@ -1009,6 +1034,9 @@ while IFS=$'\t' read -r id_fields missing_json subtitles_json; do
   if [[ "$MAX_ITEMS" -gt 0 && "$handled" -ge "$MAX_ITEMS" ]]; then
     break
   fi
+  if should_skip_since "episode" "$episode_id"; then
+    continue
+  fi
   handled=$((handled + 1))
   process_item "episode" "$episode_id" "$series_id" "$missing_json" "$subtitles_json"
 done < "$EPISODE_JSON"
@@ -1029,6 +1057,9 @@ while IFS=$'\t' read -r movie_id missing_json subtitles_json; do
   scanned=$((scanned + 1))
   if [[ "$MAX_ITEMS" -gt 0 && "$handled" -ge "$MAX_ITEMS" ]]; then
     break
+  fi
+  if should_skip_since "movie" "$movie_id"; then
+    continue
   fi
   handled=$((handled + 1))
   process_item "movie" "$movie_id" "0" "$missing_json" "$subtitles_json"
