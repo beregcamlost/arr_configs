@@ -345,8 +345,9 @@ sql_quote() {
 }
 
 init_db() {
-  sqlite3 "$DB_PATH" <<'SQL'
+  sqlite3 "$DB_PATH" <<'SQL' >/dev/null
 PRAGMA journal_mode=WAL;
+PRAGMA busy_timeout=30000;
 PRAGMA synchronous=NORMAL;
 PRAGMA foreign_keys=ON;
 

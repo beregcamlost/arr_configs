@@ -183,9 +183,6 @@ if ! [[ "$SINCE_DAYS" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-LOCK_FILE="/tmp/emby_last_played_report.lock"
-exec 9>"$LOCK_FILE"
-flock -n 9 || { echo "Another instance is already running"; exit 0; }
 
 EMBY_URL="${EMBY_URL%/}"
 mkdir -p "$(dirname "$OUTPUT_CSV")"

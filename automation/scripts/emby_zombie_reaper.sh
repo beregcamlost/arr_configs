@@ -49,9 +49,6 @@ if ! [[ "$MAX_IDLE_MIN" =~ ^[0-9]+$ ]] || [[ "$MAX_IDLE_MIN" -le 0 ]]; then
   exit 1
 fi
 
-LOCK_FILE="/tmp/emby_zombie_reaper.lock"
-exec 9>"$LOCK_FILE"
-flock -n 9 || { echo "Another instance is already running"; exit 0; }
 
 EMBY_URL="${EMBY_URL%/}"
 NOW_EPOCH="$(date -u +%s)"
