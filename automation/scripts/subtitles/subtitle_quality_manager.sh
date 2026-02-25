@@ -163,9 +163,160 @@ get_embedded_subs() {
 }
 
 # ---------------------------------------------------------------------------
-# Subcommand placeholders (implemented in subsequent tasks)
+# Quality scoring
 # ---------------------------------------------------------------------------
-cmd_audit() { log "audit not yet implemented"; }
+
+score_subtitle() {
+  local cues="$1" first="$2" last="$3" duration="$4" mojibake="$5" watermarks="$6"
+  local rating="GOOD"
+
+  [[ "$mojibake" -eq 1 ]] && { echo "BAD"; return; }
+
+  if [[ "$duration" != "0" ]] && [[ "$duration" != "0.0" ]]; then
+    local cues_per_hour
+    cues_per_hour="$(awk "BEGIN { printf \"%.0f\", ($cues / $duration) * 3600 }")"
+    if [[ "$cues_per_hour" -lt 200 ]]; then
+      echo "BAD"; return
+    elif [[ "$cues_per_hour" -gt 1200 ]]; then
+      rating="WARN"
+    fi
+  fi
+
+  if [[ "$duration" != "0" ]] && [[ "$duration" != "0.0" ]] && [[ "$cues" -gt 0 ]]; then
+    local coverage
+    coverage="$(awk "BEGIN { printf \"%.0f\", ($last / $duration) * 100 }")"
+    if [[ "$coverage" -lt 50 ]]; then
+      echo "BAD"; return
+    elif [[ "$coverage" -lt 70 ]]; then
+      rating="WARN"
+    fi
+  fi
+
+  if [[ "$(awk "BEGIN { print ($first > 120) }")" -eq 1 ]]; then
+    rating="WARN"
+  fi
+
+  [[ "$watermarks" -eq 1 ]] && rating="WARN"
+
+  echo "$rating"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_audit() {
+  log "Auditing subtitles in: $PATH_PREFIX (recursive=$RECURSIVE)"
+
+  local total_files=0 total_tracks=0 good=0 warn=0 bad=0
+
+  while IFS= read -r mkv_file; do
+    total_files=$((total_files + 1))
+    local basename dir duration
+    basename="$(basename "$mkv_file")"
+    dir="$(dirname "$mkv_file")"
+    duration="$(get_video_duration "$mkv_file")"
+
+    printf '\n=== %s (%.0fs) ===\n' "$basename" "$duration" >&2
+    printf '%-6s %-8s %-7s %-6s %-6s %-5s %-4s %-4s %s\n' \
+      "TYPE" "LANG" "CODEC" "CUES" "COVER" "SYNC" "WM" "ENC" "RATING" >&2
+    printf '%s\n' "--------------------------------------------------------------" >&2
+
+    # Embedded subtitle tracks
+    local embedded_json emb_count
+    embedded_json="$(get_embedded_subs "$mkv_file")"
+    emb_count="$(jq 'length' <<<"$embedded_json")"
+
+    for ((i=0; i<emb_count; i++)); do
+      local stream_idx lang title codec_name
+      stream_idx="$(jq -r ".[$i].index" <<<"$embedded_json")"
+      lang="$(jq -r ".[$i].tags.language" <<<"$embedded_json")"
+      title="$(jq -r ".[$i].tags.title" <<<"$embedded_json")"
+      codec_name="$(jq -r ".[$i].codec_name" <<<"$embedded_json")"
+
+      local tmpfile="/tmp/sub_audit_${$}_${stream_idx}.srt"
+      if ! ffmpeg -v quiet -i "$mkv_file" -map "0:${stream_idx}" -f srt "$tmpfile" </dev/null 2>/dev/null; then
+        rm -f "$tmpfile"
+        continue
+      fi
+
+      local analysis cues first_sec last_sec mojibake watermarks
+      analysis="$(analyze_srt_file "$tmpfile")"
+      read -r cues first_sec last_sec mojibake watermarks <<<"$analysis"
+      rm -f "$tmpfile"
+
+      # Check title for watermarks too
+      if echo "$title" | grep -qiE "$WATERMARK_PATTERNS" 2>/dev/null; then
+        watermarks=1
+      fi
+
+      local coverage="--"
+      if [[ "$duration" != "0" ]] && [[ "$duration" != "0.0" ]] && [[ "$cues" -gt 0 ]]; then
+        coverage="$(awk "BEGIN { printf \"%.0f%%\", ($last_sec / $duration) * 100 }")"
+      fi
+      local sync_ok="OK"
+      [[ "$(awk "BEGIN { print ($first_sec > 120) }")" -eq 1 ]] && sync_ok="LATE"
+
+      local rating
+      rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
+
+      printf '%-6s %-8s %-7s %-6s %-6s %-5s %-4s %-4s %s\n' \
+        "EMB" "$lang" "$codec_name" "$cues" "$coverage" "$sync_ok" \
+        "$([[ "$watermarks" -eq 1 ]] && echo "YES" || echo "--")" \
+        "$([[ "$mojibake" -eq 1 ]] && echo "BAD" || echo "OK")" \
+        "$rating" >&2
+
+      total_tracks=$((total_tracks + 1))
+      case "$rating" in
+        GOOD) good=$((good + 1)) ;;
+        WARN) warn=$((warn + 1)) ;;
+        BAD)  bad=$((bad + 1)) ;;
+      esac
+    done
+
+    # External subtitle files
+    local name_stem="${basename%.mkv}"
+    while IFS= read -r srt_file; do
+      [[ -z "$srt_file" ]] && continue
+      local srt_basename ext_lang
+      srt_basename="$(basename "$srt_file")"
+      ext_lang="$(echo "$srt_basename" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+      [[ -z "$ext_lang" ]] && ext_lang="und"
+
+      local analysis cues first_sec last_sec mojibake watermarks
+      analysis="$(analyze_srt_file "$srt_file")"
+      read -r cues first_sec last_sec mojibake watermarks <<<"$analysis"
+
+      local coverage="--"
+      if [[ "$duration" != "0" ]] && [[ "$duration" != "0.0" ]] && [[ "$cues" -gt 0 ]]; then
+        coverage="$(awk "BEGIN { printf \"%.0f%%\", ($last_sec / $duration) * 100 }")"
+      fi
+      local sync_ok="OK"
+      [[ "$(awk "BEGIN { print ($first_sec > 120) }")" -eq 1 ]] && sync_ok="LATE"
+
+      local rating
+      rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
+
+      printf '%-6s %-8s %-7s %-6s %-6s %-5s %-4s %-4s %s\n' \
+        "EXT" "$ext_lang" "srt" "$cues" "$coverage" "$sync_ok" \
+        "$([[ "$watermarks" -eq 1 ]] && echo "YES" || echo "--")" \
+        "$([[ "$mojibake" -eq 1 ]] && echo "BAD" || echo "OK")" \
+        "$rating" >&2
+
+      total_tracks=$((total_tracks + 1))
+      case "$rating" in
+        GOOD) good=$((good + 1)) ;;
+        WARN) warn=$((warn + 1)) ;;
+        BAD)  bad=$((bad + 1)) ;;
+      esac
+    done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null | sort)
+
+  done < <(find_mkv_files "$PATH_PREFIX")
+
+  printf '\n--- Summary: %d files, %d tracks (%d GOOD, %d WARN, %d BAD) ---\n' \
+    "$total_files" "$total_tracks" "$good" "$warn" "$bad" >&2
+}
+
 cmd_mux() { log "mux not yet implemented"; }
 cmd_strip() { log "strip not yet implemented"; }
 
