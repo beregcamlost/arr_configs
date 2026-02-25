@@ -5,6 +5,8 @@ EMBY_URL="${EMBY_URL:-http://127.0.0.1:8096}"
 EMBY_API_KEY="${EMBY_API_KEY:-}"
 MAX_IDLE_MIN=300
 DRY_RUN=0
+STATE_DIR="/APPBOX_DATA/storage/.zombie-reaper-state"
+RESTART_THRESHOLD=20
 
 usage() {
   cat <<'EOF'
@@ -17,6 +19,8 @@ Options:
   --api-key KEY        Emby API key (or set EMBY_API_KEY)
   --max-idle MINUTES   Kill sessions idle longer than this (default: 300 = 5h)
   --dry-run            List zombies without killing them
+  --state-dir DIR      Directory for state tracking (default: /APPBOX_DATA/storage/.zombie-reaper-state)
+  --restart-threshold N  Restart Emby when zombie count >= N (default: 20, 0=disable)
   --help               Show this help
 
 Examples:
@@ -32,10 +36,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --emby-url)   EMBY_URL="${2:-}"; shift 2 ;;
     --api-key)    EMBY_API_KEY="${2:-}"; shift 2 ;;
-    --max-idle)   MAX_IDLE_MIN="${2:-}"; shift 2 ;;
-    --dry-run)    DRY_RUN=1; shift ;;
-    --help|-h)    usage; exit 0 ;;
-    *)            echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    --max-idle)          MAX_IDLE_MIN="${2:-}"; shift 2 ;;
+    --dry-run)           DRY_RUN=1; shift ;;
+    --state-dir)         STATE_DIR="${2:-}"; shift 2 ;;
+    --restart-threshold) RESTART_THRESHOLD="${2:-}"; shift 2 ;;
+    --help|-h)           usage; exit 0 ;;
+    *)                   echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
 
@@ -49,6 +55,9 @@ if ! [[ "$MAX_IDLE_MIN" =~ ^[0-9]+$ ]] || [[ "$MAX_IDLE_MIN" -le 0 ]]; then
   exit 1
 fi
 
+mkdir -p "$STATE_DIR"
+STATE_FILE="$STATE_DIR/seen_sessions.json"
+[[ -f "$STATE_FILE" ]] || echo '{}' > "$STATE_FILE"
 
 EMBY_URL="${EMBY_URL%/}"
 NOW_EPOCH="$(date -u +%s)"
@@ -99,9 +108,30 @@ if [[ "$zombie_count" -eq 0 ]]; then
   exit 0
 fi
 
-log "Found ${zombie_count} zombie session(s)."
+# Load existing state
+seen_json="$(cat "$STATE_FILE")"
 
-# Build a summary for logging and Discord
+# Classify zombies as new or already-seen
+new_zombies="$(jq -c --argjson seen "$seen_json" '
+  [ .[] | select(.Id as $id | $seen[$id] == null) ]
+' <<<"$zombies_json")"
+seen_zombies="$(jq -c --argjson seen "$seen_json" '
+  [ .[] | select(.Id as $id | $seen[$id] != null) ]
+' <<<"$zombies_json")"
+
+new_count="$(jq 'length' <<<"$new_zombies")"
+seen_count="$(jq 'length' <<<"$seen_zombies")"
+
+log "Found ${zombie_count} zombie(s): ${new_count} new, ${seen_count} already-seen."
+
+# Clean state: remove entries for sessions that no longer exist in the API
+all_session_ids="$(jq -r '[.[].Id] | join(",")' <<<"$sessions_json")"
+seen_json="$(jq --arg ids "$all_session_ids" '
+  ($ids | split(",")) as $active |
+  with_entries(select(.key as $k | $active | index($k) != null))
+' <<<"$seen_json")"
+
+# Process only NEW zombies
 killed_summary=""
 kill_failed=0
 
@@ -133,11 +163,19 @@ while IFS= read -r zombie; do
     fi
   fi
 
-  killed_summary="${killed_summary}${line}\n"
-done < <(jq -c '.[]' <<<"$zombies_json")
+  # Add to state file (mark as seen)
+  seen_json="$(jq --arg id "$session_id" --arg dev "$device" --arg usr "$user" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '. + {($id): {first_seen: $ts, device: $dev, user: $usr}}' <<<"$seen_json")"
 
-# Discord notification
-if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+  killed_summary="${killed_summary}${line}\n"
+done < <(jq -c '.[]' <<<"$new_zombies")
+
+# Save updated state
+printf '%s\n' "$seen_json" > "$STATE_FILE"
+
+# Discord notification — only when there are new zombies
+if [[ "$new_count" -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
     title="Emby Zombie Reaper [DRY RUN]"
     action_word="detected"
@@ -149,9 +187,12 @@ if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
   fail_note=""
   [[ "$kill_failed" -gt 0 ]] && fail_note="\n(${kill_failed} session(s) failed to stop)"
 
+  context_note=""
+  [[ "$seen_count" -gt 0 ]] && context_note="\n(${seen_count} previously-seen zombie(s) skipped)"
+
   discord_payload="$(jq -nc \
     --arg title "$title" \
-    --arg desc "$(printf "**%s %d zombie session(s):**\n\n\`\`\`\n%b\`\`\`%b" "$action_word" "$zombie_count" "$killed_summary" "$fail_note")" \
+    --arg desc "$(printf "**%s %d new zombie session(s):**\n\n\`\`\`\n%b\`\`\`%b%b" "$action_word" "$new_count" "$killed_summary" "$fail_note" "$context_note")" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: $title,
@@ -169,4 +210,8 @@ if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
     || log "Discord notification failed (non-fatal)."
 fi
 
-log "Done. ${zombie_count} zombie(s) ${DRY_RUN:+would be }processed."
+if [[ "$new_count" -gt 0 ]]; then
+  log "Done. ${new_count} new zombie(s) processed, ${seen_count} already-seen skipped."
+else
+  log "Done. No new zombies (${seen_count} already-seen, waiting for restart to clear)."
+fi
