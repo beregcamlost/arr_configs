@@ -629,7 +629,7 @@ extract_target() {
 bazarr_scan_disk_movie() {
   local radarr_id="$1" bazarr_url="$2" api_key="$3"
   local http_code
-  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+  http_code="$(curl_with_retry -s -o /dev/null -w '%{http_code}' -X PATCH \
     -H "X-API-KEY: ${api_key}" \
     "${bazarr_url}/api/movies?radarrid=${radarr_id}&action=scan-disk")"
   log "BAZARR_RESCAN movie id=${radarr_id} http=${http_code}"
@@ -641,7 +641,7 @@ bazarr_scan_disk_movie() {
 bazarr_scan_disk_series() {
   local sonarr_id="$1" bazarr_url="$2" api_key="$3"
   local http_code
-  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+  http_code="$(curl_with_retry -s -o /dev/null -w '%{http_code}' -X PATCH \
     -H "X-API-KEY: ${api_key}" \
     "${bazarr_url}/api/series?seriesid=${sonarr_id}&action=scan-disk")"
   log "BAZARR_RESCAN series id=${sonarr_id} http=${http_code}"
