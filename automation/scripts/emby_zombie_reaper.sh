@@ -108,6 +108,69 @@ if [[ "$zombie_count" -eq 0 ]]; then
   exit 0
 fi
 
+# Auto-restart check: if total zombies >= threshold, restart Emby instead
+if [[ "$RESTART_THRESHOLD" -gt 0 ]] && [[ "$zombie_count" -ge "$RESTART_THRESHOLD" ]]; then
+  log "Zombie count ($zombie_count) >= restart threshold ($RESTART_THRESHOLD). Attempting Emby restart..."
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] Would restart Emby to clear ${zombie_count} stale sessions."
+  else
+    max_retries=12
+    retry_delay=300  # 5 minutes
+    restarted=0
+
+    for attempt in $(seq 1 "$max_retries"); do
+      # Check for active playback
+      active_count="$(jq '[.[] | select(.NowPlayingItem != null and ((.PlayState.IsPaused // false) == false))] | length' <<<"$sessions_json")"
+
+      if [[ "$active_count" -gt 0 ]]; then
+        log "Restart delayed: $active_count active session(s) (attempt $attempt/$max_retries)"
+        if [[ "$attempt" -lt "$max_retries" ]]; then
+          sleep "$retry_delay"
+          # Re-fetch sessions for next check
+          sessions_json="$(curl -fsS "${EMBY_URL}/Sessions?api_key=${EMBY_API_KEY}")"
+        fi
+        continue
+      fi
+
+      # Nobody watching — restart
+      if curl -fsS -X POST "${EMBY_URL}/System/Restart?api_key=${EMBY_API_KEY}" >/dev/null 2>&1; then
+        log "Emby restarted successfully (attempt $attempt/$max_retries). Clearing state."
+        echo '{}' > "$STATE_FILE"
+        restarted=1
+
+        # Discord notification
+        if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+          discord_payload="$(jq -nc \
+            --arg title "Emby Auto-Restart" \
+            --arg desc "$(printf "**Restarted Emby to clear %d stale sessions.**\n\nServer will be back in ~30 seconds." "$zombie_count")" \
+            --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            '{embeds: [{
+              title: $title,
+              description: $desc,
+              color: 3066993,
+              footer: {text: "Emby Zombie Reaper"},
+              timestamp: $ts
+            }]}')"
+          curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$discord_payload" >/dev/null 2>&1 || true
+        fi
+        break
+      else
+        log "Restart command FAILED (attempt $attempt/$max_retries)"
+        break
+      fi
+    done
+
+    if [[ "$restarted" -eq 0 ]]; then
+      log "Restart aborted after $max_retries retries (active playback). Will retry next cron run."
+    fi
+  fi
+
+  exit 0
+fi
+
 # Load existing state
 seen_json="$(cat "$STATE_FILE")"
 
@@ -171,8 +234,10 @@ while IFS= read -r zombie; do
   killed_summary="${killed_summary}${line}\n"
 done < <(jq -c '.[]' <<<"$new_zombies")
 
-# Save updated state
-printf '%s\n' "$seen_json" > "$STATE_FILE"
+# Save updated state (skip in dry-run mode)
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  printf '%s\n' "$seen_json" > "$STATE_FILE"
+fi
 
 # Discord notification — only when there are new zombies
 if [[ "$new_count" -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
