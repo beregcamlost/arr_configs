@@ -48,6 +48,93 @@ getenv_fallback() {
   printf '%s' "$v"
 }
 
+# ---------------------------------------------------------------------------
+# SQL escaping for sqlite3 CLI (not parameterized — data is from trusted DBs)
+# ---------------------------------------------------------------------------
+
+sql_escape() {
+  local s="${1:-}"
+  # Strip null bytes — sqlite3 CLI chokes on these
+  s="${s//$'\x00'/}"
+  # Escape single quotes for SQL string literals
+  s="${s//\'/\'\'}"
+  printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------------------
+# HTTP helper with retry on transient failures
+# ---------------------------------------------------------------------------
+
+# curl_with_retry [curl_args...]
+#
+# Wraps curl with automatic retry on transient errors.
+# Retries up to 3 times with 5s/15s backoff on:
+#   - HTTP 500, 502, 503, 504
+#   - curl exit 7 (connection refused), 28 (timeout)
+# Does NOT retry 4xx (client errors).
+# Returns the HTTP status code on stdout (last line).
+# All other curl output goes to whatever -o specifies.
+#
+# IMPORTANT: Caller MUST include `-w '%{http_code}'` in curl args.
+# Example:
+#   http_code="$(curl_with_retry -sS -o /tmp/out.json -w '%{http_code}' -X GET "$url")"
+curl_with_retry() {
+  local max_attempts=3
+  local -a delays=(5 15)
+  local attempt=1 http_code=0 curl_exit=0
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    set +e
+    http_code="$(curl "$@" 2>/dev/null)"
+    curl_exit=$?
+    set -e
+
+    # Success: 2xx or 3xx or 4xx (client error — not transient)
+    if [[ "$curl_exit" -eq 0 ]]; then
+      case "$http_code" in
+        [23]*|4*) printf '%s' "$http_code"; return 0 ;;
+      esac
+    fi
+
+    # Last attempt — don't sleep, just return
+    if [[ "$attempt" -ge "$max_attempts" ]]; then
+      break
+    fi
+
+    # Transient: 5xx or connection errors
+    local delay="${delays[$((attempt - 1))]:-15}"
+    log "RETRY attempt=$((attempt + 1))/$max_attempts curl_exit=$curl_exit http=$http_code delay=${delay}s"
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+
+  printf '%s' "$http_code"
+}
+
+# ---------------------------------------------------------------------------
+# Discord notification helper (generic embed)
+# ---------------------------------------------------------------------------
+
+# notify_discord_embed TITLE DESCRIPTION COLOR
+# COLOR: 3066993=green, 15105570=orange, 15844367=yellow, 3447003=blue
+notify_discord_embed() {
+  local title="$1" desc="$2" color="${3:-3066993}"
+  [[ -n "${DISCORD_WEBHOOK_URL:-}" ]] || return 0
+  local payload
+  payload="$(jq -nc \
+    --arg title "$title" \
+    --arg desc "$desc" \
+    --argjson color "$color" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: $title,
+      description: $desc,
+      color: $color,
+      timestamp: $ts
+    }]}')"
+  curl -sS -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
+}
+
 file_size_bytes() {
   stat -c '%s' "$1" 2>/dev/null || echo 0
 }
