@@ -460,7 +460,95 @@ cmd_mux() {
       3066993
   fi
 }
-cmd_strip() { log "strip not yet implemented"; }
+cmd_strip() {
+  log "Stripping track '$TRACK_TARGET' from: $PATH_PREFIX (recursive=$RECURSIVE, dry_run=$DRY_RUN)"
+
+  local total=0 stripped=0 skipped=0 failed=0
+
+  while IFS= read -r mkv_file; do
+    local basename
+    basename="$(basename "$mkv_file")"
+
+    # Check converter conflict
+    if is_file_being_converted "$mkv_file"; then
+      log "SKIP (converter running): $basename"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    # Get embedded subtitle streams
+    local embedded_json emb_count
+    embedded_json="$(get_embedded_subs "$mkv_file")"
+    emb_count="$(jq 'length' <<<"$embedded_json")"
+    [[ "$emb_count" -eq 0 ]] && continue
+
+    # Find matching stream indices to remove
+    local -a remove_indices=()
+
+    if [[ "$TRACK_TARGET" =~ ^[0-9]+$ ]]; then
+      # Numeric: treat as stream index
+      for ((i=0; i<emb_count; i++)); do
+        local idx
+        idx="$(jq -r ".[$i].index" <<<"$embedded_json")"
+        [[ "$idx" == "$TRACK_TARGET" ]] && remove_indices+=("$idx")
+      done
+    else
+      # String: treat as language code
+      for ((i=0; i<emb_count; i++)); do
+        local idx lang
+        idx="$(jq -r ".[$i].index" <<<"$embedded_json")"
+        lang="$(jq -r ".[$i].tags.language" <<<"$embedded_json")"
+        [[ "$lang" == "$TRACK_TARGET" ]] && remove_indices+=("$idx")
+      done
+    fi
+
+    [[ ${#remove_indices[@]} -eq 0 ]] && continue
+
+    total=$((total + 1))
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log "[DRY-RUN] Would strip ${#remove_indices[@]} track(s) from: $basename (indices: ${remove_indices[*]})"
+      stripped=$((stripped + ${#remove_indices[@]}))
+      continue
+    fi
+
+    # Build ffmpeg command to remove specific streams
+    local -a ffmpeg_cmd=(ffmpeg -y -v quiet -i "$mkv_file" -map 0)
+    for idx in "${remove_indices[@]}"; do
+      ffmpeg_cmd+=(-map "-0:${idx}")
+    done
+    ffmpeg_cmd+=(-c copy)
+
+    local tmp_out="${mkv_file}.striptmp.mkv"
+    if ! "${ffmpeg_cmd[@]}" "$tmp_out" 2>/dev/null; then
+      log "FAIL strip: $basename"
+      rm -f "$tmp_out"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    if [[ ! -s "$tmp_out" ]]; then
+      log "FAIL strip (empty output): $basename"
+      rm -f "$tmp_out"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    mv "$tmp_out" "$mkv_file"
+    stripped=$((stripped + ${#remove_indices[@]}))
+    log "STRIPPED ${#remove_indices[@]} track(s) from: $basename"
+
+  done < <(find_mkv_files "$PATH_PREFIX")
+
+  log "Done. ${stripped} stripped, ${skipped} skipped, ${failed} failed."
+
+  # Discord notification
+  if [[ "$stripped" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
+    notify_discord_embed "Subtitle Quality Manager — Strip" \
+      "$(printf "Stripped %d track(s) matching '%s' from %d file(s)" "$stripped" "$TRACK_TARGET" "$total")" \
+      15158332
+  fi
+}
 
 case "$COMMAND" in
   audit) cmd_audit ;;
