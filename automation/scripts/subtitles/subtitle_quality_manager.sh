@@ -317,7 +317,149 @@ cmd_audit() {
     "$total_files" "$total_tracks" "$good" "$warn" "$bad" >&2
 }
 
-cmd_mux() { log "mux not yet implemented"; }
+cmd_mux() {
+  log "Muxing external subtitles in: $PATH_PREFIX (recursive=$RECURSIVE, dry_run=$DRY_RUN, force=$FORCE)"
+
+  local total_files=0 muxed=0 skipped=0 failed=0
+  local mux_summary=""
+
+  while IFS= read -r mkv_file; do
+    local basename dir name_stem duration
+    basename="$(basename "$mkv_file")"
+    dir="$(dirname "$mkv_file")"
+    name_stem="${basename%.mkv}"
+    duration="$(get_video_duration "$mkv_file")"
+
+    # Check converter conflict
+    if is_file_being_converted "$mkv_file"; then
+      log "SKIP (converter running): $basename"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    # Find external SRT files for this MKV
+    local -a srt_files=()
+    local -a srt_langs=()
+    while IFS= read -r srt_file; do
+      [[ -z "$srt_file" ]] && continue
+      local srt_basename ext_lang
+      srt_basename="$(basename "$srt_file")"
+      ext_lang="$(echo "$srt_basename" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+      [[ -z "$ext_lang" ]] && ext_lang="und"
+
+      # Audit the SRT
+      local analysis cues first_sec last_sec mojibake watermarks rating
+      analysis="$(analyze_srt_file "$srt_file")"
+      read -r cues first_sec last_sec mojibake watermarks <<<"$analysis"
+      rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
+
+      if [[ "$rating" == "BAD" ]] && [[ "$FORCE" -eq 0 ]]; then
+        log "SKIP (BAD rating): $srt_basename"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      if [[ "$rating" == "WARN" ]] && [[ "$FORCE" -eq 0 ]]; then
+        log "SKIP (WARN rating, use --force): $srt_basename"
+        skipped=$((skipped + 1))
+        continue
+      fi
+
+      srt_files+=("$srt_file")
+      srt_langs+=("$ext_lang")
+    done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null | sort)
+
+    [[ ${#srt_files[@]} -eq 0 ]] && continue
+
+    total_files=$((total_files + 1))
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log "[DRY-RUN] Would mux ${#srt_files[@]} subtitle(s) into: $basename"
+      for sf in "${srt_files[@]}"; do log "  + $(basename "$sf")"; done
+      muxed=$((muxed + ${#srt_files[@]}))
+      continue
+    fi
+
+    # Build ffmpeg command
+    local -a ffmpeg_cmd=(ffmpeg -y -v quiet -i "$mkv_file")
+    local -a map_args=(-map 0)
+    local existing_sub_count
+    existing_sub_count="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$mkv_file" 2>/dev/null | jq '.streams | length')"
+
+    for ((i=0; i<${#srt_files[@]}; i++)); do
+      ffmpeg_cmd+=(-i "${srt_files[$i]}")
+      map_args+=(-map "$((i + 1)):0")
+      local metadata_idx=$((existing_sub_count + i))
+      map_args+=(-metadata:s:s:${metadata_idx} "language=${srt_langs[$i]}")
+    done
+
+    local tmp_out="${mkv_file}.subtmp.mkv"
+    if ! "${ffmpeg_cmd[@]}" "${map_args[@]}" -c copy "$tmp_out" 2>/dev/null; then
+      log "FAIL mux: $basename"
+      rm -f "$tmp_out"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    if [[ ! -s "$tmp_out" ]]; then
+      log "FAIL mux (empty output): $basename"
+      rm -f "$tmp_out"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    # Verify subtitle count
+    local new_sub_count expected
+    new_sub_count="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$tmp_out" 2>/dev/null | jq '.streams | length')"
+    expected=$((existing_sub_count + ${#srt_files[@]}))
+
+    if [[ "$new_sub_count" -ne "$expected" ]]; then
+      log "FAIL mux (sub count mismatch: got $new_sub_count, expected $expected): $basename"
+      rm -f "$tmp_out"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    # Swap original with muxed version
+    mv "$tmp_out" "$mkv_file"
+
+    # Delete external SRT files
+    for sf in "${srt_files[@]}"; do
+      rm -f "$sf"
+      log "  Deleted: $(basename "$sf")"
+    done
+
+    muxed=$((muxed + ${#srt_files[@]}))
+    log "MUXED ${#srt_files[@]} subtitle(s) into: $basename"
+    mux_summary="${mux_summary}${basename}: ${#srt_files[@]} sub(s)\n"
+
+  done < <(find_mkv_files "$PATH_PREFIX")
+
+  log "Done. ${muxed} muxed, ${skipped} skipped, ${failed} failed."
+
+  # Bazarr rescan
+  if [[ "$muxed" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]] && [[ -n "$BAZARR_API_KEY" ]]; then
+    if [[ "$PATH_PREFIX" == *"/tv/"* ]] || [[ "$PATH_PREFIX" == *"/tvanimated/"* ]]; then
+      local sonarr_id
+      sonarr_id="$(sqlite3 "$BAZARR_DB" "SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$(echo "$PATH_PREFIX" | sed 's|/Season.*||' | sed 's|/$||')")")%' LIMIT 1;" 2>/dev/null || echo "")"
+      if [[ -n "$sonarr_id" ]]; then
+        bazarr_scan_disk_series "$sonarr_id" "$BAZARR_URL" "$BAZARR_API_KEY"
+      fi
+    elif [[ "$PATH_PREFIX" == *"/movies/"* ]]; then
+      local radarr_id
+      radarr_id="$(sqlite3 "$BAZARR_DB" "SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$PATH_PREFIX")")%' LIMIT 1;" 2>/dev/null || echo "")"
+      if [[ -n "$radarr_id" ]]; then
+        bazarr_scan_disk_movie "$radarr_id" "$BAZARR_URL" "$BAZARR_API_KEY"
+      fi
+    fi
+  fi
+
+  # Discord notification
+  if [[ "$muxed" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
+    notify_discord_embed "Subtitle Quality Manager — Mux" \
+      "$(printf "Muxed %d subtitle(s) into %d file(s)\n\n%b" "$muxed" "$total_files" "$mux_summary")" \
+      3066993
+  fi
+}
 cmd_strip() { log "strip not yet implemented"; }
 
 case "$COMMAND" in
