@@ -373,7 +373,7 @@ try_bazarr_download_episode() {
     echo "DRY"
     return 0
   fi
-  curl -sS -o "$TMPDIR_RECOVERY/bazarr_episode_dl.out" -w "%{http_code}" \
+  curl_with_retry -sS -o "$TMPDIR_RECOVERY/bazarr_episode_dl.out" -w '%{http_code}' \
     -X PATCH \
     -H "X-API-KEY: $BAZARR_API_KEY" \
     --data-urlencode "seriesid=$series_id" \
@@ -391,7 +391,7 @@ try_bazarr_download_movie() {
     echo "DRY"
     return 0
   fi
-  curl -sS -o "$TMPDIR_RECOVERY/bazarr_movie_dl.out" -w "%{http_code}" \
+  curl_with_retry -sS -o "$TMPDIR_RECOVERY/bazarr_movie_dl.out" -w '%{http_code}' \
     -X PATCH \
     -H "X-API-KEY: $BAZARR_API_KEY" \
     --data-urlencode "radarrid=$movie_id" \
@@ -410,7 +410,7 @@ try_translate_to_lang() {
     echo "DRY"
     return 0
   fi
-  curl -sS -o "$TMPDIR_RECOVERY/bazarr_translate.out" -w "%{http_code}" \
+  curl_with_retry -sS -o "$TMPDIR_RECOVERY/bazarr_translate.out" -w '%{http_code}' \
     -X PATCH \
     -H "X-API-KEY: $BAZARR_API_KEY" \
     --data-urlencode "action=translate" \
@@ -430,7 +430,7 @@ trigger_arr_search_episode() {
     echo "DRY"
     return 0
   fi
-  curl -sS -o "$TMPDIR_RECOVERY/sonarr_search.out" -w "%{http_code}" \
+  curl_with_retry -sS -o "$TMPDIR_RECOVERY/sonarr_search.out" -w '%{http_code}' \
     -X POST \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"EpisodeSearch\",\"episodeIds\":[${episode_id}]}" \
@@ -444,7 +444,7 @@ trigger_arr_search_movie() {
     echo "DRY"
     return 0
   fi
-  curl -sS -o "$TMPDIR_RECOVERY/radarr_search.out" -w "%{http_code}" \
+  curl_with_retry -sS -o "$TMPDIR_RECOVERY/radarr_search.out" -w '%{http_code}' \
     -X POST \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"MoviesSearch\",\"movieIds\":[${movie_id}]}" \
