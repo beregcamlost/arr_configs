@@ -230,6 +230,36 @@ except Exception:
 "
 }
 
+# ---------------------------------------------------------------------------
+# Batch convert Python-repr strings to JSON (one Python call per media type)
+# Input: TSV file with lines: id_fields<TAB>missing_raw<TAB>subtitles_raw
+# Output: TSV file with lines: id_fields<TAB>missing_json<TAB>subtitles_json
+# ---------------------------------------------------------------------------
+batch_jsonish_to_json() {
+  local input_file="$1" output_file="$2"
+  python3 -c "
+import sys, json, ast
+
+for line in open(sys.argv[1], 'r'):
+    line = line.rstrip('\n')
+    if not line:
+        continue
+    fields = line.split('\t')
+    if len(fields) < 3:
+        continue
+    ids = fields[0]
+    try:
+        missing = json.dumps(ast.literal_eval(fields[1])) if fields[1] else '[]'
+    except Exception:
+        missing = '[]'
+    try:
+        subs = json.dumps(ast.literal_eval(fields[2])) if fields[2] else '[]'
+    except Exception:
+        subs = '[]'
+    print(ids + '\t' + missing + '\t' + subs)
+" "$input_file" > "$output_file"
+}
+
 notify_discord() {
   local title="$1" body="$2"
   [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
@@ -746,10 +776,10 @@ process_item() {
     return 0
   fi
 
-  # Convert Python-repr to JSON once per item (optimization: 2 python calls instead of ~4+)
+  # Data is pre-converted to JSON by batch_jsonish_to_json
   local missing_json subtitles_json
-  missing_json="$(printf '%s' "$missing_raw" | jsonish_to_json 2>/dev/null || echo '[]')"
-  subtitles_json="$(printf '%s' "$subtitles_raw" | jsonish_to_json 2>/dev/null || echo '[]')"
+  missing_json="$missing_raw"
+  subtitles_json="$subtitles_raw"
 
   mapfile -t miss < <(printf '%s' "$missing_json" | jq -r '.[]')
   for item in "${miss[@]}"; do
@@ -961,39 +991,48 @@ else
   log "[DRY-RUN] Runtime guards bazarr_sub_busy=$BAZARR_SUB_BUSY (queue checks skipped)"
 fi
 
-while IFS='|' read -r episode_id series_id missing_raw subtitles_raw; do
-  [[ -n "$episode_id" ]] || continue
+# Bulk export + convert episodes
+EPISODE_RAW="$TMPDIR_RECOVERY/episodes_raw.tsv"
+EPISODE_JSON="$TMPDIR_RECOVERY/episodes_json.tsv"
+sqlite3 -separator $'\t' "$BAZARR_DB" "
+  SELECT sonarrEpisodeId || '|' || sonarrSeriesId, missing_subtitles, subtitles
+  FROM table_episodes
+  WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]'
+  ORDER BY sonarrEpisodeId;
+" > "$EPISODE_RAW"
+batch_jsonish_to_json "$EPISODE_RAW" "$EPISODE_JSON"
+
+while IFS=$'\t' read -r id_fields missing_json subtitles_json; do
+  [[ -n "$id_fields" ]] || continue
+  IFS='|' read -r episode_id series_id <<< "$id_fields"
   scanned=$((scanned + 1))
   if [[ "$MAX_ITEMS" -gt 0 && "$handled" -ge "$MAX_ITEMS" ]]; then
     break
   fi
   handled=$((handled + 1))
-  process_item "episode" "$episode_id" "$series_id" "$missing_raw" "$subtitles_raw"
-done < <(
-  sqlite3 -separator '|' "$BAZARR_DB" "
-    SELECT sonarrEpisodeId, sonarrSeriesId, missing_subtitles, subtitles
-    FROM table_episodes
-    WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]'
-    ORDER BY sonarrEpisodeId;
-  "
-)
+  process_item "episode" "$episode_id" "$series_id" "$missing_json" "$subtitles_json"
+done < "$EPISODE_JSON"
 
-while IFS='|' read -r movie_id missing_raw subtitles_raw; do
+# Bulk export + convert movies
+MOVIE_RAW="$TMPDIR_RECOVERY/movies_raw.tsv"
+MOVIE_JSON="$TMPDIR_RECOVERY/movies_json.tsv"
+sqlite3 -separator $'\t' "$BAZARR_DB" "
+  SELECT radarrId, missing_subtitles, subtitles
+  FROM table_movies
+  WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]'
+  ORDER BY radarrId;
+" > "$MOVIE_RAW"
+batch_jsonish_to_json "$MOVIE_RAW" "$MOVIE_JSON"
+
+while IFS=$'\t' read -r movie_id missing_json subtitles_json; do
   [[ -n "$movie_id" ]] || continue
   scanned=$((scanned + 1))
   if [[ "$MAX_ITEMS" -gt 0 && "$handled" -ge "$MAX_ITEMS" ]]; then
     break
   fi
   handled=$((handled + 1))
-  process_item "movie" "$movie_id" "0" "$missing_raw" "$subtitles_raw"
-done < <(
-  sqlite3 -separator '|' "$BAZARR_DB" "
-    SELECT radarrId, missing_subtitles, subtitles
-    FROM table_movies
-    WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]'
-    ORDER BY radarrId;
-  "
-)
+  process_item "movie" "$movie_id" "0" "$missing_json" "$subtitles_json"
+done < "$MOVIE_JSON"
 
 log "Done scanned=$scanned handled=$handled bazarr_attempts=$bazarr_attempts translations=$translations arr_triggers=$arr_triggers regrab_triggers=$regrab_triggers"
 
