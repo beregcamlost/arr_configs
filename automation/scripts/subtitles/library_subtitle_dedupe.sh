@@ -8,6 +8,7 @@ LOG_PATH="${LOG_PATH:-/config/berenstuff/automation/logs/library_subtitle_dedupe
 BAZARR_DB="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
 BAZARR_URL="${BAZARR_URL:-http://127.0.0.1:6767/bazarr}"
 BAZARR_API_KEY="${BAZARR_API_KEY:-}"
+DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 MAX_FILES=0
 DRY_RUN=0
 SINCE_MINUTES=0
@@ -27,6 +28,7 @@ Options:
   --bazarr-db PATH     Bazarr SQLite db path (default: /opt/bazarr/data/db/bazarr.db)
   --bazarr-url URL     Bazarr API base URL (default: http://127.0.0.1:6767/bazarr)
   --bazarr-api-key KEY Bazarr API key for scan-disk rescans (default: from env BAZARR_API_KEY)
+  --discord-webhook URL  Discord webhook URL (default: from env DISCORD_WEBHOOK_URL)
   --max-files N        Process at most N video files this run (default: 0 = all)
   --since MINUTES      Only scan media files modified in the last N minutes (default: 0 = all)
   --dry-run            Compute decisions but do not rename/remove files
@@ -62,6 +64,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bazarr-api-key)
       BAZARR_API_KEY="${2:-}"
+      shift 2
+      ;;
+    --discord-webhook)
+      DISCORD_WEBHOOK_URL="${2:-}"
       shift 2
       ;;
     --max-files)
@@ -546,6 +552,12 @@ if [[ "$DRY_RUN" -eq 0 && -n "$BAZARR_API_KEY" ]]; then
   done
 elif [[ "$DRY_RUN" -eq 0 && -z "$BAZARR_API_KEY" && ( "${#rescan_movies[@]}" -gt 0 || "${#rescan_series[@]}" -gt 0 ) ]]; then
   log "SKIP Bazarr rescan: BAZARR_API_KEY not set (${#rescan_movies[@]} movies, ${#rescan_series[@]} series pending)"
+fi
+
+# Discord notification (only when changes were made)
+if [[ "$DRY_RUN" -eq 0 && "$changed" -gt 0 && -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+  discord_body="**Scanned:** $scanned · **Processed:** $processed · **Changed:** $changed"$'\n'"**Converted:** $total_converted · **Stripped:** $total_stripped · **Removed:** $total_removed · **Renamed:** $total_renamed · **Rescans:** $rescan_count"
+  notify_discord_embed "Subtitle Dedupe Complete" "$discord_body" 3066993
 fi
 
 log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed converted=$total_converted renamed=$total_renamed removed=$total_removed stripped=$total_stripped rescans=$rescan_count"
