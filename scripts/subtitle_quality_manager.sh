@@ -29,8 +29,8 @@ Usage: subtitle_quality_manager.sh <command> [options]
 
 Commands:
   audit          Score subtitle tracks (embedded + external) and output quality report
-  mux            Embed good external .srt files into MKV (runs audit first)
-  strip          Remove specific embedded subtitle tracks from MKV
+  mux            Embed good external .srt files into MKV/MP4/M4V (runs audit first)
+  strip          Remove specific embedded subtitle tracks from MKV/MP4/M4V
   auto-maintain  Automated mux/strip with safety checks (quick + full mode)
 
 Common options:
@@ -141,12 +141,12 @@ init_state_db() {
 # File discovery
 # ---------------------------------------------------------------------------
 
-find_mkv_files() {
+find_media_files() {
   local dir="$1"
   if [[ "$RECURSIVE" -eq 1 ]]; then
-    find "$dir" -type f -name "*.mkv" | sort
+    find "$dir" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) | sort
   else
-    find "$dir" -maxdepth 1 -type f -name "*.mkv" | sort
+    find "$dir" -maxdepth 1 -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) | sort
   fi
 }
 
@@ -316,7 +316,7 @@ cmd_audit() {
     done
 
     # External subtitle files
-    local name_stem="${basename%.mkv}"
+    local name_stem="${basename%.*}"
     while IFS= read -r srt_file; do
       [[ -z "$srt_file" ]] && continue
       local srt_basename ext_lang
@@ -352,7 +352,7 @@ cmd_audit() {
       esac
     done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null | sort)
 
-  done < <(find_mkv_files "$PATH_PREFIX")
+  done < <(find_media_files "$PATH_PREFIX")
 
   printf '\n--- Summary: %d files, %d tracks (%d GOOD, %d WARN, %d BAD) ---\n' \
     "$total_files" "$total_tracks" "$good" "$warn" "$bad" >&2
@@ -368,7 +368,7 @@ cmd_mux() {
     local basename dir name_stem duration
     basename="$(basename "$mkv_file")"
     dir="$(dirname "$mkv_file")"
-    name_stem="${basename%.mkv}"
+    name_stem="${basename%.*}"
     duration="$(get_video_duration "$mkv_file")"
 
     # Check converter conflict
@@ -433,8 +433,11 @@ cmd_mux() {
       map_args+=(-metadata:s:s:${metadata_idx} "language=${srt_langs[$i]}")
     done
 
-    local tmp_out="${mkv_file}.subtmp.mkv"
-    if ! "${ffmpeg_cmd[@]}" "${map_args[@]}" -c copy "$tmp_out" </dev/null 2>/dev/null; then
+    local ext="${mkv_file##*.}"
+    local sub_codec="copy"
+    [[ "${ext,,}" == "mp4" || "${ext,,}" == "m4v" ]] && sub_codec="mov_text"
+    local tmp_out="${mkv_file%.*}.subtmp.${ext}"
+    if ! "${ffmpeg_cmd[@]}" "${map_args[@]}" -c:v copy -c:a copy -c:s "$sub_codec" "$tmp_out" </dev/null 2>/dev/null; then
       log "FAIL mux: $basename"
       rm -f "$tmp_out"
       failed=$((failed + 1))
@@ -473,7 +476,7 @@ cmd_mux() {
     log "MUXED ${#srt_files[@]} subtitle(s) into: $basename"
     mux_summary="${mux_summary}${basename}: ${#srt_files[@]} sub(s)\n"
 
-  done < <(find_mkv_files "$PATH_PREFIX")
+  done < <(find_media_files "$PATH_PREFIX")
 
   log "Done. ${muxed} muxed, ${skipped} skipped, ${failed} failed."
 
@@ -560,7 +563,8 @@ cmd_strip() {
     done
     ffmpeg_cmd+=(-c copy)
 
-    local tmp_out="${mkv_file}.striptmp.mkv"
+    local ext="${mkv_file##*.}"
+    local tmp_out="${mkv_file%.*}.striptmp.${ext}"
     if ! "${ffmpeg_cmd[@]}" "$tmp_out" </dev/null 2>/dev/null; then
       log "FAIL strip: $basename"
       rm -f "$tmp_out"
@@ -579,7 +583,7 @@ cmd_strip() {
     stripped=$((stripped + ${#remove_indices[@]}))
     log "STRIPPED ${#remove_indices[@]} track(s) from: $basename"
 
-  done < <(find_mkv_files "$PATH_PREFIX")
+  done < <(find_media_files "$PATH_PREFIX")
 
   log "Done. ${stripped} stripped, ${skipped} skipped, ${failed} failed."
 
@@ -609,7 +613,7 @@ cmd_auto_maintain() {
     # In quick mode (--since), only process MKVs that have recently modified SRTs
     if [[ "$SINCE_MINUTES" -gt 0 ]]; then
       local stem dir
-      stem="$(basename "${mkv_file%.mkv}")"
+      stem="$(basename "${mkv_file%.*}")"
       dir="$(dirname "$mkv_file")"
       local recent_srt
       recent_srt="$(find "$dir" -maxdepth 1 -name "${stem}.*.srt" -type f -mmin "-${SINCE_MINUTES}" 2>/dev/null | head -1)"
@@ -617,7 +621,7 @@ cmd_auto_maintain() {
     fi
 
     mkv_files+=("$mkv_file")
-  done < <(find "$PATH_PREFIX_ROOT" -type f -name "*.mkv" 2>/dev/null | sort)
+  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) 2>/dev/null | sort)
 
   log "auto-maintain: found ${#mkv_files[@]} candidate files"
 
@@ -625,7 +629,7 @@ cmd_auto_maintain() {
     local basename dir name_stem duration
     basename="$(basename "$mkv_file")"
     dir="$(dirname "$mkv_file")"
-    name_stem="${basename%.mkv}"
+    name_stem="${basename%.*}"
 
     total_files=$((total_files + 1))
 
@@ -704,8 +708,11 @@ cmd_auto_maintain() {
           map_args+=(-metadata:s:s:${metadata_idx} "language=${good_langs[$i]}")
         done
 
-        local tmp_out="${mkv_file}.subtmp.mkv"
-        if "${ffmpeg_cmd[@]}" "${map_args[@]}" -c copy "$tmp_out" </dev/null 2>/dev/null; then
+        local ext="${mkv_file##*.}"
+        local sub_codec="copy"
+        [[ "${ext,,}" == "mp4" || "${ext,,}" == "m4v" ]] && sub_codec="mov_text"
+        local tmp_out="${mkv_file%.*}.subtmp.${ext}"
+        if "${ffmpeg_cmd[@]}" "${map_args[@]}" -c:v copy -c:a copy -c:s "$sub_codec" "$tmp_out" </dev/null 2>/dev/null; then
           local new_sub_count expected
           new_sub_count="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$tmp_out" 2>/dev/null | jq '.streams | length')"
           expected=$((existing_sub_count + ${#good_srts[@]}))
@@ -813,7 +820,8 @@ cmd_auto_maintain() {
             strip_cmd+=(-map "-0:${idx}")
           done
           strip_cmd+=(-c copy)
-          local strip_tmp="${mkv_file}.striptmp.mkv"
+          local ext="${mkv_file##*.}"
+          local strip_tmp="${mkv_file%.*}.striptmp.${ext}"
           if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]]; then
             mv "$strip_tmp" "$mkv_file"
             stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))
