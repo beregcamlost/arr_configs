@@ -74,7 +74,8 @@ while [[ $# -gt 0 ]]; do
     --track)      TRACK_TARGET="${2:-}"; shift 2 ;;
     --bazarr-url) BAZARR_URL="${2:-}"; shift 2 ;;
     --bazarr-db)  BAZARR_DB="${2:-}"; shift 2 ;;
-    --state-dir)  CODEC_STATE_DIR="${2:-}"; shift 2 ;;
+    --state-dir)  STATE_DIR="${2:-}"; shift 2 ;;
+    --codec-state-dir) CODEC_STATE_DIR="${2:-}"; shift 2 ;;
     --log-level)  LOG_LEVEL="${2:-}"; shift 2 ;;
     --path-prefix) PATH_PREFIX_ROOT="${2:-}"; shift 2 ;;
     --since)       SINCE_MINUTES="${2:-0}"; shift 2 ;;
@@ -636,7 +637,7 @@ cmd_auto_maintain() {
     if [[ "$SINCE_MINUTES" -eq 0 ]]; then
       local current_mtime stored_mtime
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
-      stored_mtime="$(sqlite3 "$state_db" "SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null || echo 0)"
+      stored_mtime="$(sqlite3 "$state_db" "PRAGMA busy_timeout=30000; SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null || echo 0)"
       if [[ "$current_mtime" -eq "$stored_mtime" ]] && [[ "$stored_mtime" -gt 0 ]]; then
         debug "SKIP (unchanged): $basename"
         continue
@@ -647,7 +648,7 @@ cmd_auto_maintain() {
     local file_modified=0
 
     # --- Phase 1: Audit & mux external SRTs ---
-    local -a good_srts=() good_langs=() warn_srts=()
+    local -a good_srts=() good_langs=()
     while IFS= read -r srt_file; do
       [[ -z "$srt_file" ]] && continue
       local srt_basename ext_lang
@@ -666,7 +667,6 @@ cmd_auto_maintain() {
           good_langs+=("$ext_lang")
           ;;
         WARN)
-          warn_srts+=("$srt_file")
           warned=$((warned + 1))
           ;;
         BAD)
@@ -719,79 +719,106 @@ cmd_auto_maintain() {
     fi
 
     # --- Phase 2: Auto-strip BAD embedded tracks ---
-    local embedded_json emb_count
-    embedded_json="$(get_embedded_subs "$mkv_file")"
-    emb_count="$(jq 'length' <<<"$embedded_json")"
+    # Quick mode: only strip if we just muxed a GOOD replacement this run
+    # Full mode: always run Phase 2 (full audit)
+    if [[ "$SINCE_MINUTES" -gt 0 ]] && [[ ${#good_langs[@]} -eq 0 ]]; then
+      debug "SKIP Phase 2 (quick mode, no mux this run): $basename"
+    else
+      local embedded_json emb_count
+      embedded_json="$(get_embedded_subs "$mkv_file")"
+      emb_count="$(jq 'length' <<<"$embedded_json")"
 
-    if [[ "$emb_count" -gt 1 ]]; then
-      local -a strip_indices=()
-      for ((i=0; i<emb_count; i++)); do
-        local stream_idx lang title
-        stream_idx="$(jq -r ".[$i].index" <<<"$embedded_json")"
-        lang="$(jq -r ".[$i].tags.language" <<<"$embedded_json")"
-        title="$(jq -r ".[$i].tags.title" <<<"$embedded_json")"
+      if [[ "$emb_count" -gt 1 ]]; then
+        # First pass: score ALL embedded tracks and cache results
+        local -a emb_ratings=() emb_norm_langs=() emb_stream_ids=()
+        for ((i=0; i<emb_count; i++)); do
+          local stream_idx lang title
+          stream_idx="$(jq -r ".[$i].index" <<<"$embedded_json")"
+          lang="$(jq -r ".[$i].tags.language" <<<"$embedded_json")"
+          title="$(jq -r ".[$i].tags.title" <<<"$embedded_json")"
 
-        # Extract to temp file for scoring
-        local tmpfile="/tmp/sub_auto_${$}_${stream_idx}.srt"
-        if ! ffmpeg -v quiet -i "$mkv_file" -map "0:${stream_idx}" -f srt "$tmpfile" </dev/null 2>/dev/null; then
-          rm -f "$tmpfile"
-          continue
-        fi
-
-        local analysis cues first_sec last_sec mojibake watermarks emb_rating
-        analysis="$(analyze_srt_file "$tmpfile")"
-        read -r cues first_sec last_sec mojibake watermarks <<<"$analysis"
-        if echo "$title" | grep -qiE "$WATERMARK_PATTERNS" 2>/dev/null; then
-          watermarks=1
-        fi
-        emb_rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
-        rm -f "$tmpfile"
-
-        if [[ "$emb_rating" == "BAD" ]]; then
-          # Check if a GOOD replacement exists in same language (normalize en/eng, es/spa)
-          local norm_lang="${lang}"
+          emb_stream_ids+=("$stream_idx")
+          local norm_lang="$lang"
           [[ "$norm_lang" == "eng" ]] && norm_lang="en"
           [[ "$norm_lang" == "spa" ]] && norm_lang="es"
+          emb_norm_langs+=("$norm_lang")
+
+          # Extract to temp file for scoring
+          local tmpfile="/tmp/sub_auto_${$}_${stream_idx}.srt"
+          if ! ffmpeg -v quiet -i "$mkv_file" -map "0:${stream_idx}" -f srt "$tmpfile" </dev/null 2>/dev/null; then
+            rm -f "$tmpfile"
+            emb_ratings+=("UNKNOWN")
+            continue
+          fi
+
+          local analysis cues first_sec last_sec mojibake watermarks emb_rating
+          analysis="$(analyze_srt_file "$tmpfile")"
+          read -r cues first_sec last_sec mojibake watermarks <<<"$analysis"
+          if echo "$title" | grep -qiE "$WATERMARK_PATTERNS" 2>/dev/null; then
+            watermarks=1
+          fi
+          emb_rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
+          rm -f "$tmpfile"
+          emb_ratings+=("$emb_rating")
+
+          [[ "$emb_rating" == "WARN" ]] && warned=$((warned + 1))
+        done
+
+        # Second pass: identify BAD tracks with a GOOD replacement
+        local -a strip_indices=()
+        for ((i=0; i<emb_count; i++)); do
+          [[ "${emb_ratings[$i]}" != "BAD" ]] && continue
+
+          local norm_lang="${emb_norm_langs[$i]}"
           local has_good=0
-          for ((j=0; j<emb_count; j++)); do
-            [[ "$j" -eq "$i" ]] && continue
-            local other_lang
-            other_lang="$(jq -r ".[$j].tags.language" <<<"$embedded_json")"
-            [[ "$other_lang" == "eng" ]] && other_lang="en"
-            [[ "$other_lang" == "spa" ]] && other_lang="es"
-            if [[ "$other_lang" == "$norm_lang" ]]; then
+
+          # Check 1: Was a GOOD SRT just muxed in this language? (good_langs from Phase 1)
+          for gl in "${good_langs[@]+"${good_langs[@]}"}"; do
+            if [[ "$gl" == "$norm_lang" ]]; then
               has_good=1
               break
             fi
           done
-          if [[ "$has_good" -eq 1 ]]; then
-            strip_indices+=("$stream_idx")
-            log "AUTO-STRIP BAD embedded idx=$stream_idx lang=$lang: $basename"
-          fi
-        fi
-      done
 
-      if [[ ${#strip_indices[@]} -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
-        local -a strip_cmd=(ffmpeg -y -v quiet -i "$mkv_file" -map 0)
-        for idx in "${strip_indices[@]}"; do
-          strip_cmd+=(-map "-0:${idx}")
+          # Check 2: Is another embedded track in the same language rated GOOD?
+          if [[ "$has_good" -eq 0 ]]; then
+            for ((j=0; j<emb_count; j++)); do
+              [[ "$j" -eq "$i" ]] && continue
+              if [[ "${emb_norm_langs[$j]}" == "$norm_lang" ]] && [[ "${emb_ratings[$j]}" == "GOOD" ]]; then
+                has_good=1
+                break
+              fi
+            done
+          fi
+
+          if [[ "$has_good" -eq 1 ]]; then
+            strip_indices+=("${emb_stream_ids[$i]}")
+            log "AUTO-STRIP BAD embedded idx=${emb_stream_ids[$i]} lang=${norm_lang}: $basename"
+          fi
         done
-        strip_cmd+=(-c copy)
-        local strip_tmp="${mkv_file}.striptmp.mkv"
-        if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]]; then
-          mv "$strip_tmp" "$mkv_file"
+
+        if [[ ${#strip_indices[@]} -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
+          local -a strip_cmd=(ffmpeg -y -v quiet -i "$mkv_file" -map 0)
+          for idx in "${strip_indices[@]}"; do
+            strip_cmd+=(-map "-0:${idx}")
+          done
+          strip_cmd+=(-c copy)
+          local strip_tmp="${mkv_file}.striptmp.mkv"
+          if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]]; then
+            mv "$strip_tmp" "$mkv_file"
+            stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))
+            stripped_files=$((stripped_files + 1))
+            file_modified=1
+            log "STRIPPED ${#strip_indices[@]} BAD track(s) from: $basename"
+          else
+            rm -f "$strip_tmp"
+            log "FAIL strip: $basename"
+          fi
+        elif [[ ${#strip_indices[@]} -gt 0 ]]; then
+          log "[DRY-RUN] Would strip ${#strip_indices[@]} BAD track(s) from: $basename"
           stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))
           stripped_files=$((stripped_files + 1))
-          file_modified=1
-          log "STRIPPED ${#strip_indices[@]} BAD track(s) from: $basename"
-        else
-          rm -f "$strip_tmp"
-          log "FAIL strip: $basename"
         fi
-      elif [[ ${#strip_indices[@]} -gt 0 ]]; then
-        log "[DRY-RUN] Would strip ${#strip_indices[@]} BAD track(s) from: $basename"
-        stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))
-        stripped_files=$((stripped_files + 1))
       fi
     fi
 
@@ -800,15 +827,21 @@ cmd_auto_maintain() {
       emby_refresh_item "$mkv_file" || log "WARN: Emby refresh failed (non-fatal)"
       # Track modified dirs for Bazarr rescan
       local show_dir
-      show_dir="$(echo "$mkv_file" | sed 's|/Season.*||' | sed 's|/$||')"
+      if [[ "$mkv_file" == *"/tv/"* ]] || [[ "$mkv_file" == *"/tvanimated/"* ]]; then
+        show_dir="$(echo "$mkv_file" | sed 's|/Season.*||' | sed 's|/$||')"
+      else
+        show_dir="$(dirname "$mkv_file")"
+      fi
       modified_dirs+=("$show_dir")
     fi
 
     # Update state DB (full mode only)
     if [[ "$SINCE_MINUTES" -eq 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
-      local current_mtime
+      local current_mtime action_val="none"
+      [[ "$muxed_files" -gt 0 ]] && [[ "$file_modified" -eq 1 ]] && action_val="muxed"
+      [[ "$stripped_files" -gt 0 ]] && [[ "$file_modified" -eq 1 ]] && action_val="stripped"
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
-      sqlite3 "$state_db" "INSERT OR REPLACE INTO file_audits (file_path, mtime, last_audit_ts, action_taken) VALUES ('$(sql_escape "$mkv_file")', $current_mtime, $(date +%s), 'processed');" 2>/dev/null || true
+      sqlite3 "$state_db" "PRAGMA busy_timeout=30000; INSERT OR REPLACE INTO file_audits (file_path, mtime, last_audit_ts, action_taken) VALUES ('$(sql_escape "$mkv_file")', $current_mtime, $(date +%s), '$action_val');" 2>/dev/null || true
     fi
   done
 
