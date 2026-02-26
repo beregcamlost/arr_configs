@@ -15,6 +15,11 @@ BAZARR_API_KEY="${BAZARR_API_KEY:-}"
 BAZARR_DB="/opt/bazarr/data/db/bazarr.db"
 CODEC_STATE_DIR="/APPBOX_DATA/storage/.transcode-state-media"
 LOG_LEVEL="info"
+PATH_PREFIX_ROOT=""
+SINCE_MINUTES=0
+STATE_DIR="/APPBOX_DATA/storage/.subtitle-quality-state"
+EMBY_URL="${EMBY_URL:-}"
+EMBY_API_KEY="${EMBY_API_KEY:-}"
 
 WATERMARK_PATTERNS="galaxytv|yify|yts|opensubtitles|addic7ed|subscene|podnapisi|sub[sz]cene"
 
@@ -55,7 +60,7 @@ COMMAND="${1:-}"
 shift
 
 case "$COMMAND" in
-  audit|mux|strip) ;;
+  audit|mux|strip|auto-maintain) ;;
   --help|-h) usage; exit 0 ;;
   *) echo "Unknown command: $COMMAND" >&2; usage; exit 1 ;;
 esac
@@ -71,13 +76,21 @@ while [[ $# -gt 0 ]]; do
     --bazarr-db)  BAZARR_DB="${2:-}"; shift 2 ;;
     --state-dir)  CODEC_STATE_DIR="${2:-}"; shift 2 ;;
     --log-level)  LOG_LEVEL="${2:-}"; shift 2 ;;
+    --path-prefix) PATH_PREFIX_ROOT="${2:-}"; shift 2 ;;
+    --since)       SINCE_MINUTES="${2:-0}"; shift 2 ;;
+    --emby-url)    EMBY_URL="${2:-}"; shift 2 ;;
+    --emby-api-key) EMBY_API_KEY="${2:-}"; shift 2 ;;
     --help|-h)    usage; exit 0 ;;
     *)            echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-if [[ -z "$PATH_PREFIX" ]]; then
+if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]]; then
   echo "--path is required." >&2; exit 1
+fi
+
+if [[ "$COMMAND" == "auto-maintain" ]] && [[ -z "$PATH_PREFIX_ROOT" ]]; then
+  echo "--path-prefix is required for auto-maintain." >&2; exit 1
 fi
 
 if [[ "$COMMAND" == "strip" ]] && [[ -z "$TRACK_TARGET" ]]; then
@@ -94,6 +107,23 @@ log() {
 debug() {
   [[ "$LOG_LEVEL" == "debug" ]] && log "DEBUG $*"
   return 0
+}
+
+init_state_db() {
+  local db="$1"
+  mkdir -p "$(dirname "$db")"
+  sqlite3 "$db" "
+    CREATE TABLE IF NOT EXISTS file_audits (
+      file_path TEXT PRIMARY KEY,
+      mtime INTEGER NOT NULL,
+      last_audit_ts INTEGER NOT NULL,
+      embedded_json TEXT DEFAULT '[]',
+      external_json TEXT DEFAULT '[]',
+      action_taken TEXT DEFAULT 'none'
+    );
+    PRAGMA journal_mode=WAL;
+    PRAGMA busy_timeout=30000;
+  "
 }
 
 # ---------------------------------------------------------------------------
@@ -551,7 +581,8 @@ cmd_strip() {
 }
 
 case "$COMMAND" in
-  audit) cmd_audit ;;
-  mux)   cmd_mux ;;
-  strip) cmd_strip ;;
+  audit)        cmd_audit ;;
+  mux)          cmd_mux ;;
+  strip)        cmd_strip ;;
+  auto-maintain) cmd_auto_maintain ;;
 esac
