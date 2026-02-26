@@ -164,6 +164,27 @@ is_file_being_converted() {
 }
 
 # ---------------------------------------------------------------------------
+# Language code helpers (MP4/M4V require ISO 639-2 three-letter codes)
+# ---------------------------------------------------------------------------
+
+lang_to_iso639_2() {
+  local code="$1"
+  case "${code,,}" in
+    en)  echo "eng" ;; es)  echo "spa" ;; fr)  echo "fra" ;;
+    de)  echo "deu" ;; it)  echo "ita" ;; pt)  echo "por" ;;
+    zh)  echo "zho" ;; ja)  echo "jpn" ;; ko)  echo "kor" ;;
+    ar)  echo "ara" ;; ru)  echo "rus" ;; nl)  echo "nld" ;;
+    sv)  echo "swe" ;; da)  echo "dan" ;; fi)  echo "fin" ;;
+    no)  echo "nor" ;; pl)  echo "pol" ;; cs)  echo "ces" ;;
+    hu)  echo "hun" ;; ro)  echo "ron" ;; tr)  echo "tur" ;;
+    th)  echo "tha" ;; vi)  echo "vie" ;; el)  echo "ell" ;;
+    he)  echo "heb" ;; hi)  echo "hin" ;; id)  echo "ind" ;;
+    uk)  echo "ukr" ;; bg)  echo "bul" ;; hr)  echo "hrv" ;;
+    *)   echo "$code" ;;  # pass through 3-letter codes and 'und' as-is
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # SRT parsing helpers
 # ---------------------------------------------------------------------------
 
@@ -423,14 +444,25 @@ cmd_mux() {
     # Build ffmpeg command
     local -a ffmpeg_cmd=(ffmpeg -y -v quiet -i "$mkv_file")
     local -a map_args=(-map 0)
-    local existing_sub_count
+    local existing_sub_count total_stream_count
     existing_sub_count="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$mkv_file" 2>/dev/null | jq '.streams | length')"
+    total_stream_count="$(ffprobe -v quiet -print_format json -show_streams "$mkv_file" 2>/dev/null | jq '.streams | length')"
+
+    local is_mp4=0
+    [[ "${mkv_file##*.}" == "mp4" || "${mkv_file##*.}" == "m4v" ]] && is_mp4=1
 
     for ((i=0; i<${#srt_files[@]}; i++)); do
       ffmpeg_cmd+=(-i "${srt_files[$i]}")
       map_args+=(-map "$((i + 1)):0")
-      local metadata_idx=$((existing_sub_count + i))
-      map_args+=(-metadata:s:s:${metadata_idx} "language=${srt_langs[$i]}")
+      local lang="${srt_langs[$i]}"
+      if [[ "$is_mp4" -eq 1 ]]; then
+        lang="$(lang_to_iso639_2 "$lang")"
+        local abs_idx=$((total_stream_count + i))
+        map_args+=(-metadata:s:${abs_idx} "language=${lang}")
+      else
+        local metadata_idx=$((existing_sub_count + i))
+        map_args+=(-metadata:s:s:${metadata_idx} "language=${lang}")
+      fi
     done
 
     local ext="${mkv_file##*.}"
@@ -698,14 +730,25 @@ cmd_auto_maintain() {
       else
         local -a ffmpeg_cmd=(ffmpeg -y -v quiet -i "$mkv_file")
         local -a map_args=(-map 0)
-        local existing_sub_count
+        local existing_sub_count total_stream_count
         existing_sub_count="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$mkv_file" 2>/dev/null | jq '.streams | length')"
+        total_stream_count="$(ffprobe -v quiet -print_format json -show_streams "$mkv_file" 2>/dev/null | jq '.streams | length')"
+
+        local is_mp4=0
+        [[ "${mkv_file##*.}" == "mp4" || "${mkv_file##*.}" == "m4v" ]] && is_mp4=1
 
         for ((i=0; i<${#good_srts[@]}; i++)); do
           ffmpeg_cmd+=(-i "${good_srts[$i]}")
           map_args+=(-map "$((i + 1)):0")
-          local metadata_idx=$((existing_sub_count + i))
-          map_args+=(-metadata:s:s:${metadata_idx} "language=${good_langs[$i]}")
+          local lang="${good_langs[$i]}"
+          if [[ "$is_mp4" -eq 1 ]]; then
+            lang="$(lang_to_iso639_2 "$lang")"
+            local abs_idx=$((total_stream_count + i))
+            map_args+=(-metadata:s:${abs_idx} "language=${lang}")
+          else
+            local metadata_idx=$((existing_sub_count + i))
+            map_args+=(-metadata:s:s:${metadata_idx} "language=${lang}")
+          fi
         done
 
         local ext="${mkv_file##*.}"
