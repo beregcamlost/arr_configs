@@ -507,6 +507,7 @@ cmd_mux() {
     muxed=$((muxed + ${#srt_files[@]}))
     log "MUXED ${#srt_files[@]} subtitle(s) into: $basename"
     mux_summary="${mux_summary}${basename}: ${#srt_files[@]} sub(s)\n"
+    emby_refresh_item "$mkv_file" || log "WARN: Emby refresh failed (non-fatal)"
 
   done < <(find_media_files "$PATH_PREFIX")
 
@@ -614,6 +615,7 @@ cmd_strip() {
     mv "$tmp_out" "$mkv_file"
     stripped=$((stripped + ${#remove_indices[@]}))
     log "STRIPPED ${#remove_indices[@]} track(s) from: $basename"
+    emby_refresh_item "$mkv_file" || log "WARN: Emby refresh failed (non-fatal)"
 
   done < <(find_media_files "$PATH_PREFIX")
 
