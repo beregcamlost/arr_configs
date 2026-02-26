@@ -86,6 +86,25 @@ log() {
   fi
 }
 
+# Emby per-item refresh after codec conversion (self-contained, no lib dependency)
+emby_refresh_item() {
+  local file_path="$1"
+  local emby_url="${EMBY_URL:-}" emby_key="${EMBY_API_KEY:-}"
+  [[ -z "$emby_url" || -z "$emby_key" ]] && return 0
+  local search_name item_id
+  search_name="$(basename "$file_path" .mkv | sed 's/ - S[0-9]*E[0-9]*.*//' | sed 's/ ([0-9]*)$//')"
+  item_id="$(curl -fsS "${emby_url}/Items?api_key=${emby_key}&SearchTerm=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$search_name'))")&Recursive=true&Limit=10" 2>/dev/null \
+    | jq -r --arg path "$file_path" '[.Items[] | select(.Path == $path)] | .[0].Id // empty' 2>/dev/null)" || true
+  if [[ -z "$item_id" ]]; then
+    local parent_name
+    parent_name="$(basename "$(dirname "$file_path")")"
+    item_id="$(curl -fsS "${emby_url}/Items?api_key=${emby_key}&SearchTerm=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$parent_name'))")&Recursive=true&Limit=10" 2>/dev/null \
+      | jq -r --arg path "$file_path" '[.Items[] | select(.Path == $path)] | .[0].Id // empty' 2>/dev/null)" || true
+  fi
+  [[ -n "$item_id" ]] && curl -fsS -X POST "${emby_url}/Items/${item_id}/Refresh?api_key=${emby_key}&Recursive=true&MetadataRefreshMode=Default&ImageRefreshMode=Default" >/dev/null 2>&1 || true
+  return 0
+}
+
 notify_discord_audit_done() {
   local processed="$1"
   local probe_ok="$2"
@@ -1123,6 +1142,7 @@ INSERT INTO artifacts(media_id,new_path,backup_path,verify_hash_old,verify_hash_
 VALUES($media_id,'$(sql_quote "$src")','$(sql_quote "$backup_path")','$(sql_quote "$old_hash")','$(sql_quote "$new_hash")',1,CURRENT_TIMESTAMP);
 SQL
       insert_event "info" "convert" "$media_id" "swap completed" "{\"src\":\"$(sql_quote "$src")\",\"backup\":\"$(sql_quote "$backup_path")\"}"
+      emby_refresh_item "$src" || log "warn" "Emby refresh failed for media_id=$media_id (non-fatal)"
     else
       mv "$backup_path" "$src" || true
       sqlite3 "$DB_PATH" "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='rolled_back',error='swap_failed_rolled_back' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"

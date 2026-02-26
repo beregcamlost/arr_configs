@@ -28,17 +28,19 @@ usage() {
 Usage: subtitle_quality_manager.sh <command> [options]
 
 Commands:
-  audit    Score subtitle tracks (embedded + external) and output quality report
-  mux      Embed good external .srt files into MKV (runs audit first)
-  strip    Remove specific embedded subtitle tracks from MKV
+  audit          Score subtitle tracks (embedded + external) and output quality report
+  mux            Embed good external .srt files into MKV (runs audit first)
+  strip          Remove specific embedded subtitle tracks from MKV
+  auto-maintain  Automated mux/strip with safety checks (quick + full mode)
 
 Common options:
-  --path DIR            Media directory to process (required)
+  --path DIR            Media directory to process (required for audit/mux/strip)
   --recursive           Process subdirectories recursively
   --dry-run             Preview changes without modifying files
   --bazarr-url URL      Bazarr base URL (default: http://127.0.0.1:6767/bazarr)
   --bazarr-db PATH      Bazarr DB path (default: /opt/bazarr/data/db/bazarr.db)
-  --state-dir DIR       Codec manager state dir (default: /APPBOX_DATA/storage/.transcode-state-media)
+  --state-dir DIR       State DB directory (default: /APPBOX_DATA/storage/.subtitle-quality-state)
+  --codec-state-dir DIR Codec converter state dir for conflict detection
   --log-level LEVEL     Log level: info or debug (default: info)
   --help                Show this help
 
@@ -48,10 +50,18 @@ Mux options:
 Strip options:
   --track TARGET        Language code (e.g. eng) or stream index (e.g. 2) to remove
 
+Auto-maintain options:
+  --path-prefix DIR     Root media directory to scan recursively (required)
+  --since N             Only scan files with SRTs modified in last N minutes (quick mode)
+  --emby-url URL        Emby server URL (default: from EMBY_URL env)
+  --emby-api-key KEY    Emby API key (default: from EMBY_API_KEY env)
+
 Examples:
-  subtitle_quality_manager.sh audit --path "/APPBOX_DATA/storage/media/tv/Evil" --recursive
-  subtitle_quality_manager.sh mux --path "/APPBOX_DATA/storage/media/tv/Evil/Season 1" --dry-run
-  subtitle_quality_manager.sh strip --path "/APPBOX_DATA/storage/media/tv/Evil" --track eng --recursive --dry-run
+  subtitle_quality_manager.sh audit --path "/media/tv/Evil" --recursive
+  subtitle_quality_manager.sh mux --path "/media/tv/Evil/Season 1" --dry-run
+  subtitle_quality_manager.sh strip --path "/media/tv/Evil" --track eng --recursive --dry-run
+  subtitle_quality_manager.sh auto-maintain --path-prefix /media --since 15 --dry-run
+  subtitle_quality_manager.sh auto-maintain --path-prefix /media  # full incremental scan
 EOF
 }
 

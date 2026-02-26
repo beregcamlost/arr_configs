@@ -193,6 +193,11 @@ main() {
     extract_target "$MEDIA_PATH" "$code" "$forced"
   done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
 
+  # Trigger Emby refresh for the imported file
+  if [[ "$WRITES" -gt 0 ]] && [[ -n "${EMBY_URL:-}" && -n "${EMBY_API_KEY:-}" ]]; then
+    emby_refresh_item "$MEDIA_PATH" || log "WARN: Emby refresh failed (non-fatal)"
+  fi
+
   if [[ "$WRITES" -gt 0 ]]; then
     notify_discord "SUCCESS" "**$WRITES** extracted · **$SKIPS** skipped · **$PRUNES** pruned"
   else
