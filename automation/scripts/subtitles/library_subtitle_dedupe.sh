@@ -438,6 +438,7 @@ total_removed=0
 total_stripped=0
 declare -A rescan_movies=()
 declare -A rescan_series=()
+declare -a changed_paths=()
 
 while IFS= read -r -d '' media; do
   scanned=$((scanned + 1))
@@ -480,6 +481,7 @@ while IFS= read -r -d '' media; do
     total_removed=$((total_removed + removed))
     total_stripped=$((total_stripped + stripped))
     log "CLEANED media=$(basename "$media") converted=$converted renamed=$renamed removed=$removed stripped=$stripped"
+    changed_paths+=("$media")
   fi
 
   # Track media IDs that need Bazarr rescan (when subs were removed)
@@ -552,6 +554,13 @@ if [[ "$DRY_RUN" -eq 0 && -n "$BAZARR_API_KEY" ]]; then
   done
 elif [[ "$DRY_RUN" -eq 0 && -z "$BAZARR_API_KEY" && ( "${#rescan_movies[@]}" -gt 0 || "${#rescan_series[@]}" -gt 0 ) ]]; then
   log "SKIP Bazarr rescan: BAZARR_API_KEY not set (${#rescan_movies[@]} movies, ${#rescan_series[@]} series pending)"
+fi
+
+# Emby refresh: notify Emby to reload metadata for changed files
+if [[ "$DRY_RUN" -eq 0 && "${#changed_paths[@]}" -gt 0 && -n "${EMBY_URL:-}" && -n "${EMBY_API_KEY:-}" ]]; then
+  for _cp in "${changed_paths[@]}"; do
+    emby_refresh_item "$_cp" || log "WARN: Emby refresh failed for $(basename "$_cp") (non-fatal)"
+  done
 fi
 
 # Discord notification (only when changes were made)
