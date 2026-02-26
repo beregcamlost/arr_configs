@@ -104,24 +104,80 @@ Options:
 | Import hook | Creates external SRTs | No | Auto-maintain picks them up next run |
 | Emby auto-detect | Reads new files | Minor | Per-item refresh after modification |
 
+### Faster New Import Handling
+
+The import hook (`arr_profile_extract_on_import.sh`) already fires on every Sonarr/Radarr import. After extracting embedded subs, it can trigger auto-maintain directly on the imported file's directory instead of waiting for the */10 cron. This reduces the delay from ~10 minutes to seconds.
+
+```bash
+# At end of import hook, after extraction completes:
+# Fire-and-forget auto-maintain on just this file's directory
+nohup flock -n /tmp/library_subtitle_dedupe.lock \
+  bash subtitle_quality_manager.sh auto-maintain --since 5 --path "$MEDIA_DIR" \
+  >> .../subtitle_quality_manager.log 2>&1 &
+```
+
+Bazarr still takes minutes to download SRTs, so the hook-triggered run handles embedded-only cleanup. The */10 cron catches Bazarr downloads shortly after.
+
+### Shared Emby Refresh Helper
+
+New function `emby_refresh_item()` added to `lib_subtitle_common.sh` so ALL scripts that modify media files can trigger Emby metadata refresh:
+
+```bash
+emby_refresh_item() {
+  local file_path="$1"
+  local emby_url="${EMBY_URL:-}" emby_key="${EMBY_API_KEY:-}"
+  [[ -z "$emby_url" || -z "$emby_key" ]] && return 0
+  local item_id
+  item_id="$(curl -fsS "${emby_url}/Items?api_key=${emby_key}&Path=$(urlencode "$file_path")&Recursive=true&Limit=1" | jq -r '.Items[0].Id // empty')"
+  [[ -n "$item_id" ]] && curl -fsS -X POST "${emby_url}/Items/${item_id}/Refresh?api_key=${emby_key}&Recursive=true&MetadataRefreshMode=Default&ImageRefreshMode=Default" >/dev/null 2>&1
+}
+```
+
+Scripts that will call `emby_refresh_item()` after modifying files:
+- `subtitle_quality_manager.sh` (mux/strip/auto-maintain)
+- `library_codec_manager.sh` (after convert completes — swap with new file)
+- `arr_profile_extract_on_import.sh` (after extracting embedded subs)
+- `library_subtitle_dedupe.sh` (after removing duplicate SRTs)
+
+### Emby Active Playback Check Helper
+
+New function `is_file_being_played()` in `lib_subtitle_common.sh`:
+
+```bash
+is_file_being_played() {
+  local file_path="$1"
+  local emby_url="${EMBY_URL:-}" emby_key="${EMBY_API_KEY:-}"
+  [[ -z "$emby_url" || -z "$emby_key" ]] && return 1
+  local playing
+  playing="$(curl -fsS "${emby_url}/Sessions?api_key=${emby_key}" | jq --arg path "$file_path" '[.[] | select(.NowPlayingItem.Path == $path)] | length')"
+  [[ "$playing" -gt 0 ]]
+}
+```
+
 ### End-to-End Flow
 
 ```
 1. Sonarr/Radarr imports file → lands in media/
 2. Emby auto-detects → indexes video, audio, existing embedded subs
-3. Import hook fires → extracts embedded subs to external SRTs
+3. Import hook fires:
+   a. Extracts embedded subs to external SRTs
+   b. Triggers Emby refresh for the file
+   c. Fire-and-forget auto-maintain on file's directory
 4. Bazarr detects → downloads best external SRTs (en, es, etc.)
-5. Dedupe cleans duplicates (*/5 min)
+5. Dedupe cleans duplicates (*/5 min) → Emby refresh per affected file
 6. Auto-maintain quick scan (*/10 min):
    a. Finds new/changed SRT files
    b. Audits quality (cues, timing, watermarks, encoding)
-   c. Muxes GOOD SRTs into MKV (checks converter + playback first)
-   d. Strips BAD embedded if GOOD replacement exists
-   e. Triggers Emby per-item refresh
-   f. Triggers Bazarr scan-disk
-   g. Discord summary
+   c. Checks no active playback and no converter running
+   d. Muxes GOOD SRTs into MKV
+   e. Strips BAD embedded if GOOD replacement exists
+   f. Triggers Emby per-item refresh
+   g. Triggers Bazarr scan-disk
+   h. Discord summary
 7. Auto-maintain full scan (daily 1 AM):
    a. Catches anything quick scan missed
    b. Full embedded track analysis with incremental state
    c. Same mux/strip/refresh logic
+8. Codec converter (*/15 min):
+   a. After converting a file → Emby refresh for that item
 ```
