@@ -172,3 +172,111 @@ def record_scan(db_path, country, movies_checked, series_checked,
           newly_streaming, left_streaming, duration_seconds))
     conn.commit()
     conn.close()
+
+
+def get_active_matches_filtered(db_path, provider=None, library=None,
+                                 min_size=None, since_days=None, sort_by="title"):
+    """Get active streaming matches with optional filters.
+
+    Args:
+        provider: Filter by provider name (case-insensitive).
+        library: Filter by library name (case-insensitive).
+        min_size: Minimum size in bytes.
+        since_days: Only items first seen within N days.
+        sort_by: One of 'title', 'size', 'date', 'provider'.
+    """
+    sort_map = {
+        "title": "title ASC",
+        "size": "COALESCE(size_bytes, 0) DESC",
+        "date": "first_seen DESC",
+        "provider": "provider_name ASC, title ASC",
+    }
+    order = sort_map.get(sort_by, "title ASC")
+
+    clauses = ["left_at IS NULL", "deleted_at IS NULL"]
+    params = []
+
+    if provider:
+        clauses.append("LOWER(provider_name) = LOWER(?)")
+        params.append(provider)
+    if library:
+        clauses.append("LOWER(library) = LOWER(?)")
+        params.append(library)
+    if min_size is not None:
+        clauses.append("COALESCE(size_bytes, 0) >= ?")
+        params.append(min_size)
+    if since_days is not None:
+        clauses.append("first_seen >= datetime('now', ?)")
+        params.append(f"-{since_days} days")
+
+    sql = f"SELECT * FROM streaming_status WHERE {' AND '.join(clauses)} ORDER BY {order}"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    cursor = conn.execute(sql, params)
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_scan_history(db_path, limit=5):
+    """Get most recent scan history entries."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    cursor = conn.execute(
+        "SELECT * FROM scan_history ORDER BY scan_id DESC LIMIT ?", (limit,)
+    )
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_summary_stats(db_path):
+    """Get summary statistics for active streaming matches.
+
+    Returns dict with: total_active, total_size_bytes, by_provider, by_library, last_scan.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+
+    # Total active matches and size
+    row = conn.execute("""
+        SELECT COUNT(*) as total, COALESCE(SUM(COALESCE(size_bytes, 0)), 0) as size
+        FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL
+    """).fetchone()
+    total_active = row["total"]
+    total_size_bytes = row["size"]
+
+    # By provider
+    by_provider = [dict(r) for r in conn.execute("""
+        SELECT provider_name, COUNT(*) as count,
+               COALESCE(SUM(COALESCE(size_bytes, 0)), 0) as size_bytes
+        FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL
+        GROUP BY provider_name ORDER BY count DESC
+    """).fetchall()]
+
+    # By library — deduplicated count (an item on multiple providers counts once)
+    by_library = [dict(r) for r in conn.execute("""
+        SELECT library, COUNT(DISTINCT tmdb_id || ':' || media_type) as count
+        FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL
+        GROUP BY library ORDER BY count DESC
+    """).fetchall()]
+
+    # Last scan
+    last_scan_row = conn.execute(
+        "SELECT * FROM scan_history ORDER BY scan_id DESC LIMIT 1"
+    ).fetchone()
+    last_scan = dict(last_scan_row) if last_scan_row else None
+
+    conn.close()
+
+    return {
+        "total_active": total_active,
+        "total_size_bytes": total_size_bytes,
+        "by_provider": by_provider,
+        "by_library": by_library,
+        "last_scan": last_scan,
+    }

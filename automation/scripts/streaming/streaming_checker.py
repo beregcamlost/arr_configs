@@ -25,7 +25,10 @@ from streaming.arr_client import (
 from streaming.config import PROVIDER_MAP, load_config
 from streaming.db import (
     get_active_matches,
+    get_active_matches_filtered,
     get_left_streaming,
+    get_scan_history,
+    get_summary_stats,
     init_db,
     mark_deleted,
     mark_left_streaming,
@@ -207,14 +210,25 @@ def scan(country, providers, dry_run, verbose, db_path):
 
 @cli.command()
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="Output as JSON")
+@click.option("--provider", default=None, help="Filter by provider name (case-insensitive)")
+@click.option("--library", default=None, help="Filter by library name (case-insensitive)")
+@click.option("--min-size", default=None, type=float, help="Minimum size in GB")
+@click.option("--sort-by", default="title", type=click.Choice(["title", "size", "date", "provider"]),
+              help="Sort order")
+@click.option("--since-days", default=None, type=int, help="Only items first seen within N days")
 @click.option("--db-path", default=None, help="Path to state database")
-def report(json_out, db_path):
+def report(json_out, provider, library, min_size, sort_by, since_days, db_path):
     """Show current streaming availability status from state DB."""
     _setup_logging(False)
     cfg = load_config(db_path=db_path)
 
     init_db(cfg.db_path)
-    active = get_active_matches(cfg.db_path)
+
+    min_size_bytes = int(min_size * 1_000_000_000) if min_size is not None else None
+    active = get_active_matches_filtered(
+        cfg.db_path, provider=provider, library=library,
+        min_size=min_size_bytes, since_days=since_days, sort_by=sort_by,
+    )
     left = get_left_streaming(cfg.db_path)
 
     if json_out:
@@ -235,10 +249,10 @@ def report(json_out, db_path):
         total_size = sum(item.get("size_bytes", 0) or 0 for item in active)
 
         click.echo(f"\n=== Active Streaming Matches ({len(active)}) — {format_size(total_size)} ===")
-        for provider, items in sorted(by_provider.items()):
+        for prov_name, items in sorted(by_provider.items()):
             psize = sum(it.get("size_bytes", 0) or 0 for it in items)
-            click.echo(f"\n  {provider} ({len(items)} items, {format_size(psize)}):")
-            for it in sorted(items, key=lambda x: x.get("title", "")):
+            click.echo(f"\n  {prov_name} ({len(items)} items, {format_size(psize)}):")
+            for it in items:  # already sorted by DB query
                 size = format_size(it.get("size_bytes", 0))
                 click.echo(f"    - {it['title']} ({it.get('year', '?')}) [{it.get('library', '?')}] {size}")
 
@@ -251,19 +265,27 @@ def report(json_out, db_path):
 @cli.command("confirm-delete")
 @click.option("--yes", is_flag=True, required=True, help="Required safety gate")
 @click.option("--provider", default=None, help="Only delete items from this provider")
+@click.option("--library", default=None, help="Only delete items from this library")
+@click.option("--min-size", default=None, type=float, help="Minimum size in GB")
+@click.option("--tmdb-ids", default=None, help="Comma-separated TMDB IDs to delete")
 @click.option("--dry-run", is_flag=True, help="Show what would be deleted without acting")
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
 @click.option("--db-path", default=None, help="Path to state database")
-def confirm_delete(yes, provider, dry_run, verbose, db_path):
+def confirm_delete(yes, provider, library, min_size, tmdb_ids, dry_run, verbose, db_path):
     """Delete items that are available on streaming. Requires --yes flag."""
     _setup_logging(verbose)
     cfg = load_config(dry_run=dry_run, verbose=verbose, db_path=db_path)
 
     init_db(cfg.db_path)
-    active = get_active_matches(cfg.db_path)
 
-    if provider:
-        active = [a for a in active if a.get("provider_name", "").lower() == provider.lower()]
+    min_size_bytes = int(min_size * 1_000_000_000) if min_size is not None else None
+    active = get_active_matches_filtered(
+        cfg.db_path, provider=provider, library=library, min_size=min_size_bytes,
+    )
+
+    if tmdb_ids:
+        id_set = {int(x.strip()) for x in tmdb_ids.split(",")}
+        active = [a for a in active if a["tmdb_id"] in id_set]
 
     if not active:
         click.echo("No items to delete.")
@@ -348,6 +370,51 @@ def confirm_delete(yes, provider, dry_run, verbose, db_path):
         notify_deletion(cfg.discord_webhook_url, deleted_items, freed_bytes)
 
     click.echo(f"\nDeleted {len(deleted_items)} items, freed {format_size(freed_bytes)}")
+
+
+@cli.command()
+@click.option("--json-output", "--json", "json_out", is_flag=True, help="Output as JSON")
+@click.option("--db-path", default=None, help="Path to state database")
+def summary(json_out, db_path):
+    """Show summary statistics for streaming matches."""
+    _setup_logging(False)
+    cfg = load_config(db_path=db_path)
+
+    init_db(cfg.db_path)
+    stats = get_summary_stats(cfg.db_path)
+    history = get_scan_history(cfg.db_path, limit=5)
+
+    if json_out:
+        click.echo(json.dumps({"stats": stats, "recent_scans": history}, indent=2))
+        return
+
+    if stats["total_active"] == 0:
+        click.echo("No active streaming matches.")
+        return
+
+    click.echo(f"\n=== Streaming Summary ===")
+    click.echo(f"  Active matches: {stats['total_active']}")
+    click.echo(f"  Reclaimable:    {format_size(stats['total_size_bytes'])}")
+
+    if stats["by_provider"]:
+        click.echo(f"\n  By Provider:")
+        for p in stats["by_provider"]:
+            click.echo(f"    {p['provider_name']}: {p['count']} items ({format_size(p['size_bytes'])})")
+
+    if stats["by_library"]:
+        click.echo(f"\n  By Library (deduplicated):")
+        for lib in stats["by_library"]:
+            click.echo(f"    {lib['library']}: {lib['count']} unique items")
+
+    if stats["last_scan"]:
+        ls = stats["last_scan"]
+        click.echo(f"\n  Last scan: {ls['timestamp']} ({ls['matches_found']} matches in {ls['duration_seconds']:.1f}s)")
+
+    if history:
+        click.echo(f"\n  Recent scans:")
+        for h in history:
+            click.echo(f"    {h['timestamp']} — {h['matches_found']} matches, "
+                       f"+{h['newly_streaming']} new, -{h['left_streaming']} left")
 
 
 @cli.command()

@@ -148,3 +148,134 @@ class TestConfirmDelete:
         init_db(db)
         result = runner.invoke(cli, ["confirm-delete", "--db-path", db])
         assert result.exit_code != 0
+
+    @patch("streaming.streaming_checker.ensure_tag", return_value=4)
+    @patch("streaming.streaming_checker.get_item")
+    @patch("streaming.streaming_checker.delete_item")
+    def test_confirm_delete_tmdb_ids_filter(self, mock_delete, mock_get_item, mock_tag,
+                                             runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
+                              arr_id=1, library="movies", size_bytes=5_000_000_000)
+        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
+                              arr_id=2, library="moviesanimated", size_bytes=2_000_000_000)
+        result = runner.invoke(cli, [
+            "confirm-delete", "--yes", "--dry-run", "--tmdb-ids", "550", "--db-path", db
+        ])
+        assert result.exit_code == 0
+        assert "Fight Club" in result.output
+        assert "Toy Story" not in result.output
+
+    @patch("streaming.streaming_checker.ensure_tag", return_value=4)
+    @patch("streaming.streaming_checker.get_item")
+    @patch("streaming.streaming_checker.delete_item")
+    def test_confirm_delete_library_filter(self, mock_delete, mock_get_item, mock_tag,
+                                            runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
+                              arr_id=1, library="movies", size_bytes=5_000_000_000)
+        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
+                              arr_id=2, library="moviesanimated", size_bytes=2_000_000_000)
+        result = runner.invoke(cli, [
+            "confirm-delete", "--yes", "--dry-run", "--library", "moviesanimated", "--db-path", db
+        ])
+        assert result.exit_code == 0
+        assert "Toy Story" in result.output
+        assert "Fight Club" not in result.output
+
+
+class TestReportFilters:
+    def test_report_provider_filter(self, runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
+                              library="movies", size_bytes=5_000_000_000)
+        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
+                              library="moviesanimated", size_bytes=2_000_000_000)
+        result = runner.invoke(cli, ["report", "--provider", "Netflix", "--db-path", db])
+        assert result.exit_code == 0
+        assert "Fight Club" in result.output
+        assert "Toy Story" not in result.output
+
+    def test_report_library_filter(self, runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
+                              library="movies", size_bytes=5_000_000_000)
+        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
+                              library="moviesanimated", size_bytes=2_000_000_000)
+        result = runner.invoke(cli, ["report", "--library", "movies", "--db-path", db])
+        assert result.exit_code == 0
+        assert "Fight Club" in result.output
+        assert "Toy Story" not in result.output
+
+    def test_report_min_size_filter(self, runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
+                              library="movies", size_bytes=5_000_000_000)
+        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
+                              library="moviesanimated", size_bytes=2_000_000_000)
+        result = runner.invoke(cli, ["report", "--min-size", "4", "--db-path", db])
+        assert result.exit_code == 0
+        assert "Fight Club" in result.output
+        assert "Toy Story" not in result.output
+
+    def test_report_sort_by_size(self, runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
+                              library="movies", size_bytes=5_000_000_000)
+        upsert_streaming_item(db, 862, "movie", 8, "Netflix", "Toy Story", 1995,
+                              library="moviesanimated", size_bytes=2_000_000_000)
+        result = runner.invoke(cli, ["report", "--sort-by", "size", "--db-path", db])
+        assert result.exit_code == 0
+        # Fight Club (5 GB) should appear before Toy Story (2 GB) in the output
+        fc_pos = result.output.index("Fight Club")
+        ts_pos = result.output.index("Toy Story")
+        assert fc_pos < ts_pos
+
+
+class TestSummary:
+    def test_summary_empty(self, runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db
+        init_db(db)
+        result = runner.invoke(cli, ["summary", "--db-path", db])
+        assert result.exit_code == 0
+        assert "No active streaming matches" in result.output
+
+    def test_summary_with_data(self, runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item, record_scan
+        init_db(db)
+        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
+                              library="movies", size_bytes=5_000_000_000)
+        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
+                              library="moviesanimated", size_bytes=2_000_000_000)
+        record_scan(db, "CL", 100, 50, 2, 2, 0, 10.5)
+        result = runner.invoke(cli, ["summary", "--db-path", db])
+        assert result.exit_code == 0
+        assert "Active matches: 2" in result.output
+        assert "Netflix" in result.output
+        assert "Disney Plus" in result.output
+
+    def test_summary_json(self, runner, env_config, tmp_path):
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
+                              library="movies", size_bytes=5_000_000_000)
+        result = runner.invoke(cli, ["summary", "--json", "--db-path", db])
+        assert result.exit_code == 0
+        import json
+        data = json.loads(result.output)
+        assert data["stats"]["total_active"] == 1
