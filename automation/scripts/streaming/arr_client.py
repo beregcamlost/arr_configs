@@ -32,7 +32,7 @@ def fetch_movies(radarr_url, api_key):
         list of dicts with: tmdb_id, arr_id, title, year, path, size_bytes, tags, has_file, library
     """
     url = f"{radarr_url}/api/v3/movie"
-    resp = requests.get(url, headers=_headers(api_key), timeout=30)
+    resp = requests.get(url, headers=_headers(api_key), timeout=120)
     resp.raise_for_status()
     movies = []
     for m in resp.json():
@@ -59,7 +59,7 @@ def fetch_series(sonarr_url, api_key):
         list of dicts with: tmdb_id, arr_id, title, year, path, size_bytes, tags, library
     """
     url = f"{sonarr_url}/api/v3/series"
-    resp = requests.get(url, headers=_headers(api_key), timeout=30)
+    resp = requests.get(url, headers=_headers(api_key), timeout=120)
     resp.raise_for_status()
     series = []
     for s in resp.json():
