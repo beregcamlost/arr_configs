@@ -715,14 +715,8 @@ cmd_auto_maintain() {
         profile_langs="$(resolve_bazarr_profile_langs "$mkv_file" "$BAZARR_DB")" || profile_langs=""
 
         if [[ -n "$profile_langs" ]]; then
-          # Also preserve subtitles matching the original audio language(s)
-          local audio_langs
-          audio_langs="$(get_audio_languages "$mkv_file")"
-          local keep_langs="$profile_langs"
-          [[ -n "$audio_langs" ]] && keep_langs="${keep_langs},${audio_langs}"
-
           local keep_set_am
-          keep_set_am="$(expand_lang_codes "$keep_langs")"
+          keep_set_am="$(expand_lang_codes "$profile_langs")"
           local -a bloat_remove=()
           for ((i=0; i<emb_count_p0; i++)); do
             local p0_idx p0_lang
@@ -735,7 +729,7 @@ cmd_auto_maintain() {
 
           if [[ ${#bloat_remove[@]} -gt 0 ]]; then
             if [[ "$DRY_RUN" -eq 1 ]]; then
-              log "[DRY-RUN] Would strip ${#bloat_remove[@]} bloated track(s) from: $basename (keep: $keep_langs)"
+              log "[DRY-RUN] Would strip ${#bloat_remove[@]} bloated track(s) from: $basename (profile: $profile_langs)"
               stripped_tracks=$((stripped_tracks + ${#bloat_remove[@]}))
               stripped_files=$((stripped_files + 1))
             else
@@ -751,7 +745,7 @@ cmd_auto_maintain() {
                 stripped_tracks=$((stripped_tracks + ${#bloat_remove[@]}))
                 stripped_files=$((stripped_files + 1))
                 file_modified=1
-                log "DEBLOAT ${#bloat_remove[@]} track(s) from: $basename (keep: $keep_langs)"
+                log "DEBLOAT ${#bloat_remove[@]} track(s) from: $basename (profile: $profile_langs)"
               else
                 rm -f "$bloat_tmp"
                 log "FAIL debloat: $basename"
