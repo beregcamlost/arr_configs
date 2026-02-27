@@ -5,6 +5,7 @@
 #   arr_profile_extract_on_import.sh
 #   library_subtitle_dedupe.sh
 #   bazarr_subtitle_recovery.sh
+#   subtitle_quality_manager.sh
 #
 # Do not execute directly.
 #
@@ -59,6 +60,185 @@ sql_escape() {
   # Escape single quotes for SQL string literals
   s="${s//\'/\'\'}"
   printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------------------
+# Library path classification helpers
+# ---------------------------------------------------------------------------
+
+# Returns 0 (true) if the path is a TV series path
+is_tv_path() {
+  local p="$1"
+  [[ "$p" == *"/tv/"* || "$p" == *"/tvanimated/"* ]]
+}
+
+# Returns 0 (true) if the path is a movie path
+is_movie_path() {
+  local p="$1"
+  [[ "$p" == *"/movies/"* || "$p" == *"/moviesanimated/"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Language code helpers
+# ---------------------------------------------------------------------------
+
+# Convert 2-letter ISO 639-1 to 3-letter ISO 639-2 (MP4/M4V require 3-letter)
+lang_to_iso639_2() {
+  local code="$1"
+  case "${code,,}" in
+    en)  echo "eng" ;; es)  echo "spa" ;; fr)  echo "fra" ;;
+    de)  echo "deu" ;; it)  echo "ita" ;; pt)  echo "por" ;;
+    zh)  echo "zho" ;; ja)  echo "jpn" ;; ko)  echo "kor" ;;
+    ar)  echo "ara" ;; ru)  echo "rus" ;; nl)  echo "nld" ;;
+    sv)  echo "swe" ;; da)  echo "dan" ;; fi)  echo "fin" ;;
+    no)  echo "nor" ;; pl)  echo "pol" ;; cs)  echo "ces" ;;
+    hu)  echo "hun" ;; ro)  echo "ron" ;; tr)  echo "tur" ;;
+    th)  echo "tha" ;; vi)  echo "vie" ;; el)  echo "ell" ;;
+    he)  echo "heb" ;; hi)  echo "hin" ;; id)  echo "ind" ;;
+    uk)  echo "ukr" ;; bg)  echo "bul" ;; hr)  echo "hrv" ;;
+    *)   echo "$code" ;;  # pass through 3-letter codes and 'und' as-is
+  esac
+}
+
+# Build an expanded set of language codes for matching.
+# Input: comma-separated codes (e.g. "eng,spa" or "en,es")
+# Output: space-separated set with both 2-letter and 3-letter variants
+expand_lang_codes() {
+  local input="$1"
+  local -A seen=()
+  local result=""
+  IFS=',' read -ra codes <<< "$input"
+  for code in "${codes[@]}"; do
+    code="${code,,}"  # lowercase
+    code="${code// /}" # trim
+    [[ -z "$code" ]] && continue
+    [[ -n "${seen[$code]:-}" ]] && continue
+    seen["$code"]=1
+    result+="$code "
+    case "$code" in
+      en)  [[ -z "${seen[eng]:-}" ]] && { seen[eng]=1; result+="eng "; } ;;
+      eng) [[ -z "${seen[en]:-}" ]]  && { seen[en]=1;  result+="en "; }  ;;
+      es)  [[ -z "${seen[spa]:-}" ]] && { seen[spa]=1; result+="spa "; } ;;
+      spa) [[ -z "${seen[es]:-}" ]]  && { seen[es]=1;  result+="es "; }  ;;
+      fr)  [[ -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
+      fre|fra) [[ -z "${seen[fr]:-}" ]] && { seen[fr]=1; result+="fr "; }
+               [[ "$code" == "fre" ]] && [[ -z "${seen[fra]:-}" ]] && { seen[fra]=1; result+="fra "; }
+               [[ "$code" == "fra" ]] && [[ -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
+      pt)  [[ -z "${seen[por]:-}" ]] && { seen[por]=1; result+="por "; } ;;
+      por) [[ -z "${seen[pt]:-}" ]]  && { seen[pt]=1;  result+="pt "; }  ;;
+      de)  [[ -z "${seen[ger]:-}" ]] && { seen[ger]=1; result+="ger "; } ;;
+      ger|deu) [[ -z "${seen[de]:-}" ]] && { seen[de]=1; result+="de "; }
+               [[ "$code" == "ger" ]] && [[ -z "${seen[deu]:-}" ]] && { seen[deu]=1; result+="deu "; }
+               [[ "$code" == "deu" ]] && [[ -z "${seen[ger]:-}" ]] && { seen[ger]=1; result+="ger "; } ;;
+      it)  [[ -z "${seen[ita]:-}" ]] && { seen[ita]=1; result+="ita "; } ;;
+      ita) [[ -z "${seen[it]:-}" ]]  && { seen[it]=1;  result+="it "; }  ;;
+      zh)  [[ -z "${seen[zho]:-}" ]] && { seen[zho]=1; result+="zho chi "; seen[chi]=1; } ;;
+      zho|chi) [[ -z "${seen[zh]:-}" ]] && { seen[zh]=1; result+="zh "; } ;;
+      ja)  [[ -z "${seen[jpn]:-}" ]] && { seen[jpn]=1; result+="jpn "; } ;;
+      jpn) [[ -z "${seen[ja]:-}" ]]  && { seen[ja]=1;  result+="ja "; }  ;;
+      ko)  [[ -z "${seen[kor]:-}" ]] && { seen[kor]=1; result+="kor "; } ;;
+      kor) [[ -z "${seen[ko]:-}" ]]  && { seen[ko]=1;  result+="ko "; }  ;;
+    esac
+  done
+  echo "$result"
+}
+
+# Check if a language code is in an expanded set (space-separated)
+lang_in_set() {
+  local lang="$1" set="$2"
+  [[ " $set " == *" ${lang,,} "* ]]
+}
+
+# Get unique audio track language(s) from a media file.
+# Returns comma-separated language codes (e.g. "jpn" or "eng,jpn").
+# Excludes "und" (undefined).
+get_audio_languages() {
+  local file="$1"
+  ffprobe -v quiet -print_format json -show_streams -select_streams a "$file" 2>/dev/null \
+    | jq -r '[.streams[].tags.language // "und"] | map(select(. == "und" | not)) | unique | join(",")' 2>/dev/null
+}
+
+# Resolve Bazarr language profile for a media file.
+# Returns comma-separated language codes (e.g. "en,es") or empty string if not found.
+# $1=file_path  $2=bazarr_db_path
+resolve_bazarr_profile_langs() {
+  local file_path="$1"
+  local bazarr_db="${2:-$DB}"
+
+  [[ ! -f "$bazarr_db" ]] && return 1
+
+  local profile_id=""
+  local esc_path
+  esc_path="$(sql_escape "$file_path")"
+
+  if is_tv_path "$file_path"; then
+    profile_id="$(sqlite3 "$bazarr_db" "
+      SELECT s.profileId FROM table_episodes e
+      JOIN table_shows s ON s.sonarrSeriesId = e.sonarrSeriesId
+      WHERE e.path = '$esc_path' LIMIT 1;
+    " 2>/dev/null)"
+
+    if [[ -z "$profile_id" ]]; then
+      local series_dir
+      series_dir="$(echo "$file_path" | sed 's|/Season.*||' | xargs basename 2>/dev/null)"
+      if [[ -n "$series_dir" ]]; then
+        profile_id="$(sqlite3 "$bazarr_db" "
+          SELECT profileId FROM table_shows
+          WHERE path LIKE '%$(sql_escape "$series_dir")%' LIMIT 1;
+        " 2>/dev/null)"
+      fi
+    fi
+  elif is_movie_path "$file_path"; then
+    profile_id="$(sqlite3 "$bazarr_db" "
+      SELECT profileId FROM table_movies WHERE path = '$esc_path' LIMIT 1;
+    " 2>/dev/null)"
+
+    if [[ -z "$profile_id" ]]; then
+      local movie_dir
+      movie_dir="$(basename "$(dirname "$file_path")")"
+      if [[ -n "$movie_dir" ]]; then
+        profile_id="$(sqlite3 "$bazarr_db" "
+          SELECT profileId FROM table_movies
+          WHERE path LIKE '%$(sql_escape "$movie_dir")%' LIMIT 1;
+        " 2>/dev/null)"
+      fi
+    fi
+  fi
+
+  [[ -z "$profile_id" ]] && return 1
+
+  local items
+  items="$(sqlite3 "$bazarr_db" "
+    SELECT items FROM table_languages_profiles WHERE profileId = $profile_id LIMIT 1;
+  " 2>/dev/null)"
+
+  [[ -z "$items" ]] && return 1
+
+  local langs
+  langs="$(printf '%s' "$items" | jq -r '.[].language' 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')"
+  [[ -z "$langs" ]] && return 1
+
+  printf '%s' "$langs"
+}
+
+# Trigger Bazarr rescan for the media file's parent series/movie.
+# Automatically detects TV vs movie path and calls the appropriate API.
+# $1=file_path  $2=bazarr_db  $3=bazarr_url  $4=bazarr_api_key
+bazarr_rescan_for_file() {
+  local file_path="$1" bazarr_db="$2" bazarr_url="$3" api_key="$4"
+  [[ -z "$api_key" ]] && return 0
+
+  if is_tv_path "$file_path"; then
+    local show_dir sonarr_id
+    show_dir="$(echo "$file_path" | sed 's|/Season.*||' | sed 's|/$||')"
+    sonarr_id="$(sqlite3 "$bazarr_db" "SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$show_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
+    [[ -n "$sonarr_id" ]] && bazarr_scan_disk_series "$sonarr_id" "$bazarr_url" "$api_key"
+  elif is_movie_path "$file_path"; then
+    local movie_dir radarr_id
+    movie_dir="$(dirname "$file_path")"
+    radarr_id="$(sqlite3 "$bazarr_db" "SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$movie_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
+    [[ -n "$radarr_id" ]] && bazarr_scan_disk_movie "$radarr_id" "$bazarr_url" "$api_key"
+  fi
 }
 
 # ---------------------------------------------------------------------------

@@ -179,142 +179,11 @@ is_file_being_converted() {
 }
 
 # ---------------------------------------------------------------------------
-# Language code helpers (MP4/M4V require ISO 639-2 three-letter codes)
+# Language/path helpers — provided by lib_subtitle_common.sh:
+#   lang_to_iso639_2(), expand_lang_codes(), lang_in_set(),
+#   get_audio_languages(), resolve_bazarr_profile_langs(),
+#   is_tv_path(), is_movie_path(), bazarr_rescan_for_file()
 # ---------------------------------------------------------------------------
-
-lang_to_iso639_2() {
-  local code="$1"
-  case "${code,,}" in
-    en)  echo "eng" ;; es)  echo "spa" ;; fr)  echo "fra" ;;
-    de)  echo "deu" ;; it)  echo "ita" ;; pt)  echo "por" ;;
-    zh)  echo "zho" ;; ja)  echo "jpn" ;; ko)  echo "kor" ;;
-    ar)  echo "ara" ;; ru)  echo "rus" ;; nl)  echo "nld" ;;
-    sv)  echo "swe" ;; da)  echo "dan" ;; fi)  echo "fin" ;;
-    no)  echo "nor" ;; pl)  echo "pol" ;; cs)  echo "ces" ;;
-    hu)  echo "hun" ;; ro)  echo "ron" ;; tr)  echo "tur" ;;
-    th)  echo "tha" ;; vi)  echo "vie" ;; el)  echo "ell" ;;
-    he)  echo "heb" ;; hi)  echo "hin" ;; id)  echo "ind" ;;
-    uk)  echo "ukr" ;; bg)  echo "bul" ;; hr)  echo "hrv" ;;
-    *)   echo "$code" ;;  # pass through 3-letter codes and 'und' as-is
-  esac
-}
-
-# Build an expanded set of language codes for matching.
-# Input: comma-separated codes (e.g. "eng,spa" or "en,es")
-# Output: space-separated set with both 2-letter and 3-letter variants
-expand_lang_codes() {
-  local input="$1"
-  local -A seen=()
-  local result=""
-  IFS=',' read -ra codes <<< "$input"
-  for code in "${codes[@]}"; do
-    code="${code,,}"  # lowercase
-    code="${code// /}" # trim
-    [[ -n "${seen[$code]:-}" ]] && continue
-    seen["$code"]=1
-    result+="$code "
-    # Add the other form (2→3 or 3→2)
-    case "$code" in
-      en)  [[ -z "${seen[eng]:-}" ]] && { seen[eng]=1; result+="eng "; } ;;
-      eng) [[ -z "${seen[en]:-}" ]]  && { seen[en]=1;  result+="en "; }  ;;
-      es)  [[ -z "${seen[spa]:-}" ]] && { seen[spa]=1; result+="spa "; } ;;
-      spa) [[ -z "${seen[es]:-}" ]]  && { seen[es]=1;  result+="es "; }  ;;
-      fr)  [[ -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
-      fre|fra) [[ -z "${seen[fr]:-}" ]] && { seen[fr]=1; result+="fr "; }
-               [[ "$code" == "fre" ]] && [[ -z "${seen[fra]:-}" ]] && { seen[fra]=1; result+="fra "; }
-               [[ "$code" == "fra" ]] && [[ -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
-      pt)  [[ -z "${seen[por]:-}" ]] && { seen[por]=1; result+="por "; } ;;
-      por) [[ -z "${seen[pt]:-}" ]]  && { seen[pt]=1;  result+="pt "; }  ;;
-      de)  [[ -z "${seen[ger]:-}" ]] && { seen[ger]=1; result+="ger "; } ;;
-      ger|deu) [[ -z "${seen[de]:-}" ]] && { seen[de]=1; result+="de "; }
-               [[ "$code" == "ger" ]] && [[ -z "${seen[deu]:-}" ]] && { seen[deu]=1; result+="deu "; }
-               [[ "$code" == "deu" ]] && [[ -z "${seen[ger]:-}" ]] && { seen[ger]=1; result+="ger "; } ;;
-      it)  [[ -z "${seen[ita]:-}" ]] && { seen[ita]=1; result+="ita "; } ;;
-      ita) [[ -z "${seen[it]:-}" ]]  && { seen[it]=1;  result+="it "; }  ;;
-      zh)  [[ -z "${seen[zho]:-}" ]] && { seen[zho]=1; result+="zho chi "; seen[chi]=1; } ;;
-      zho|chi) [[ -z "${seen[zh]:-}" ]] && { seen[zh]=1; result+="zh "; } ;;
-      ja)  [[ -z "${seen[jpn]:-}" ]] && { seen[jpn]=1; result+="jpn "; } ;;
-      jpn) [[ -z "${seen[ja]:-}" ]]  && { seen[ja]=1;  result+="ja "; }  ;;
-      ko)  [[ -z "${seen[kor]:-}" ]] && { seen[kor]=1; result+="kor "; } ;;
-      kor) [[ -z "${seen[ko]:-}" ]]  && { seen[ko]=1;  result+="ko "; }  ;;
-    esac
-  done
-  echo "$result"
-}
-
-# Check if a language code is in an expanded set (space-separated)
-lang_in_set() {
-  local lang="$1" set="$2"
-  [[ " $set " == *" ${lang,,} "* ]]
-}
-
-# Resolve Bazarr language profile for a media file.
-# Returns comma-separated language codes (e.g. "en,es") or empty string if not found.
-resolve_bazarr_profile_langs() {
-  local file_path="$1"
-  local bazarr_db="$2"
-
-  [[ ! -f "$bazarr_db" ]] && return 1
-
-  local profile_id=""
-  local esc_path
-  esc_path="$(sql_escape "$file_path")"
-
-  if [[ "$file_path" == *"/tv/"* ]] || [[ "$file_path" == *"/tvanimated/"* ]]; then
-    # TV: look up episode path → series → profile
-    profile_id="$(sqlite3 "$bazarr_db" "
-      SELECT s.profileId FROM table_episodes e
-      JOIN table_shows s ON s.sonarrSeriesId = e.sonarrSeriesId
-      WHERE e.path = '$esc_path' LIMIT 1;
-    " 2>/dev/null)"
-
-    # Fallback: match by series directory name
-    if [[ -z "$profile_id" ]]; then
-      local series_dir
-      series_dir="$(echo "$file_path" | sed 's|/Season.*||' | xargs basename 2>/dev/null)"
-      if [[ -n "$series_dir" ]]; then
-        profile_id="$(sqlite3 "$bazarr_db" "
-          SELECT profileId FROM table_shows
-          WHERE path LIKE '%$(sql_escape "$series_dir")%' LIMIT 1;
-        " 2>/dev/null)"
-      fi
-    fi
-  elif [[ "$file_path" == *"/movies/"* ]] || [[ "$file_path" == *"/moviesanimated/"* ]]; then
-    # Movies: match by exact file path
-    profile_id="$(sqlite3 "$bazarr_db" "
-      SELECT profileId FROM table_movies WHERE path = '$esc_path' LIMIT 1;
-    " 2>/dev/null)"
-
-    # Fallback: match by directory
-    if [[ -z "$profile_id" ]]; then
-      local movie_dir
-      movie_dir="$(basename "$(dirname "$file_path")")"
-      if [[ -n "$movie_dir" ]]; then
-        profile_id="$(sqlite3 "$bazarr_db" "
-          SELECT profileId FROM table_movies
-          WHERE path LIKE '%$(sql_escape "$movie_dir")%' LIMIT 1;
-        " 2>/dev/null)"
-      fi
-    fi
-  fi
-
-  [[ -z "$profile_id" ]] && return 1
-
-  # Get languages from profile
-  local items
-  items="$(sqlite3 "$bazarr_db" "
-    SELECT items FROM table_languages_profiles WHERE profileId = $profile_id LIMIT 1;
-  " 2>/dev/null)"
-
-  [[ -z "$items" ]] && return 1
-
-  # Parse JSON and extract unique language codes
-  local langs
-  langs="$(printf '%s' "$items" | jq -r '.[].language' 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')"
-  [[ -z "$langs" ]] && return 1
-
-  printf '%s' "$langs"
-}
 
 # ---------------------------------------------------------------------------
 # SRT parsing helpers
@@ -647,19 +516,7 @@ cmd_mux() {
 
   # Bazarr rescan (non-fatal — mux already succeeded)
   if [[ "$muxed" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]] && [[ -n "$BAZARR_API_KEY" ]]; then
-    if [[ "$PATH_PREFIX" == *"/tv/"* ]] || [[ "$PATH_PREFIX" == *"/tvanimated/"* ]]; then
-      local sonarr_id
-      sonarr_id="$(sqlite3 "$BAZARR_DB" "SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$(echo "$PATH_PREFIX" | sed 's|/Season.*||' | sed 's|/$||')")")%' LIMIT 1;" 2>/dev/null || echo "")"
-      if [[ -n "$sonarr_id" ]]; then
-        bazarr_scan_disk_series "$sonarr_id" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr scan-disk failed (non-fatal)"
-      fi
-    elif [[ "$PATH_PREFIX" == *"/movies/"* ]]; then
-      local radarr_id
-      radarr_id="$(sqlite3 "$BAZARR_DB" "SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$PATH_PREFIX")")%' LIMIT 1;" 2>/dev/null || echo "")"
-      if [[ -n "$radarr_id" ]]; then
-        bazarr_scan_disk_movie "$radarr_id" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr scan-disk failed (non-fatal)"
-      fi
-    fi
+    bazarr_rescan_for_file "$PATH_PREFIX" "$BAZARR_DB" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr scan-disk failed (non-fatal)"
   fi
 
   # Discord notification (non-fatal)
@@ -858,8 +715,14 @@ cmd_auto_maintain() {
         profile_langs="$(resolve_bazarr_profile_langs "$mkv_file" "$BAZARR_DB")" || profile_langs=""
 
         if [[ -n "$profile_langs" ]]; then
+          # Also preserve subtitles matching the original audio language(s)
+          local audio_langs
+          audio_langs="$(get_audio_languages "$mkv_file")"
+          local keep_langs="$profile_langs"
+          [[ -n "$audio_langs" ]] && keep_langs="${keep_langs},${audio_langs}"
+
           local keep_set_am
-          keep_set_am="$(expand_lang_codes "$profile_langs")"
+          keep_set_am="$(expand_lang_codes "$keep_langs")"
           local -a bloat_remove=()
           for ((i=0; i<emb_count_p0; i++)); do
             local p0_idx p0_lang
@@ -872,7 +735,7 @@ cmd_auto_maintain() {
 
           if [[ ${#bloat_remove[@]} -gt 0 ]]; then
             if [[ "$DRY_RUN" -eq 1 ]]; then
-              log "[DRY-RUN] Would strip ${#bloat_remove[@]} bloated track(s) from: $basename (profile: $profile_langs)"
+              log "[DRY-RUN] Would strip ${#bloat_remove[@]} bloated track(s) from: $basename (keep: $keep_langs)"
               stripped_tracks=$((stripped_tracks + ${#bloat_remove[@]}))
               stripped_files=$((stripped_files + 1))
             else
@@ -888,7 +751,7 @@ cmd_auto_maintain() {
                 stripped_tracks=$((stripped_tracks + ${#bloat_remove[@]}))
                 stripped_files=$((stripped_files + 1))
                 file_modified=1
-                log "DEBLOAT ${#bloat_remove[@]} track(s) from: $basename (profile: $profile_langs)"
+                log "DEBLOAT ${#bloat_remove[@]} track(s) from: $basename (keep: $keep_langs)"
               else
                 rm -f "$bloat_tmp"
                 log "FAIL debloat: $basename"
@@ -1094,14 +957,7 @@ cmd_auto_maintain() {
     # --- Phase 3: Emby refresh per modified file ---
     if [[ "$DRY_RUN" -eq 0 ]] && [[ "$file_modified" -eq 1 ]]; then
       emby_refresh_item "$mkv_file" || log "WARN: Emby refresh failed (non-fatal)"
-      # Track modified dirs for Bazarr rescan
-      local show_dir
-      if [[ "$mkv_file" == *"/tv/"* ]] || [[ "$mkv_file" == *"/tvanimated/"* ]]; then
-        show_dir="$(echo "$mkv_file" | sed 's|/Season.*||' | sed 's|/$||')"
-      else
-        show_dir="$(dirname "$mkv_file")"
-      fi
-      modified_dirs+=("$show_dir")
+      modified_dirs+=("$mkv_file")
     fi
 
     # Update state DB (full mode only)
@@ -1114,22 +970,19 @@ cmd_auto_maintain() {
     fi
   done
 
-  # Bazarr rescan (batch by series/movie, deduplicated, non-fatal)
+  # Bazarr rescan (deduplicated per parent dir, non-fatal)
   if [[ "$DRY_RUN" -eq 0 ]] && [[ ${#modified_dirs[@]} -gt 0 ]] && [[ -n "$BAZARR_API_KEY" ]]; then
     local -A rescanned=()
-    for show_dir in "${modified_dirs[@]}"; do
-      [[ -n "${rescanned[$show_dir]:-}" ]] && continue
-      rescanned["$show_dir"]=1
-
-      if [[ "$show_dir" == *"/tv/"* ]] || [[ "$show_dir" == *"/tvanimated/"* ]]; then
-        local sonarr_id
-        sonarr_id="$(sqlite3 "$BAZARR_DB" "SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$show_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
-        [[ -n "$sonarr_id" ]] && { bazarr_scan_disk_series "$sonarr_id" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr rescan failed"; }
-      elif [[ "$show_dir" == *"/movies/"* ]] || [[ "$show_dir" == *"/moviesanimated/"* ]]; then
-        local radarr_id
-        radarr_id="$(sqlite3 "$BAZARR_DB" "SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$show_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
-        [[ -n "$radarr_id" ]] && { bazarr_scan_disk_movie "$radarr_id" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr rescan failed"; }
+    for mod_file in "${modified_dirs[@]}"; do
+      local rescan_key
+      if is_tv_path "$mod_file"; then
+        rescan_key="$(echo "$mod_file" | sed 's|/Season.*||' | sed 's|/$||')"
+      else
+        rescan_key="$(dirname "$mod_file")"
       fi
+      [[ -n "${rescanned[$rescan_key]:-}" ]] && continue
+      rescanned["$rescan_key"]=1
+      bazarr_rescan_for_file "$mod_file" "$BAZARR_DB" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr rescan failed"
     done
   fi
 

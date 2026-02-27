@@ -72,6 +72,12 @@ After editing any canonical script in `automation/scripts/`, always sync the com
 - `snake_case` for functions/variables, uppercase for exported/config constants
 - Small single-purpose functions (e.g., `log`, `cleanup_app`, `extract_stream`)
 - New scripts go under `automation/scripts/`; only mirror to `scripts/` when compatibility requires it
+- **D.R.Y. — Don't Repeat Yourself:**
+  - Never hardcode values that appear in more than one place — use constants or shared helpers
+  - Shared logic belongs in `lib_subtitle_common.sh` (subtitles) or equivalent shared libs
+  - When iterating over old code, fix any DRY violations you encounter (extract helpers, remove duplication)
+  - Library path patterns (`/tv/`, `/movies/`, etc.) must use `is_tv_path()`/`is_movie_path()` helpers, never inline globs
+  - Language code mappings use `expand_lang_codes()`, `lang_in_set()`, `lang_to_iso639_2()` from the shared lib
 
 ## Commit Style
 
