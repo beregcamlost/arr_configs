@@ -10,6 +10,9 @@ RECURSIVE=0
 DRY_RUN=0
 FORCE=0
 TRACK_TARGET=""
+KEEP_ONLY=""
+KEEP_PROFILE_LANGS=0
+BLOAT_THRESHOLD=6
 BAZARR_URL="http://127.0.0.1:6767/bazarr"
 BAZARR_API_KEY="${BAZARR_API_KEY:-}"
 BAZARR_DB="/opt/bazarr/data/db/bazarr.db"
@@ -49,10 +52,14 @@ Mux options:
 
 Strip options:
   --track TARGET        Language code (e.g. eng) or stream index (e.g. 2) to remove
+  --keep-only LANGS     Comma-separated language codes to KEEP (removes everything else)
+                        Accepts both 2-letter (en,es) and 3-letter (eng,spa) codes
 
 Auto-maintain options:
   --path-prefix DIR     Root media directory to scan recursively (required)
   --since N             Only scan files with SRTs modified in last N minutes (quick mode)
+  --keep-profile-langs  Auto-resolve Bazarr language profile per file, strip non-profile tracks
+  --bloat-threshold N   Min embedded sub tracks to trigger profile cleanup (default: 6)
   --emby-url URL        Emby server URL (default: from EMBY_URL env)
   --emby-api-key KEY    Emby API key (default: from EMBY_API_KEY env)
 
@@ -60,8 +67,9 @@ Examples:
   subtitle_quality_manager.sh audit --path "/media/tv/Evil" --recursive
   subtitle_quality_manager.sh mux --path "/media/tv/Evil/Season 1" --dry-run
   subtitle_quality_manager.sh strip --path "/media/tv/Evil" --track eng --recursive --dry-run
+  subtitle_quality_manager.sh strip --path "/media/tv/Show" --keep-only eng,spa --recursive
   subtitle_quality_manager.sh auto-maintain --path-prefix /media --since 15 --dry-run
-  subtitle_quality_manager.sh auto-maintain --path-prefix /media  # full incremental scan
+  subtitle_quality_manager.sh auto-maintain --path-prefix /media --keep-profile-langs
 EOF
 }
 
@@ -82,6 +90,9 @@ while [[ $# -gt 0 ]]; do
     --dry-run)    DRY_RUN=1; shift ;;
     --force)      FORCE=1; shift ;;
     --track)      TRACK_TARGET="${2:-}"; shift 2 ;;
+    --keep-only)  KEEP_ONLY="${2:-}"; shift 2 ;;
+    --keep-profile-langs) KEEP_PROFILE_LANGS=1; shift ;;
+    --bloat-threshold) BLOAT_THRESHOLD="${2:-6}"; shift 2 ;;
     --bazarr-url) BAZARR_URL="${2:-}"; shift 2 ;;
     --bazarr-db)  BAZARR_DB="${2:-}"; shift 2 ;;
     --state-dir)  STATE_DIR="${2:-}"; shift 2 ;;
@@ -104,8 +115,12 @@ if [[ "$COMMAND" == "auto-maintain" ]] && [[ -z "$PATH_PREFIX_ROOT" ]]; then
   echo "--path-prefix is required for auto-maintain." >&2; exit 1
 fi
 
-if [[ "$COMMAND" == "strip" ]] && [[ -z "$TRACK_TARGET" ]]; then
-  echo "--track is required for strip command." >&2; exit 1
+if [[ "$COMMAND" == "strip" ]] && [[ -z "$TRACK_TARGET" ]] && [[ -z "$KEEP_ONLY" ]]; then
+  echo "--track or --keep-only is required for strip command." >&2; exit 1
+fi
+
+if [[ "$COMMAND" == "strip" ]] && [[ -n "$TRACK_TARGET" ]] && [[ -n "$KEEP_ONLY" ]]; then
+  echo "--track and --keep-only are mutually exclusive." >&2; exit 1
 fi
 
 BAZARR_API_KEY="${BAZARR_API_KEY:-$(getenv_fallback BAZARR_API_KEY BAZARR_KEY)}"
@@ -182,6 +197,123 @@ lang_to_iso639_2() {
     uk)  echo "ukr" ;; bg)  echo "bul" ;; hr)  echo "hrv" ;;
     *)   echo "$code" ;;  # pass through 3-letter codes and 'und' as-is
   esac
+}
+
+# Build an expanded set of language codes for matching.
+# Input: comma-separated codes (e.g. "eng,spa" or "en,es")
+# Output: space-separated set with both 2-letter and 3-letter variants
+expand_lang_codes() {
+  local input="$1"
+  local -A seen=()
+  local result=""
+  IFS=',' read -ra codes <<< "$input"
+  for code in "${codes[@]}"; do
+    code="${code,,}"  # lowercase
+    code="${code// /}" # trim
+    [[ -n "${seen[$code]:-}" ]] && continue
+    seen["$code"]=1
+    result+="$code "
+    # Add the other form (2→3 or 3→2)
+    case "$code" in
+      en)  [[ -z "${seen[eng]:-}" ]] && { seen[eng]=1; result+="eng "; } ;;
+      eng) [[ -z "${seen[en]:-}" ]]  && { seen[en]=1;  result+="en "; }  ;;
+      es)  [[ -z "${seen[spa]:-}" ]] && { seen[spa]=1; result+="spa "; } ;;
+      spa) [[ -z "${seen[es]:-}" ]]  && { seen[es]=1;  result+="es "; }  ;;
+      fr)  [[ -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
+      fre|fra) [[ -z "${seen[fr]:-}" ]] && { seen[fr]=1; result+="fr "; }
+               [[ "$code" == "fre" ]] && [[ -z "${seen[fra]:-}" ]] && { seen[fra]=1; result+="fra "; }
+               [[ "$code" == "fra" ]] && [[ -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
+      pt)  [[ -z "${seen[por]:-}" ]] && { seen[por]=1; result+="por "; } ;;
+      por) [[ -z "${seen[pt]:-}" ]]  && { seen[pt]=1;  result+="pt "; }  ;;
+      de)  [[ -z "${seen[ger]:-}" ]] && { seen[ger]=1; result+="ger "; } ;;
+      ger|deu) [[ -z "${seen[de]:-}" ]] && { seen[de]=1; result+="de "; }
+               [[ "$code" == "ger" ]] && [[ -z "${seen[deu]:-}" ]] && { seen[deu]=1; result+="deu "; }
+               [[ "$code" == "deu" ]] && [[ -z "${seen[ger]:-}" ]] && { seen[ger]=1; result+="ger "; } ;;
+      it)  [[ -z "${seen[ita]:-}" ]] && { seen[ita]=1; result+="ita "; } ;;
+      ita) [[ -z "${seen[it]:-}" ]]  && { seen[it]=1;  result+="it "; }  ;;
+      zh)  [[ -z "${seen[zho]:-}" ]] && { seen[zho]=1; result+="zho chi "; seen[chi]=1; } ;;
+      zho|chi) [[ -z "${seen[zh]:-}" ]] && { seen[zh]=1; result+="zh "; } ;;
+      ja)  [[ -z "${seen[jpn]:-}" ]] && { seen[jpn]=1; result+="jpn "; } ;;
+      jpn) [[ -z "${seen[ja]:-}" ]]  && { seen[ja]=1;  result+="ja "; }  ;;
+      ko)  [[ -z "${seen[kor]:-}" ]] && { seen[kor]=1; result+="kor "; } ;;
+      kor) [[ -z "${seen[ko]:-}" ]]  && { seen[ko]=1;  result+="ko "; }  ;;
+    esac
+  done
+  echo "$result"
+}
+
+# Check if a language code is in an expanded set (space-separated)
+lang_in_set() {
+  local lang="$1" set="$2"
+  [[ " $set " == *" ${lang,,} "* ]]
+}
+
+# Resolve Bazarr language profile for a media file.
+# Returns comma-separated language codes (e.g. "en,es") or empty string if not found.
+resolve_bazarr_profile_langs() {
+  local file_path="$1"
+  local bazarr_db="$2"
+
+  [[ ! -f "$bazarr_db" ]] && return 1
+
+  local profile_id=""
+  local esc_path
+  esc_path="$(sql_escape "$file_path")"
+
+  if [[ "$file_path" == *"/tv/"* ]] || [[ "$file_path" == *"/tvanimated/"* ]]; then
+    # TV: look up episode path → series → profile
+    profile_id="$(sqlite3 "$bazarr_db" "
+      SELECT s.profileId FROM table_episodes e
+      JOIN table_shows s ON s.sonarrSeriesId = e.sonarrSeriesId
+      WHERE e.path = '$esc_path' LIMIT 1;
+    " 2>/dev/null)"
+
+    # Fallback: match by series directory name
+    if [[ -z "$profile_id" ]]; then
+      local series_dir
+      series_dir="$(echo "$file_path" | sed 's|/Season.*||' | xargs basename 2>/dev/null)"
+      if [[ -n "$series_dir" ]]; then
+        profile_id="$(sqlite3 "$bazarr_db" "
+          SELECT profileId FROM table_shows
+          WHERE path LIKE '%$(sql_escape "$series_dir")%' LIMIT 1;
+        " 2>/dev/null)"
+      fi
+    fi
+  elif [[ "$file_path" == *"/movies/"* ]] || [[ "$file_path" == *"/moviesanimated/"* ]]; then
+    # Movies: match by exact file path
+    profile_id="$(sqlite3 "$bazarr_db" "
+      SELECT profileId FROM table_movies WHERE path = '$esc_path' LIMIT 1;
+    " 2>/dev/null)"
+
+    # Fallback: match by directory
+    if [[ -z "$profile_id" ]]; then
+      local movie_dir
+      movie_dir="$(basename "$(dirname "$file_path")")"
+      if [[ -n "$movie_dir" ]]; then
+        profile_id="$(sqlite3 "$bazarr_db" "
+          SELECT profileId FROM table_movies
+          WHERE path LIKE '%$(sql_escape "$movie_dir")%' LIMIT 1;
+        " 2>/dev/null)"
+      fi
+    fi
+  fi
+
+  [[ -z "$profile_id" ]] && return 1
+
+  # Get languages from profile
+  local items
+  items="$(sqlite3 "$bazarr_db" "
+    SELECT items FROM table_languages_profiles WHERE profileId = $profile_id LIMIT 1;
+  " 2>/dev/null)"
+
+  [[ -z "$items" ]] && return 1
+
+  # Parse JSON and extract unique language codes
+  local langs
+  langs="$(printf '%s' "$items" | jq -r '.[].language' 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')"
+  [[ -z "$langs" ]] && return 1
+
+  printf '%s' "$langs"
 }
 
 # ---------------------------------------------------------------------------
@@ -538,9 +670,19 @@ cmd_mux() {
   fi
 }
 cmd_strip() {
-  log "Stripping track '$TRACK_TARGET' from: $PATH_PREFIX (recursive=$RECURSIVE, dry_run=$DRY_RUN)"
+  local mode_label
+  if [[ -n "$KEEP_ONLY" ]]; then
+    mode_label="keep-only=$KEEP_ONLY"
+  else
+    mode_label="track=$TRACK_TARGET"
+  fi
+  log "Stripping ($mode_label) from: $PATH_PREFIX (recursive=$RECURSIVE, dry_run=$DRY_RUN)"
 
   local total=0 stripped=0 skipped=0 failed=0
+
+  # Pre-expand keep-only languages once
+  local keep_set=""
+  [[ -n "$KEEP_ONLY" ]] && keep_set="$(expand_lang_codes "$KEEP_ONLY")"
 
   while IFS= read -r mkv_file; do
     local basename
@@ -562,7 +704,17 @@ cmd_strip() {
     # Find matching stream indices to remove
     local -a remove_indices=()
 
-    if [[ "$TRACK_TARGET" =~ ^[0-9]+$ ]]; then
+    if [[ -n "$KEEP_ONLY" ]]; then
+      # keep-only mode: remove tracks whose language is NOT in the keep set
+      for ((i=0; i<emb_count; i++)); do
+        local idx lang
+        idx="$(jq -r ".[$i].index" <<<"$embedded_json")"
+        lang="$(jq -r ".[$i].tags.language" <<<"$embedded_json")"
+        if ! lang_in_set "$lang" "$keep_set"; then
+          remove_indices+=("$idx")
+        fi
+      done
+    elif [[ "$TRACK_TARGET" =~ ^[0-9]+$ ]]; then
       # Numeric: treat as stream index
       for ((i=0; i<emb_count; i++)); do
         local idx
@@ -624,13 +776,13 @@ cmd_strip() {
   # Discord notification (non-fatal)
   if [[ "$stripped" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
     notify_discord_embed "Subtitle Quality Manager — Strip" \
-      "$(printf "Stripped %d track(s) matching '%s' from %d file(s)" "$stripped" "$TRACK_TARGET" "$total")" \
+      "$(printf "Stripped %d track(s) (%s) from %d file(s)" "$stripped" "$mode_label" "$total")" \
       15158332 || log "WARN: Discord notification failed (non-fatal)"
   fi
 }
 
 cmd_auto_maintain() {
-  log "auto-maintain: path=$PATH_PREFIX_ROOT since=$SINCE_MINUTES dry_run=$DRY_RUN"
+  log "auto-maintain: path=$PATH_PREFIX_ROOT since=$SINCE_MINUTES keep_profile_langs=$KEEP_PROFILE_LANGS bloat_threshold=$BLOAT_THRESHOLD dry_run=$DRY_RUN"
 
   local state_db="$STATE_DIR/subtitle_quality_state.db"
   [[ "$SINCE_MINUTES" -eq 0 ]] && init_state_db "$state_db"
@@ -694,6 +846,60 @@ cmd_auto_maintain() {
 
     duration="$(get_video_duration "$mkv_file")"
     local file_modified=0
+
+    # --- Phase 0: Strip bloated subtitle tracks (keep-profile-langs) ---
+    if [[ "$KEEP_PROFILE_LANGS" -eq 1 ]]; then
+      local emb_json_p0 emb_count_p0
+      emb_json_p0="$(get_embedded_subs "$mkv_file")"
+      emb_count_p0="$(jq 'length' <<<"$emb_json_p0")"
+
+      if [[ "$emb_count_p0" -ge "$BLOAT_THRESHOLD" ]]; then
+        local profile_langs
+        profile_langs="$(resolve_bazarr_profile_langs "$mkv_file" "$BAZARR_DB")" || profile_langs=""
+
+        if [[ -n "$profile_langs" ]]; then
+          local keep_set_am
+          keep_set_am="$(expand_lang_codes "$profile_langs")"
+          local -a bloat_remove=()
+          for ((i=0; i<emb_count_p0; i++)); do
+            local p0_idx p0_lang
+            p0_idx="$(jq -r ".[$i].index" <<<"$emb_json_p0")"
+            p0_lang="$(jq -r ".[$i].tags.language" <<<"$emb_json_p0")"
+            if ! lang_in_set "$p0_lang" "$keep_set_am"; then
+              bloat_remove+=("$p0_idx")
+            fi
+          done
+
+          if [[ ${#bloat_remove[@]} -gt 0 ]]; then
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+              log "[DRY-RUN] Would strip ${#bloat_remove[@]} bloated track(s) from: $basename (profile: $profile_langs)"
+              stripped_tracks=$((stripped_tracks + ${#bloat_remove[@]}))
+              stripped_files=$((stripped_files + 1))
+            else
+              local -a bloat_cmd=(ffmpeg -y -v quiet -i "$mkv_file" -map 0)
+              for idx in "${bloat_remove[@]}"; do
+                bloat_cmd+=(-map "-0:${idx}")
+              done
+              bloat_cmd+=(-c copy)
+              local ext_p0="${mkv_file##*.}"
+              local bloat_tmp="${mkv_file%.*}.bloattmp.${ext_p0}"
+              if "${bloat_cmd[@]}" "$bloat_tmp" </dev/null 2>/dev/null && [[ -s "$bloat_tmp" ]]; then
+                mv "$bloat_tmp" "$mkv_file"
+                stripped_tracks=$((stripped_tracks + ${#bloat_remove[@]}))
+                stripped_files=$((stripped_files + 1))
+                file_modified=1
+                log "DEBLOAT ${#bloat_remove[@]} track(s) from: $basename (profile: $profile_langs)"
+              else
+                rm -f "$bloat_tmp"
+                log "FAIL debloat: $basename"
+              fi
+            fi
+          fi
+        else
+          debug "SKIP debloat (no Bazarr profile): $basename"
+        fi
+      fi
+    fi
 
     # --- Phase 1: Audit & mux external SRTs ---
     local -a good_srts=() good_langs=()
