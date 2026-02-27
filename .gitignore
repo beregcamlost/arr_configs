@@ -20,6 +20,11 @@ apps/
 # Secrets
 .env
 
+# Python artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # Real configs (contain secrets)
 automation/configs/sonarr-config.xml
 automation/configs/radarr-config.xml
