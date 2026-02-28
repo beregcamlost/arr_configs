@@ -211,6 +211,42 @@ main() {
     else
       bazarr_scan_disk_movie "$MEDIA_ID" "$bazarr_url" "$bazarr_key" || log "WARN: Bazarr movie rescan failed (non-fatal)"
     fi
+
+    # Search for missing subtitles — for each profile language without an
+    # external SRT on disk, trigger a per-episode/movie Bazarr search so
+    # missing subs get downloaded immediately instead of waiting 6 hours.
+    local stem dir
+    stem="$(basename "${MEDIA_PATH%.*}")"
+    dir="$(dirname "$MEDIA_PATH")"
+    local bazarr_ref_id=""
+    if [[ "$ARR_TYPE" == "sonarr" ]]; then
+      local esc_path
+      esc_path="$(sql_escape "$MEDIA_PATH")"
+      bazarr_ref_id="$(sqlite3 "$DB" "SELECT sonarrEpisodeId FROM table_episodes WHERE path='$esc_path' LIMIT 1;" 2>/dev/null)" || true
+    else
+      bazarr_ref_id="$MEDIA_ID"
+    fi
+    if [[ -n "$bazarr_ref_id" ]]; then
+      while IFS='|' read -r lang lang_forced; do
+        [[ -z "$lang" ]] && continue
+        lang="${lang,,}"
+        lang_forced="${lang_forced,,}"
+        [[ "$lang_forced" == "true" ]] && lang_forced="True" || lang_forced="False"
+        # Skip if external SRT already exists for this language
+        if [[ -n "$(find "$dir" -maxdepth 1 -name "${stem}.${lang}.srt" -type f 2>/dev/null | head -1)" ]]; then
+          continue
+        fi
+        local search_endpoint search_http
+        if [[ "$ARR_TYPE" == "sonarr" ]]; then
+          search_endpoint="${bazarr_url}/api/episodes/subtitles?seriesid=${MEDIA_ID}&episodeid=${bazarr_ref_id}&language=${lang}&forced=${lang_forced}&hi=False"
+        else
+          search_endpoint="${bazarr_url}/api/movies/subtitles?radarrid=${MEDIA_ID}&language=${lang}&forced=${lang_forced}&hi=False"
+        fi
+        search_http="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+          -H "X-API-KEY: ${bazarr_key}" "$search_endpoint" 2>/dev/null)" || true
+        log "BAZARR_SEARCH $ARR_TYPE lang=$lang forced=$lang_forced ref=$bazarr_ref_id http=$search_http"
+      done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
+    fi
   fi
 
   # Enqueue for codec conversion at highest priority (background, non-blocking)
