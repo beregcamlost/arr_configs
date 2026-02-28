@@ -645,7 +645,7 @@ cmd_auto_maintain() {
   [[ "$SINCE_MINUTES" -eq 0 ]] && init_state_db "$state_db"
 
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
-  local skipped_converter=0 skipped_playback=0 warned=0
+  local skipped_converter=0 skipped_playback=0 warned=0 deepl_deferred=0
   local -a modified_dirs=()
 
   # Find MKV files across all media dirs
@@ -797,6 +797,7 @@ cmd_auto_maintain() {
               if [[ "$marker_age" -lt 604800 ]]; then
                 local days_left=$(( (604800 - marker_age) / 86400 ))
                 debug "SKIP mux (DeepL grace ${days_left}d remaining): $srt_basename"
+                deepl_deferred=$((deepl_deferred + 1))
                 continue
               else
                 # Grace expired — mux the DeepL translation
@@ -1014,13 +1015,45 @@ cmd_auto_maintain() {
   log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback"
 
   # Discord notification (non-fatal, only when actions taken)
-  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files)) -gt 0 ]]; then
+  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
     local mode="quick"
     [[ "$SINCE_MINUTES" -eq 0 ]] && mode="full"
-    notify_discord_embed "Subtitle Auto-Maintain ($mode)" \
-      "$(printf "Muxed: %d file(s), %d track(s)\nStripped: %d file(s), %d track(s)\nWARN (manual review): %d\nSkipped (converter): %d\nSkipped (playback): %d" \
-        "$muxed_files" "$muxed_tracks" "$stripped_files" "$stripped_tracks" "$warned" "$skipped_converter" "$skipped_playback")" \
-      3066993 || log "WARN: Discord notification failed (non-fatal)"
+
+    # Build file list (basenames, capped at 20)
+    local file_list="" file_count=${#modified_dirs[@]}
+    local show_count=$file_count
+    [[ "$show_count" -gt 20 ]] && show_count=20
+    for ((fi=0; fi<show_count; fi++)); do
+      file_list+="• $(basename "${modified_dirs[$fi]}")\n"
+    done
+    [[ "$file_count" -gt 20 ]] && file_list+="+ $((file_count - 20)) more\n"
+
+    # Build description lines
+    local desc=""
+    [[ "$muxed_files" -gt 0 ]] && desc+="📥 Muxed: ${muxed_files} file(s), ${muxed_tracks} track(s)\n"
+    [[ "$stripped_files" -gt 0 ]] && desc+="🗑 Stripped: ${stripped_files} file(s), ${stripped_tracks} track(s)\n"
+    [[ "$deepl_deferred" -gt 0 ]] && desc+="⏳ DeepL deferred: ${deepl_deferred} (grace period)\n"
+    [[ "$warned" -gt 0 ]] && desc+="⚠️ Manual review: ${warned}\n"
+    [[ "$skipped_converter" -gt 0 ]] && desc+="🔄 Skipped (converter): ${skipped_converter}\n"
+    [[ "$skipped_playback" -gt 0 ]] && desc+="▶️ Skipped (playback): ${skipped_playback}\n"
+    desc+="🔍 Scanned: ${total_files} files\n"
+    [[ -n "$file_list" ]] && desc+="\n**Files modified:**\n${file_list}"
+
+    local payload desc_rendered
+    desc_rendered="$(printf '%b' "$desc")"
+    payload="$(jq -nc --arg title "Subtitle Auto-Maintain ($mode)" \
+      --arg desc "$desc_rendered" \
+      --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '{embeds: [{
+        title: $title,
+        description: $desc,
+        color: 3066993,
+        timestamp: $ts
+      }]}')"
+
+    curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+      -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 \
+      || log "WARN: Discord notification failed (non-fatal)"
   fi
 }
 

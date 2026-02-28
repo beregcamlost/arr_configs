@@ -41,6 +41,21 @@ MAX_ATTEMPTS_DEFAULT=30
 MAX_ATTEMPTS="$MAX_ATTEMPTS_DEFAULT"
 RETENTION_DAYS="$RETENTION_DAYS_DEFAULT"
 
+comma_fmt() {
+  local n="$1"
+  echo "$n" | sed ':a;s/\B[0-9]\{3\}\>$/,&/;ta'
+}
+
+progress_bar() {
+  local current="$1" total="$2" width="${3:-16}"
+  [[ "$total" -le 0 ]] && { printf '%*s' "$width" '' | tr ' ' '░'; return; }
+  local filled=$(( current * width / total ))
+  [[ "$filled" -gt "$width" ]] && filled="$width"
+  local empty=$(( width - filled ))
+  printf '%*s' "$filled" '' | tr ' ' '█'
+  printf '%*s' "$empty" '' | tr ' ' '░'
+}
+
 cleanup() {
   rm -f "$TMP_DIR"/*.json "$TMP_DIR"/*.tmp 2>/dev/null || true
 }
@@ -223,30 +238,86 @@ notify_discord_audit_done() {
   local missing="$3"
   local probe_fail="$4"
   local elapsed="$5"
+  local skipped="${6:-0}"
 
   [[ -z "${DISCORD_WEBHOOK_AUDIT_DONE:-}" ]] && return 0
 
+  # Query DB for conversion progress context
+  local media_count swapped_total eligible_count audio_remaining video_remaining
+  local swapped_7d compliant_count uhd_hdr_count
+  media_count="$(db "SELECT COUNT(*) FROM media_files;" 2>/dev/null || echo 0)"
+  swapped_total="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';" 2>/dev/null || echo 0)"
+  eligible_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;" 2>/dev/null || echo 0)"
+  audio_remaining="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;" 2>/dev/null || echo 0)"
+  video_remaining="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;" 2>/dev/null || echo 0)"
+  swapped_7d="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped' AND COALESCE(end_ts,start_ts) >= datetime('now','-7 days');" 2>/dev/null || echo 0)"
+  compliant_count="$(db "SELECT COUNT(*) FROM media_files WHERE id NOT IN (SELECT media_id FROM conversion_plan WHERE eligible=1) AND id IN (SELECT media_id FROM audit_status WHERE probe_ok=1);" 2>/dev/null || echo 0)"
+  uhd_hdr_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=0 AND reason LIKE '%UHD%' OR reason LIKE '%HDR%' OR reason LIKE '%4K%';" 2>/dev/null || echo 0)"
+
+  # Calculate progress, rate, ETA
+  local total_convertible pct_10x pct_int pct_frac bar_str rate_str eta_str
+  total_convertible=$((swapped_total + eligible_count))
+  if [[ "$total_convertible" -gt 0 ]]; then
+    pct_10x=$(( swapped_total * 1000 / total_convertible ))
+  else
+    pct_10x=0
+  fi
+  pct_int=$(( pct_10x / 10 ))
+  pct_frac=$(( pct_10x % 10 ))
+  bar_str="$(progress_bar "$swapped_total" "$total_convertible" 16)"
+
+  if [[ "$swapped_7d" -gt 0 ]]; then
+    local rate_per_day=$(( swapped_7d / 7 ))
+    [[ "$rate_per_day" -lt 1 ]] && rate_per_day=1
+    rate_str="~${rate_per_day}/day"
+    if [[ "$eligible_count" -gt 0 ]]; then
+      local eta_days=$(( eligible_count / rate_per_day ))
+      eta_str="~${eta_days} days"
+    else
+      eta_str="done"
+    fi
+  else
+    rate_str="n/a"
+    eta_str="n/a"
+  fi
+
+  local unchanged=$(( media_count - processed + skipped ))
+  [[ "$unchanged" -lt 0 ]] && unchanged=0
+
   local payload
   payload="$(jq -nc \
-    --arg processed "$processed" \
-    --arg ok "$probe_ok" \
-    --arg missing "$missing" \
-    --arg fail "$probe_fail" \
-    --arg elapsed "${elapsed}s" \
-    --arg db "$DB_PATH" \
+    --arg bar "$bar_str" \
+    --arg pct "${pct_int}.${pct_frac}%" \
+    --arg swapped "$(comma_fmt "$swapped_total")" \
+    --arg total_c "$(comma_fmt "$total_convertible")" \
+    --arg audio "$(comma_fmt "$audio_remaining")" \
+    --arg video "$(comma_fmt "$video_remaining")" \
+    --arg swap_total "$(comma_fmt "$swapped_total")" \
+    --arg rate "$rate_str" \
+    --arg eta "$eta_str" \
+    --arg elapsed_s "${elapsed}s" \
+    --arg probed "$(comma_fmt "$processed")" \
+    --arg pfail "$probe_fail" \
+    --arg unchanged_s "$(comma_fmt "$unchanged")" \
+    --arg tracked "$(comma_fmt "$media_count")" \
+    --arg compliant "$(comma_fmt "$compliant_count")" \
+    --arg uhd "$(comma_fmt "$uhd_hdr_count")" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: "🔍 Codec Manager — Audit Complete",
-      description: (
-        "✅ **Probe OK:** " + $ok + " · ❓ **Missing:** " + $missing + " · ❌ **Probe Fail:** " + $fail
-      ),
+      description: ($bar + "  " + $pct + "  ·  " + $swapped + " / " + $total_c + " converted"),
       color: 3066993,
       fields: [
-        {name: "📊 Processed", value: $processed, inline: true},
-        {name: "⏱️ Elapsed", value: $elapsed, inline: true},
-        {name: "🗃️ State DB", value: ("`" + $db + "`")}
+        {name: "🔊 Audio-only left", value: $audio, inline: true},
+        {name: "🎬 Video left", value: $video, inline: true},
+        {name: "✅ Swapped (total)", value: $swap_total, inline: true},
+        {name: "📈 Rate", value: $rate, inline: true},
+        {name: "⏳ ETA", value: $eta, inline: true},
+        {name: "⏱ Elapsed", value: $elapsed_s, inline: true},
+        {name: "🔍 Probed", value: ($probed + " (fail: " + $pfail + ")"), inline: true},
+        {name: "⬜ Unchanged", value: $unchanged_s, inline: true}
       ],
-      footer: {text: "Codec Manager Audit"},
+      footer: {text: ($tracked + " tracked · " + $compliant + " compliant · " + $uhd + " UHD/HDR skipped")},
       timestamp: $ts
     }]}')"
 
@@ -1007,7 +1078,7 @@ audit_cmd() {
   log "info" "Audit completed. processed=$total probe_ok=$ok skipped=$skipped missing=$missing probe_fail=$probe_fail"
   end_ts="$(date +%s)"
   elapsed="$((end_ts - start_ts))"
-  notify_discord_audit_done "$total" "$ok" "$missing" "$probe_fail" "$elapsed"
+  notify_discord_audit_done "$total" "$ok" "$missing" "$probe_fail" "$elapsed" "$skipped"
 }
 
 plan_cmd() {
