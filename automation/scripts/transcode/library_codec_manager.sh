@@ -31,6 +31,9 @@ TARGET_SAMPLE_RATE=48000
 TARGET_AUDIO_BITRATE="192k"
 TARGET_CRF=19
 TARGET_PRESET="medium"
+IMPORT_FILE=""
+IMPORT_MEDIA_TYPE=""
+IMPORT_REF_ID=""
 DISCORD_WEBHOOK_AUDIT_DONE="${DISCORD_WEBHOOK_AUDIT_DONE:-}"
 DISCORD_WEBHOOK_STATUS="${DISCORD_WEBHOOK_STATUS:-$DISCORD_WEBHOOK_AUDIT_DONE}"
 DEFAULT_TARGET_CONTAINER="mp4"
@@ -55,6 +58,7 @@ Commands:
   convert         Convert planned eligible files (single-file sequential)
   resume          Alias for convert
   prune-backups   Remove backups older than retention window
+  enqueue-import  Fast-path: probe one file and enqueue at highest priority
 
 Options:
   --state-dir PATH      State root directory (default: $STATE_DIR_DEFAULT)
@@ -70,6 +74,9 @@ Options:
   --max-attempts N      Max conversion attempts per media before skip (default: $MAX_ATTEMPTS_DEFAULT)
   --retention-days N    Backup retention window in days for prune-backups (default: $RETENTION_DAYS_DEFAULT)
   --log-level LEVEL     info|debug (default: info)
+  --file PATH           Media file path (enqueue-import only)
+  --media-type TYPE     series|movie (enqueue-import only)
+  --ref-id ID           Bazarr ref ID — sonarrSeriesId or radarrId (enqueue-import only)
   --help                Show help
 USAGE
 }
@@ -441,6 +448,12 @@ parse_args() {
         RETENTION_DAYS="$2"; shift 2 ;;
       --log-level)
         LOG_LEVEL="$2"; shift 2 ;;
+      --file)
+        IMPORT_FILE="$2"; shift 2 ;;
+      --media-type)
+        IMPORT_MEDIA_TYPE="$2"; shift 2 ;;
+      --ref-id)
+        IMPORT_REF_ID="$2"; shift 2 ;;
       --help|-h)
         usage; exit 0 ;;
       *)
@@ -1566,6 +1579,145 @@ daily_status_cmd() {
   notify_discord_daily_status
 }
 
+# Fast-path enqueue for a single newly-imported file.
+# Probes the file, upserts into media_files + probe_streams, then
+# creates/updates a conversion_plan row with priority=0 (highest).
+# Non-fatal on all errors so the import hook is never blocked.
+enqueue_import_cmd() {
+  if [[ -z "$IMPORT_FILE" ]]; then
+    log "error" "enqueue-import: --file is required"
+    return 1
+  fi
+  if [[ -z "$IMPORT_MEDIA_TYPE" ]]; then
+    log "error" "enqueue-import: --media-type is required"
+    return 1
+  fi
+  if [[ ! -f "$IMPORT_FILE" ]]; then
+    log "warn" "enqueue-import: file not found (may not be settled yet): $IMPORT_FILE"
+    return 0
+  fi
+
+  local path="$IMPORT_FILE"
+  local media_type="$IMPORT_MEDIA_TYPE"
+  local ref_id="${IMPORT_REF_ID:-NULL}"
+  local container size_bytes mtime
+
+  container="${path##*.}"
+  container="$(printf '%s' "$container" | tr '[:upper:]' '[:lower:]')"
+  size_bytes="$(stat -c '%s' "$path" 2>/dev/null || echo 0)"
+  mtime="$(stat -c '%Y' "$path" 2>/dev/null || echo 0)"
+
+  log "info" "enqueue-import: probing $path (type=$media_type ref=$ref_id)"
+
+  # Upsert media_files row
+  upsert_media_file "$media_type" "$ref_id" "$path" "$size_bytes" "$mtime" "$container"
+  local media_id
+  media_id="$(media_id_for_path "$path")"
+  if [[ -z "$media_id" ]]; then
+    log "error" "enqueue-import: failed to get media_id for $path"
+    return 1
+  fi
+
+  # Probe the file
+  local tmp_json tmp_err
+  tmp_json="$(mktemp)"
+  tmp_err="$(mktemp)"
+  if ffprobe -v error -print_format json -show_streams -show_format "$path" >"$tmp_json" 2>"$tmp_err" </dev/null; then
+    clear_probe_streams "$media_id"
+    insert_probe_streams_from_json "$media_id" "$tmp_json"
+    upsert_audit_status "$media_id" 1 1 ""
+  else
+    local err
+    err="$(tr -d '\n' <"$tmp_err" | cut -c1-4000)"
+    clear_probe_streams "$media_id"
+    upsert_audit_status "$media_id" 1 0 "$err"
+    log "warn" "enqueue-import: ffprobe failed for $path: $err"
+    rm -f "$tmp_json" "$tmp_err"
+    return 0
+  fi
+  rm -f "$tmp_json" "$tmp_err"
+
+  # Evaluate plan eligibility (same logic as plan_cmd, single row)
+  local max_w max_h has_hdr h264_v total_v good_a total_a
+  max_w="$(db "SELECT COALESCE(MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
+  max_h="$(db "SELECT COALESCE(MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
+  has_hdr="$(db "SELECT COALESCE(MAX(is_hdr),0) FROM probe_streams WHERE media_id=$media_id AND stream_type='video';")"
+  h264_v="$(db "SELECT COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' THEN 1 ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
+  total_v="$(db "SELECT COALESCE(SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
+  good_a="$(db "SELECT COALESCE(SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
+  total_a="$(db "SELECT COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
+
+  local eligible=0 reason="" skip_reason="" priority=99
+  local target_container="$container"
+  local container_ok=0
+  if [[ "$container" == "mp4" || "$container" == "mkv" ]]; then
+    container_ok=1
+  else
+    target_container="$DEFAULT_TARGET_CONTAINER"
+  fi
+
+  if [[ "$has_hdr" -eq 1 ]]; then
+    skip_reason="hdr_skipped"
+  elif [[ "$max_w" -ge 3840 || "$max_h" -ge 2160 ]]; then
+    skip_reason="uhd_skipped"
+  elif [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
+    skip_reason="already_compliant"
+  else
+    eligible=1
+    priority=0
+    if [[ "$total_v" -gt 0 && "$h264_v" -eq "$total_v" ]]; then
+      reason="audio_only"
+    else
+      reason="needs_transcode"
+    fi
+  fi
+
+  # Check if already has a conversion_plan row
+  local existing_priority existing_status
+  existing_priority="$(db "SELECT priority FROM conversion_plan WHERE media_id=$media_id LIMIT 1;" 2>/dev/null)"
+  existing_status="$(db "SELECT COALESCE((SELECT status FROM conversion_runs WHERE media_id=$media_id ORDER BY id DESC LIMIT 1),'')")"
+
+  # Skip if already converted
+  if [[ "$existing_status" == "swapped" ]]; then
+    log "info" "enqueue-import: already converted (status=swapped), skipping: $path"
+    return 0
+  fi
+
+  if [[ -n "$existing_priority" ]]; then
+    if [[ "$eligible" -eq 1 && "$existing_priority" -gt 0 ]]; then
+      # Upgrade priority to 0
+      db "UPDATE conversion_plan SET priority=0, eligible=1, reason='$(sql_quote "$reason")', plan_ts=CURRENT_TIMESTAMP WHERE media_id=$media_id;"
+      log "info" "enqueue-import: upgraded priority $existing_priority→0 for $path (reason=$reason)"
+    elif [[ "$eligible" -eq 1 && "$existing_priority" -eq 0 ]]; then
+      log "info" "enqueue-import: already at priority=0, skipping: $path"
+    else
+      # Update plan row with latest evaluation
+      db <<SQL
+UPDATE conversion_plan SET eligible=$eligible, priority=$priority, reason='$(sql_quote "$reason")',
+  skip_reason='$(sql_quote "$skip_reason")', plan_ts=CURRENT_TIMESTAMP WHERE media_id=$media_id;
+SQL
+      log "info" "enqueue-import: updated plan (eligible=$eligible skip=$skip_reason): $path"
+    fi
+  else
+    # Insert new plan row
+    db <<SQL
+INSERT INTO conversion_plan(media_id,plan_ts,eligible,priority,reason,target_video,target_audio,target_container,skip_reason)
+VALUES(
+  $media_id,
+  CURRENT_TIMESTAMP,
+  $eligible,
+  $priority,
+  '$(sql_quote "$reason")',
+  '$TARGET_VIDEO_CODEC',
+  '$TARGET_AUDIO_CODEC',
+  '$(sql_quote "$target_container")',
+  '$(sql_quote "$skip_reason")'
+);
+SQL
+    log "info" "enqueue-import: enqueued priority=$priority eligible=$eligible reason=${reason:-$skip_reason}: $path"
+  fi
+}
+
 main() {
   parse_args "$@"
   ensure_state_dirs
@@ -1593,6 +1745,9 @@ main() {
       ;;
     prune-backups)
       prune_backups_cmd
+      ;;
+    enqueue-import)
+      enqueue_import_cmd
       ;;
     *)
       usage

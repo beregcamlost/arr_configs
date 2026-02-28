@@ -11,6 +11,10 @@ PRUNES=0
 
 source "$(dirname "$0")/lib_subtitle_common.sh"
 
+# Source .env for API keys (BAZARR_API_KEY, EMBY_URL, EMBY_API_KEY, etc.)
+# shellcheck disable=SC1091
+[[ -f /config/berenstuff/.env ]] && source /config/berenstuff/.env
+
 # ---------------------------------------------------------------------------
 # Auto-detect Sonarr vs Radarr from env vars
 # ---------------------------------------------------------------------------
@@ -197,6 +201,30 @@ main() {
   if [[ "$WRITES" -gt 0 ]] && [[ -n "${EMBY_URL:-}" && -n "${EMBY_API_KEY:-}" ]]; then
     emby_refresh_item "$MEDIA_PATH" || log "WARN: Emby refresh failed (non-fatal)"
   fi
+
+  # Trigger Bazarr rescan so it picks up the new file immediately
+  local bazarr_url="${BAZARR_URL:-http://127.0.0.1:6767/bazarr}"
+  local bazarr_key="${BAZARR_API_KEY:-}"
+  if [[ -n "$bazarr_key" && -n "$MEDIA_ID" ]]; then
+    if [[ "$ARR_TYPE" == "sonarr" ]]; then
+      bazarr_scan_disk_series "$MEDIA_ID" "$bazarr_url" "$bazarr_key" || log "WARN: Bazarr series rescan failed (non-fatal)"
+    else
+      bazarr_scan_disk_movie "$MEDIA_ID" "$bazarr_url" "$bazarr_key" || log "WARN: Bazarr movie rescan failed (non-fatal)"
+    fi
+  fi
+
+  # Enqueue for codec conversion at highest priority (background, non-blocking)
+  local codec_media_type
+  if [[ "$ARR_TYPE" == "sonarr" ]]; then
+    codec_media_type="series"
+  else
+    codec_media_type="movie"
+  fi
+  /config/berenstuff/scripts/library_codec_manager.sh enqueue-import \
+    --file "$MEDIA_PATH" --media-type "$codec_media_type" --ref-id "$MEDIA_ID" \
+    --state-dir /APPBOX_DATA/storage/.transcode-state-media \
+    >> /config/berenstuff/automation/logs/codec_enqueue_import.log 2>&1 </dev/null &
+  disown
 
   if [[ "$WRITES" -gt 0 ]]; then
     notify_discord "SUCCESS" "**$WRITES** extracted · **$SKIPS** skipped · **$PRUNES** pruned"

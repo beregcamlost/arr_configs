@@ -653,14 +653,20 @@ cmd_auto_maintain() {
   while IFS= read -r mkv_file; do
     [[ -z "$mkv_file" ]] && continue
 
-    # In quick mode (--since), only process MKVs that have recently modified SRTs
+    # In quick mode (--since), only process MKVs that were recently modified
+    # themselves (new import) OR have recently modified SRTs
     if [[ "$SINCE_MINUTES" -gt 0 ]]; then
-      local stem dir
+      local stem dir mkv_age_ok=0
       stem="$(basename "${mkv_file%.*}")"
       dir="$(dirname "$mkv_file")"
+      # Check if the MKV itself was recently modified (new import)
+      if [[ -n "$(find "$mkv_file" -maxdepth 0 -mmin "-${SINCE_MINUTES}" 2>/dev/null)" ]]; then
+        mkv_age_ok=1
+      fi
+      # Check if any SRT was recently modified
       local recent_srt
       recent_srt="$(find "$dir" -maxdepth 1 -name "${stem}.*.srt" -type f -mmin "-${SINCE_MINUTES}" 2>/dev/null | head -1)"
-      [[ -z "$recent_srt" ]] && continue
+      [[ "$mkv_age_ok" -eq 0 && -z "$recent_srt" ]] && continue
     fi
 
     mkv_files+=("$mkv_file")
