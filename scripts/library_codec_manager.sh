@@ -47,13 +47,14 @@ comma_fmt() {
 }
 
 progress_bar() {
-  local current="$1" total="$2" width="${3:-16}"
-  [[ "$total" -le 0 ]] && { printf '%*s' "$width" '' | tr ' ' '░'; return; }
+  local current="$1" total="$2" width="${3:-16}" result=""
+  [[ "$total" -le 0 ]] && { for ((i=0; i<width; i++)); do result+='\u2591'; done; printf "$result"; return; }
   local filled=$(( current * width / total ))
   [[ "$filled" -gt "$width" ]] && filled="$width"
   local empty=$(( width - filled ))
-  printf '%*s' "$filled" '' | tr ' ' '█'
-  printf '%*s' "$empty" '' | tr ' ' '░'
+  for ((i=0; i<filled; i++)); do result+='\u2588'; done
+  for ((i=0; i<empty; i++)); do result+='\u2591'; done
+  printf "$result"
 }
 
 cleanup() {
