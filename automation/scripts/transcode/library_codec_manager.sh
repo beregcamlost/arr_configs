@@ -36,7 +36,7 @@ IMPORT_MEDIA_TYPE=""
 IMPORT_REF_ID=""
 DISCORD_WEBHOOK_AUDIT_DONE="${DISCORD_WEBHOOK_AUDIT_DONE:-}"
 DISCORD_WEBHOOK_STATUS="${DISCORD_WEBHOOK_STATUS:-$DISCORD_WEBHOOK_AUDIT_DONE}"
-DEFAULT_TARGET_CONTAINER="mp4"
+DEFAULT_TARGET_CONTAINER="mkv"
 MAX_ATTEMPTS_DEFAULT=30
 MAX_ATTEMPTS="$MAX_ATTEMPTS_DEFAULT"
 RETENTION_DAYS="$RETENTION_DAYS_DEFAULT"
@@ -1189,6 +1189,18 @@ verify_transcoded_file() {
 
   [[ "$v_ok" -eq 1 ]] || { echo "video_codec_validation_failed"; return 1; }
   [[ "$a_ok" -eq 1 ]] || { echo "audio_codec_validation_failed"; return 1; }
+
+  # Subtitle stream count check — catch silent drops (e.g. ASS/PGS in MP4)
+  local src_subs dst_subs
+  src_subs="$(ffprobe -v error -select_streams s -show_entries stream=index \
+    -of csv=p=0 "$src" </dev/null 2>/dev/null | wc -l)"
+  dst_subs="$(ffprobe -v error -select_streams s -show_entries stream=index \
+    -of csv=p=0 "$dst" </dev/null 2>/dev/null | wc -l)"
+  if [[ "$src_subs" -gt 0 && "$dst_subs" -lt "$src_subs" ]]; then
+    echo "subtitle_stream_loss:src=${src_subs},dst=${dst_subs}"
+    return 1
+  fi
+
   return 0
 }
 

@@ -197,6 +197,11 @@ main() {
     extract_target "$MEDIA_PATH" "$code" "$forced"
   done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
 
+  # Strip ALL embedded subtitle tracks — after extraction, external SRTs are
+  # the source of truth.  Removing embedded tracks eliminates Bazarr seeing
+  # duplicates (e.g. "two en files") and keeps containers clean.
+  strip_all_embedded_subs "$MEDIA_PATH" || log "WARN: strip_all_embedded_subs failed (non-fatal)"
+
   # Trigger Emby refresh for the imported file
   if [[ "$WRITES" -gt 0 ]] && [[ -n "${EMBY_URL:-}" && -n "${EMBY_API_KEY:-}" ]]; then
     emby_refresh_item "$MEDIA_PATH" || log "WARN: Emby refresh failed (non-fatal)"
@@ -247,6 +252,58 @@ main() {
         log "BAZARR_SEARCH $ARR_TYPE lang=$lang forced=$lang_forced ref=$bazarr_ref_id http=$search_http"
       done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
     fi
+
+    # Translation fallback — for profile languages still missing an external
+    # SRT after Bazarr search, attempt machine translation from the best
+    # available source subtitle.  Runs in background to not block import.
+    (
+      sleep 5  # let Bazarr search complete first
+      local translate_type translate_id_param
+      if [[ "$ARR_TYPE" == "sonarr" ]]; then
+        translate_type="episode"
+        translate_id_param="episodeid=${bazarr_ref_id}"
+      else
+        translate_type="movie"
+        translate_id_param="radarrid=${MEDIA_ID}"
+      fi
+      while IFS='|' read -r tlang tforced; do
+        [[ -z "$tlang" ]] && continue
+        tlang="${tlang,,}"
+        tforced="${tforced,,}"
+        # Skip if external SRT already exists
+        if [[ -n "$(find "$dir" -maxdepth 1 -name "${stem}.${tlang}.srt" -type f 2>/dev/null | head -1)" ]]; then
+          continue
+        fi
+        # Find best source SRT (largest other-language file)
+        local source_srt=""
+        local source_size=0
+        local candidate csize
+        for candidate in "$dir"/"${stem}".*.srt; do
+          [[ -f "$candidate" ]] || continue
+          [[ "$candidate" == *".${tlang}."* ]] && continue  # skip same language
+          [[ "$candidate" == *".forced."* ]] && continue     # skip forced subs
+          csize="$(stat -c '%s' "$candidate" 2>/dev/null || echo 0)"
+          if [[ "$csize" -gt "$source_size" ]]; then
+            source_size="$csize"
+            source_srt="$candidate"
+          fi
+        done
+        if [[ -z "$source_srt" ]]; then
+          log "TRANSLATE_SKIP lang=$tlang — no source SRT available"
+          continue
+        fi
+        # Call Bazarr translate API
+        local translate_http
+        translate_http="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+          -H "X-API-KEY: ${bazarr_key}" \
+          "${bazarr_url}/api/${translate_type}s/subtitles?${translate_id_param}&language=${tlang}&forced=False&hi=False&original_format=False" \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -nc --arg path "$source_srt" --arg lang "$tlang" '{action:"translate",language:$lang,path:$path}')" \
+          2>/dev/null)" || true
+        log "TRANSLATE $ARR_TYPE lang=$tlang source=$(basename "$source_srt") ref=$bazarr_ref_id http=$translate_http"
+      done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
+    ) >> "${LOG}" 2>&1 </dev/null &
+    disown
   fi
 
   # Enqueue for codec conversion at highest priority (background, non-blocking)

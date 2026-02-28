@@ -801,6 +801,47 @@ extract_target() {
 }
 
 # ---------------------------------------------------------------------------
+# Strip ALL embedded subtitle streams from a media file
+# ---------------------------------------------------------------------------
+
+# Removes every embedded subtitle track, keeping video/audio/attachments intact.
+# Works on any container (MKV, MP4, AVI, etc.) — preserves original format.
+# No-op if file has zero embedded subs. Non-fatal on failure.
+# $1=file_path
+strip_all_embedded_subs() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+
+  local sub_count tmp_out ext
+  sub_count="$(ffprobe -v error -select_streams s -show_entries stream=index \
+    -of csv=p=0 "$file" </dev/null 2>/dev/null | wc -l)"
+  [[ "$sub_count" -eq 0 ]] && return 0
+
+  ext="${file##*.}"
+  tmp_out="${file}.strip_tmp.${ext}"
+
+  if ffmpeg -y -v quiet -i "$file" -map 0 -map -0:s -c copy "$tmp_out" </dev/null 2>/dev/null; then
+    # Verify output is non-empty and reasonable size
+    local orig_size new_size
+    orig_size="$(stat -c '%s' "$file" 2>/dev/null || echo 0)"
+    new_size="$(stat -c '%s' "$tmp_out" 2>/dev/null || echo 0)"
+    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]]; then
+      mv -f "$tmp_out" "$file"
+      log "STRIP_EMBEDDED removed $sub_count subtitle streams from $(basename "$file")"
+      return 0
+    else
+      rm -f "$tmp_out"
+      log "WARN: strip produced suspicious output (orig=${orig_size} new=${new_size}), skipping"
+      return 1
+    fi
+  else
+    rm -f "$tmp_out" 2>/dev/null
+    log "WARN: strip_all_embedded_subs ffmpeg failed for $(basename "$file")"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Bazarr scan-disk API helpers
 # ---------------------------------------------------------------------------
 
