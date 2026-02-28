@@ -253,56 +253,16 @@ main() {
       done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
     fi
 
-    # Translation fallback — for profile languages still missing an external
-    # SRT after Bazarr search, attempt machine translation from the best
-    # available source subtitle.  Runs in background to not block import.
+    # DeepL translation fallback — for profile languages still missing an
+    # external SRT after Bazarr search, translate via DeepL from best
+    # available source.  Runs in background to not block import.
     (
-      sleep 5  # let Bazarr search complete first
-      local translate_type translate_id_param
-      if [[ "$ARR_TYPE" == "sonarr" ]]; then
-        translate_type="episode"
-        translate_id_param="episodeid=${bazarr_ref_id}"
-      else
-        translate_type="movie"
-        translate_id_param="radarrid=${MEDIA_ID}"
-      fi
-      while IFS='|' read -r tlang tforced; do
-        [[ -z "$tlang" ]] && continue
-        tlang="${tlang,,}"
-        tforced="${tforced,,}"
-        # Skip if external SRT already exists
-        if [[ -n "$(find "$dir" -maxdepth 1 -name "${stem}.${tlang}.srt" -type f 2>/dev/null | head -1)" ]]; then
-          continue
-        fi
-        # Find best source SRT (largest other-language file)
-        local source_srt=""
-        local source_size=0
-        local candidate csize
-        for candidate in "$dir"/"${stem}".*.srt; do
-          [[ -f "$candidate" ]] || continue
-          [[ "$candidate" == *".${tlang}."* ]] && continue  # skip same language
-          [[ "$candidate" == *".forced."* ]] && continue     # skip forced subs
-          csize="$(stat -c '%s' "$candidate" 2>/dev/null || echo 0)"
-          if [[ "$csize" -gt "$source_size" ]]; then
-            source_size="$csize"
-            source_srt="$candidate"
-          fi
-        done
-        if [[ -z "$source_srt" ]]; then
-          log "TRANSLATE_SKIP lang=$tlang — no source SRT available"
-          continue
-        fi
-        # Call Bazarr translate API
-        local translate_http
-        translate_http="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
-          -H "X-API-KEY: ${bazarr_key}" \
-          "${bazarr_url}/api/${translate_type}s/subtitles?${translate_id_param}&language=${tlang}&forced=False&hi=False&original_format=False" \
-          -H 'Content-Type: application/json' \
-          -d "$(jq -nc --arg path "$source_srt" --arg lang "$tlang" '{action:"translate",language:$lang,path:$path}')" \
-          2>/dev/null)" || true
-        log "TRANSLATE $ARR_TYPE lang=$tlang source=$(basename "$source_srt") ref=$bazarr_ref_id http=$translate_http"
-      done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
-    ) >> "${LOG}" 2>&1 </dev/null &
+      sleep 10  # let Bazarr search complete + download first
+      source /config/berenstuff/.env
+      PYTHONPATH=/config/berenstuff/automation/scripts \
+        python3 /config/berenstuff/automation/scripts/translation/translator.py \
+        translate --file "$MEDIA_PATH"
+    ) >> /config/berenstuff/automation/logs/deepl_translate.log 2>&1 </dev/null &
     disown
   fi
 

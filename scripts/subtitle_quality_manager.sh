@@ -780,6 +780,31 @@ cmd_auto_maintain() {
 
       case "$rating" in
         GOOD)
+          # Check for .deepl marker (DeepL-translated SRT grace period)
+          if [[ -f "${srt_file}.deepl" ]]; then
+            local marker_mtime srt_mtime
+            marker_mtime="$(stat -c %Y "${srt_file}.deepl" 2>/dev/null || echo 0)"
+            srt_mtime="$(stat -c %Y "$srt_file" 2>/dev/null || echo 0)"
+            # If SRT was replaced after marker created, human sub found — delete marker and mux
+            if [[ "$srt_mtime" -gt "$marker_mtime" ]]; then
+              rm -f "${srt_file}.deepl"
+              log "DeepL marker removed (SRT replaced by human sub): $srt_basename"
+            else
+              # Grace period: 7 days (604800 seconds)
+              local now marker_age
+              now="$(date +%s)"
+              marker_age=$(( now - marker_mtime ))
+              if [[ "$marker_age" -lt 604800 ]]; then
+                local days_left=$(( (604800 - marker_age) / 86400 ))
+                debug "SKIP mux (DeepL grace ${days_left}d remaining): $srt_basename"
+                continue
+              else
+                # Grace expired — mux the DeepL translation
+                rm -f "${srt_file}.deepl"
+                log "DeepL grace expired, muxing: $srt_basename"
+              fi
+            fi
+          fi
           good_srts+=("$srt_file")
           good_langs+=("$ext_lang")
           ;;
