@@ -176,19 +176,19 @@ notify_discord_daily_status() {
 
   local media_count eligible_count audio_only_count video_tx_count swapped_total failed_total running_now attempt_limited_total
   local swapped_24h failed_24h recovered_24h attempt_limited_24h last_run
-  media_count="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM media_files;")"
-  eligible_count="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
-  audio_only_count="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;")"
-  video_tx_count="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;")"
-  swapped_total="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';")"
-  failed_total="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='failed';")"
-  attempt_limited_total="$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached';")"
-  running_now="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='running' AND end_ts IS NULL;")"
-  swapped_24h="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
-  failed_24h="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='failed' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
-  attempt_limited_24h="$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
-  recovered_24h="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='failed' AND error='stale_running_recovered' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
-  last_run="$(sqlite3 "$DB_PATH" "SELECT COALESCE((SELECT run_id || ' [' || status || '] @ ' || COALESCE(end_ts,start_ts) FROM conversion_runs ORDER BY id DESC LIMIT 1),'none');")"
+  media_count="$(db "SELECT COUNT(*) FROM media_files;")"
+  eligible_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
+  audio_only_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;")"
+  video_tx_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;")"
+  swapped_total="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';")"
+  failed_total="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='failed';")"
+  attempt_limited_total="$(db "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached';")"
+  running_now="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='running' AND end_ts IS NULL;")"
+  swapped_24h="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
+  failed_24h="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='failed' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
+  attempt_limited_24h="$(db "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
+  recovered_24h="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='failed' AND error='stale_running_recovered' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
+  last_run="$(db "SELECT COALESCE((SELECT run_id || ' [' || status || '] @ ' || COALESCE(end_ts,start_ts) FROM conversion_runs ORDER BY id DESC LIMIT 1),'none');")"
 
   local payload
   payload="$(jq -nc \
@@ -363,8 +363,18 @@ sql_quote() {
   printf "%s" "$1" | sed "s/'/''/g"
 }
 
+# SQLite wrapper — ensures busy_timeout (30s) on every connection.
+# Accepts sqlite3 flags before the query (e.g., db -separator $'\t' "SQL").
+db() {
+  local flags=()
+  while [[ "${1:-}" == -* ]]; do
+    flags+=("$1" "$2"); shift 2
+  done
+  sqlite3 "${flags[@]}" -cmd ".timeout 30000" "$DB_PATH" "$@"
+}
+
 init_db() {
-  sqlite3 "$DB_PATH" <<'SQL' >/dev/null
+  db <<'SQL' >/dev/null
 PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=30000;
 PRAGMA synchronous=NORMAL;
@@ -468,9 +478,9 @@ SQL
 
   # Migration: add priority column if missing (existing DBs)
   local has_priority
-  has_priority="$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM pragma_table_info('conversion_plan') WHERE name='priority';")"
+  has_priority="$(db "SELECT COUNT(*) FROM pragma_table_info('conversion_plan') WHERE name='priority';")"
   if [[ "$has_priority" -eq 0 ]]; then
-    sqlite3 "$DB_PATH" "ALTER TABLE conversion_plan ADD COLUMN priority INTEGER DEFAULT 10;"
+    db "ALTER TABLE conversion_plan ADD COLUMN priority INTEGER DEFAULT 10;"
     log "info" "Migrated conversion_plan: added priority column"
   fi
 }
@@ -480,7 +490,7 @@ insert_event() {
   local msg_q ctx_q
   msg_q="$(sql_quote "$msg")"
   ctx_q="$(sql_quote "$ctx")"
-  sqlite3 "$DB_PATH" "INSERT INTO events(severity,scope,media_id,message,context_json) VALUES('$(sql_quote "$sev")','$(sql_quote "$scope")',${media_id:-NULL},'$msg_q','$ctx_q');"
+  db "INSERT INTO events(severity,scope,media_id,message,context_json) VALUES('$(sql_quote "$sev")','$(sql_quote "$scope")',${media_id:-NULL},'$msg_q','$ctx_q');"
 }
 
 fetch_sources_query() {
@@ -526,7 +536,7 @@ upsert_media_file() {
   qpath="$(sql_quote "$path")"
   qcont="$(sql_quote "$container")"
 
-  sqlite3 "$DB_PATH" <<SQL
+  db <<SQL
 INSERT INTO media_files(media_type,bazarr_ref_id,path,size_bytes,mtime,container,updated_at)
 VALUES('$qtype',${ref_id:-NULL},'$qpath',${size_bytes:-NULL},${mtime:-NULL},'$qcont',CURRENT_TIMESTAMP)
 ON CONFLICT(path) DO UPDATE SET
@@ -543,14 +553,14 @@ media_id_for_path() {
   local path="$1"
   local qpath
   qpath="$(sql_quote "$path")"
-  sqlite3 "$DB_PATH" "SELECT id FROM media_files WHERE path='$qpath' LIMIT 1;"
+  db "SELECT id FROM media_files WHERE path='$qpath' LIMIT 1;"
 }
 
 upsert_audit_status() {
   local media_id="$1" exists_flag="$2" probe_ok="$3" probe_error="$4"
   local qerr
   qerr="$(sql_quote "$probe_error")"
-  sqlite3 "$DB_PATH" <<SQL
+  db <<SQL
 INSERT INTO audit_status(media_id,audit_ts,exists_flag,probe_ok,probe_error)
 VALUES($media_id,CURRENT_TIMESTAMP,$exists_flag,$probe_ok,'$qerr')
 ON CONFLICT(media_id) DO UPDATE SET
@@ -563,7 +573,7 @@ SQL
 
 clear_probe_streams() {
   local media_id="$1"
-  sqlite3 "$DB_PATH" "DELETE FROM probe_streams WHERE media_id=$media_id;"
+  db "DELETE FROM probe_streams WHERE media_id=$media_id;"
 }
 
 fps_to_float() {
@@ -582,7 +592,30 @@ insert_probe_streams_from_json() {
   # HDR detection and fps calculation are done inside jq to avoid any extra subprocess calls.
   # Uses pipe-delimited output (not @tsv) because bash read with IFS=$'\t' collapses
   # consecutive tabs, dropping empty fields like pix_fmt on audio/subtitle streams.
-  jq -r '.streams[]? | [
+  # All INSERTs are batched into a single transaction (one sqlite3 subprocess).
+  local sql_batch="BEGIN TRANSACTION;"
+  while IFS='|' read -r idx stype codec profile pix_fmt width height fps channels sample_rate lang forced dflag hdr; do
+    [[ -z "$idx" ]] && continue
+    sql_batch+="
+INSERT INTO probe_streams(media_id,stream_index,stream_type,codec,profile,pix_fmt,width,height,fps,channels,sample_rate,language,forced,default_flag,is_hdr)
+VALUES(
+  $media_id,
+  ${idx:-0},
+  '$(sql_quote "${stype:-}")',
+  '$(sql_quote "${codec:-}")',
+  '$(sql_quote "${profile:-}")',
+  '$(sql_quote "${pix_fmt:-}")',
+  ${width:-0},
+  ${height:-0},
+  ${fps:-0},
+  ${channels:-0},
+  ${sample_rate:-0},
+  '$(sql_quote "${lang:-}")',
+  ${forced:-0},
+  ${dflag:-0},
+  ${hdr:-0}
+);"
+  done < <(jq -r '.streams[]? | [
     (.index // 0),
     ((.codec_type // "") | ascii_downcase),
     ((.codec_name // "") | ascii_downcase),
@@ -605,29 +638,10 @@ insert_probe_streams_from_json() {
       ((.color_primaries // "") | ascii_downcase) as $cp |
       if $ct == "smpte2084" or $ct == "arib-std-b67" or $cp == "bt2020" then 1 else 0 end
     )
-  ] | join("|")' "$json_file" | while IFS='|' read -r idx stype codec profile pix_fmt width height fps channels sample_rate lang forced dflag hdr; do
-    [[ -z "$idx" ]] && continue
-    sqlite3 "$DB_PATH" <<SQL
-INSERT INTO probe_streams(media_id,stream_index,stream_type,codec,profile,pix_fmt,width,height,fps,channels,sample_rate,language,forced,default_flag,is_hdr)
-VALUES(
-  $media_id,
-  ${idx:-0},
-  '$(sql_quote "${stype:-}")',
-  '$(sql_quote "${codec:-}")',
-  '$(sql_quote "${profile:-}")',
-  '$(sql_quote "${pix_fmt:-}")',
-  ${width:-0},
-  ${height:-0},
-  ${fps:-0},
-  ${channels:-0},
-  ${sample_rate:-0},
-  '$(sql_quote "${lang:-}")',
-  ${forced:-0},
-  ${dflag:-0},
-  ${hdr:-0}
-);
-SQL
-  done
+  ] | join("|")' "$json_file")
+  sql_batch+="
+COMMIT;"
+  db <<<"$sql_batch"
 }
 
 audit_cmd() {
@@ -677,9 +691,9 @@ audit_cmd() {
 
     # Incremental: skip ffprobe if mtime unchanged and probe data already exists
     local stored_mtime has_probes
-    stored_mtime="$(sqlite3 "$DB_PATH" "SELECT mtime FROM media_files WHERE id=$media_id LIMIT 1;" 2>/dev/null)"
+    stored_mtime="$(db "SELECT mtime FROM media_files WHERE id=$media_id LIMIT 1;" 2>/dev/null)"
     if [[ "$stored_mtime" == "$mtime" && -n "$stored_mtime" ]]; then
-      has_probes="$(sqlite3 "$DB_PATH" "SELECT 1 FROM probe_streams WHERE media_id=$media_id LIMIT 1;" 2>/dev/null)"
+      has_probes="$(db "SELECT 1 FROM probe_streams WHERE media_id=$media_id LIMIT 1;" 2>/dev/null)"
       if [[ "$has_probes" == "1" ]]; then
         skipped=$((skipped + 1))
         ok=$((ok + 1))
@@ -723,14 +737,14 @@ audit_cmd() {
 plan_cmd() {
   log "info" "Building conversion plan"
 
-  sqlite3 "$DB_PATH" "DELETE FROM conversion_plan;"
+  db "DELETE FROM conversion_plan;"
 
   local where_limit=""
   if [[ "$LIMIT" -gt 0 ]]; then
     where_limit=" LIMIT $LIMIT"
   fi
 
-  sqlite3 -separator $'\t' "$DB_PATH" "
+  db -separator $'\t' "
 SELECT m.id,m.path,m.container,
        COALESCE(a.exists_flag,0),COALESCE(a.probe_ok,0),
        COALESCE((SELECT MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END) FROM probe_streams ps WHERE ps.media_id=m.id),0) AS max_w,
@@ -778,8 +792,7 @@ ORDER BY m.path${where_limit};
       fi
     fi
 
-    sqlite3 "$DB_PATH" <<SQL
-.timeout 5000
+    db <<SQL
 INSERT INTO conversion_plan(media_id,plan_ts,eligible,priority,reason,target_video,target_audio,target_container,skip_reason)
 VALUES(
   $media_id,
@@ -807,21 +820,21 @@ report_cmd() {
 
   {
     echo "metric,value"
-    echo "media_files,$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM media_files;")"
-    echo "audit_ok,$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM audit_status WHERE probe_ok=1;")"
-    echo "missing_files,$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM audit_status WHERE exists_flag=0;")"
-    echo "plan_eligible,$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
-    echo "plan_skipped,$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=0;")"
+    echo "media_files,$(db "SELECT COUNT(*) FROM media_files;")"
+    echo "audit_ok,$(db "SELECT COUNT(*) FROM audit_status WHERE probe_ok=1;")"
+    echo "missing_files,$(db "SELECT COUNT(*) FROM audit_status WHERE exists_flag=0;")"
+    echo "plan_eligible,$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
+    echo "plan_skipped,$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=0;")"
   } >"$audit_csv"
 
   {
     echo "skip_reason,count"
-    sqlite3 -separator ',' "$DB_PATH" "SELECT COALESCE(skip_reason,'eligible') AS reason, COUNT(*) FROM conversion_plan GROUP BY reason ORDER BY COUNT(*) DESC;"
+    db -separator ',' "SELECT COALESCE(skip_reason,'eligible') AS reason, COUNT(*) FROM conversion_plan GROUP BY reason ORDER BY COUNT(*) DESC;"
   } >"$plan_csv"
 
   {
     echo "path,eligible,status,reason,container,target_container,original_audio_language,video_codecs,audio_codecs,subtitle_codecs,audio_languages,subtitle_languages"
-    sqlite3 -separator ',' "$DB_PATH" "
+    db -separator ',' "
 SELECT
   REPLACE(m.path, ',', ';') AS path,
   cp.eligible,
@@ -847,7 +860,7 @@ ORDER BY status, m.path;
 
   {
     echo "path,status,error"
-    sqlite3 -separator ',' "$DB_PATH" "
+    db -separator ',' "
 SELECT m.path, cr.status, REPLACE(COALESCE(cr.error,''), ',', ';')
 FROM conversion_runs cr
 JOIN media_files m ON m.id=cr.media_id
@@ -862,18 +875,18 @@ ORDER BY cr.id DESC;
     echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')"
     echo
     echo "## Counts"
-    echo "- Media files: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM media_files;")"
-    echo "- Audit ok: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM audit_status WHERE probe_ok=1;")"
-    echo "- Missing files: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM audit_status WHERE exists_flag=0;")"
-    echo "- Eligible for convert: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
-    echo "  - Audio-only (priority 1): $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;")"
-    echo "  - Video transcode (priority 10): $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;")"
-    echo "- Completed swaps: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';")"
-    echo "- Failures: $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM conversion_runs WHERE status='failed';")"
-    echo "- Attempt limit reached: $(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached';")"
+    echo "- Media files: $(db "SELECT COUNT(*) FROM media_files;")"
+    echo "- Audit ok: $(db "SELECT COUNT(*) FROM audit_status WHERE probe_ok=1;")"
+    echo "- Missing files: $(db "SELECT COUNT(*) FROM audit_status WHERE exists_flag=0;")"
+    echo "- Eligible for convert: $(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
+    echo "  - Audio-only (priority 1): $(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;")"
+    echo "  - Video transcode (priority 10): $(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;")"
+    echo "- Completed swaps: $(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';")"
+    echo "- Failures: $(db "SELECT COUNT(*) FROM conversion_runs WHERE status='failed';")"
+    echo "- Attempt limit reached: $(db "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached';")"
     echo
     echo "## Top Skip Reasons"
-    sqlite3 -separator '|' "$DB_PATH" "SELECT COALESCE(skip_reason,'eligible'), COUNT(*) FROM conversion_plan GROUP BY skip_reason ORDER BY COUNT(*) DESC LIMIT 10;" | awk -F'|' '{printf("- %s: %s\n",$1,$2)}'
+    db -separator '|' "SELECT COALESCE(skip_reason,'eligible'), COUNT(*) FROM conversion_plan GROUP BY skip_reason ORDER BY COUNT(*) DESC LIMIT 10;" | awk -F'|' '{printf("- %s: %s\n",$1,$2)}'
   } >"$report_md"
 
   log "info" "Report written: $report_md"
@@ -1027,14 +1040,14 @@ build_temp_output_path() {
 
 run_convert_for_media() {
   local run_id="$1" media_id="$2" attempt_no="$3" src container
-  src="$(sqlite3 "$DB_PATH" "SELECT path FROM media_files WHERE id=$media_id LIMIT 1;")"
-  container="$(sqlite3 "$DB_PATH" "SELECT target_container FROM conversion_plan WHERE media_id=$media_id LIMIT 1;")"
+  src="$(db "SELECT path FROM media_files WHERE id=$media_id LIMIT 1;")"
+  container="$(db "SELECT target_container FROM conversion_plan WHERE media_id=$media_id LIMIT 1;")"
   if [[ -z "$container" ]]; then
-    container="$(sqlite3 "$DB_PATH" "SELECT container FROM media_files WHERE id=$media_id LIMIT 1;")"
+    container="$(db "SELECT container FROM media_files WHERE id=$media_id LIMIT 1;")"
   fi
 
   [[ -f "$src" ]] || {
-    sqlite3 "$DB_PATH" "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'failed',${attempt_no:-1},'source_missing');"
+    db "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'failed',${attempt_no:-1},'source_missing');"
     insert_event "error" "convert" "$media_id" "Source missing at convert time" "{\"path\":\"$(sql_quote "$src")\"}"
     return
   }
@@ -1048,13 +1061,13 @@ run_convert_for_media() {
   # Hard safety rule: never write temp transcode outputs in the source media directory.
   case "$dst_tmp" in
     "$src_dir"/*)
-      sqlite3 "$DB_PATH" "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'failed',${attempt_no:-1},'temp_path_in_media_dir_blocked');"
+      db "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'failed',${attempt_no:-1},'temp_path_in_media_dir_blocked');"
       insert_event "error" "convert" "$media_id" "Blocked unsafe temp path in media directory" "{\"src\":\"$(sql_quote "$src")\",\"tmp\":\"$(sql_quote "$dst_tmp")\"}"
       return
       ;;
   esac
 
-  sqlite3 "$DB_PATH" "INSERT INTO conversion_runs(run_id,media_id,start_ts,status,attempt) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,'running',${attempt_no:-1});"
+  db "INSERT INTO conversion_runs(run_id,media_id,start_ts,status,attempt) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,'running',${attempt_no:-1});"
 
   local ff_cmd=() audio_copy=0 video_copy=0 orig_lang="und"
   local -a audio_map_args=() selected_audio_desc=()
@@ -1069,7 +1082,7 @@ run_convert_for_media() {
   done < <(select_audio_streams_for_conversion "$src")
 
   if [[ "${#audio_map_args[@]}" -eq 0 ]]; then
-    sqlite3 "$DB_PATH" "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'failed',${attempt_no:-1},'no_audio_stream_selected');"
+    db "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'failed',${attempt_no:-1},'no_audio_stream_selected');"
     insert_event "error" "convert" "$media_id" "No audio stream selected for conversion" "{\"src\":\"$(sql_quote "$src")\"}"
     return
   fi
@@ -1104,12 +1117,12 @@ run_convert_for_media() {
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "info" "DRY-RUN convert media_id=$media_id src=$src dst=$dst_tmp"
-    sqlite3 "$DB_PATH" "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='planned',error='dry_run' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
+    db "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='planned',error='dry_run' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
     return
   fi
 
   if ! "${ff_cmd[@]}" >>"$LOG_PATH" 2>&1; then
-    sqlite3 "$DB_PATH" "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='failed',error='ffmpeg_failed' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
+    db "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='failed',error='ffmpeg_failed' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
     rm -f "$dst_tmp" || true
     insert_event "error" "convert" "$media_id" "ffmpeg failed" "{\"src\":\"$(sql_quote "$src")\"}"
     return
@@ -1117,7 +1130,7 @@ run_convert_for_media() {
 
   local verify_err=""
   if ! verify_err="$(verify_transcoded_file "$src" "$dst_tmp" 2>&1)"; then
-    sqlite3 "$DB_PATH" "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='failed',error='$(sql_quote "$verify_err")' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
+    db "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='failed',error='$(sql_quote "$verify_err")' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
     rm -f "$dst_tmp" || true
     insert_event "error" "convert" "$media_id" "verification failed" "{\"error\":\"$(sql_quote "$verify_err")\"}"
     return
@@ -1133,7 +1146,7 @@ run_convert_for_media() {
   # swap with rollback safety
   if mv "$src" "$backup_path"; then
     if mv "$dst_tmp" "$src"; then
-      sqlite3 "$DB_PATH" <<SQL
+      db <<SQL
 UPDATE conversion_runs
 SET end_ts=CURRENT_TIMESTAMP,status='swapped',error=''
 WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';
@@ -1145,12 +1158,12 @@ SQL
       emby_refresh_item "$src" || log "warn" "Emby refresh failed for media_id=$media_id (non-fatal)"
     else
       mv "$backup_path" "$src" || true
-      sqlite3 "$DB_PATH" "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='rolled_back',error='swap_failed_rolled_back' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
+      db "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='rolled_back',error='swap_failed_rolled_back' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
       rm -f "$dst_tmp" || true
       insert_event "error" "convert" "$media_id" "swap failed and rolled back" "{}"
     fi
   else
-    sqlite3 "$DB_PATH" "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='failed',error='backup_move_failed' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
+    db "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='failed',error='backup_move_failed' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
     rm -f "$dst_tmp" || true
     insert_event "error" "convert" "$media_id" "failed to move original to backup" "{}"
   fi
@@ -1161,7 +1174,7 @@ convert_cmd() {
 
   # Recover stale rows left as "running" after interrupted sessions/processes.
   local recovered
-  recovered="$(sqlite3 "$DB_PATH" "
+  recovered="$(db "
 UPDATE conversion_runs
 SET end_ts=CURRENT_TIMESTAMP,
     status='failed',
@@ -1192,8 +1205,8 @@ SELECT changes();
     attempt_no=$((attempt_count + 1))
     if (( attempt_no > MAX_ATTEMPTS )); then
       local media_path
-      media_path="$(sqlite3 "$DB_PATH" "SELECT path FROM media_files WHERE id=$media_id LIMIT 1;")"
-      sqlite3 "$DB_PATH" "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'attempt_limit_reached',$attempt_count,'attempts_exceeded_${MAX_ATTEMPTS}');"
+      media_path="$(db "SELECT path FROM media_files WHERE id=$media_id LIMIT 1;")"
+      db "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'attempt_limit_reached',$attempt_count,'attempts_exceeded_${MAX_ATTEMPTS}');"
       insert_event "warn" "convert" "$media_id" "attempt limit reached; skipping media" "{\"path\":\"$(sql_quote "$media_path")\",\"attempts\":$attempt_count,\"max_attempts\":$MAX_ATTEMPTS}"
       notify_discord_attempt_limit "$media_id" "$media_path" "$attempt_count" "$MAX_ATTEMPTS"
       log "warn" "Skipping media_id=$media_id because attempts=$attempt_count exceed max_attempts=$MAX_ATTEMPTS"
@@ -1202,7 +1215,7 @@ SELECT changes();
     processed=$((processed + 1))
     log "info" "Converting media_id=$media_id attempt=$attempt_no/$MAX_ATTEMPTS"
     run_convert_for_media "$run_id" "$media_id" "$attempt_no"
-  done < <(sqlite3 -separator $'\t' "$DB_PATH" "
+  done < <(db -separator $'\t' "
 SELECT cp.media_id,
        COALESCE((
          SELECT COUNT(*)
