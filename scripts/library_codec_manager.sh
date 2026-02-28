@@ -105,6 +105,111 @@ emby_refresh_item() {
   return 0
 }
 
+# Trigger Sonarr RescanSeries or Radarr RescanMovie after file swap.
+# Uses the codec DB media_type + bazarr_ref_id to determine which arr to call.
+# $1=media_type  $2=bazarr_ref_id
+arr_rescan_for_media() {
+  local media_type="$1" ref_id="$2"
+  [[ -z "$ref_id" || "$ref_id" == "NULL" ]] && return 0
+
+  if [[ "$media_type" == "series" ]]; then
+    local sonarr_url="${SONARR_URL:-http://127.0.0.1:8989/sonarr}"
+    local sonarr_key="${SONARR_KEY:-}"
+    [[ -z "$sonarr_key" ]] && return 0
+    # Get sonarrSeriesId from episode ref
+    local series_id
+    series_id="$(sqlite3 -cmd ".timeout 5000" "$BAZARR_DB" \
+      "SELECT sonarrSeriesId FROM table_episodes WHERE sonarrEpisodeId = $ref_id LIMIT 1;" 2>/dev/null)" || true
+    [[ -z "$series_id" ]] && return 0
+    curl -fsS -X POST "${sonarr_url}/api/v3/command" \
+      -H "X-Api-Key: ${sonarr_key}" -H "Content-Type: application/json" \
+      -d "{\"name\":\"RescanSeries\",\"seriesId\":${series_id}}" >/dev/null 2>&1 || true
+    log "debug" "Sonarr RescanSeries id=$series_id triggered"
+  else
+    local radarr_url="${RADARR_URL:-http://127.0.0.1:7878/radarr}"
+    local radarr_key="${RADARR_KEY:-}"
+    [[ -z "$radarr_key" ]] && return 0
+    # radarr_ref_id IS the radarrId
+    curl -fsS -X POST "${radarr_url}/api/v3/command" \
+      -H "X-Api-Key: ${radarr_key}" -H "Content-Type: application/json" \
+      -d "{\"name\":\"RescanMovie\",\"movieId\":${ref_id}}" >/dev/null 2>&1 || true
+    log "debug" "Radarr RescanMovie id=$ref_id triggered"
+  fi
+}
+
+# Trigger Bazarr scan-disk for a media item after file swap.
+# $1=media_type  $2=bazarr_ref_id
+bazarr_rescan_for_media() {
+  local media_type="$1" ref_id="$2"
+  local bazarr_url="${BAZARR_URL:-http://127.0.0.1:6767/bazarr}"
+  local bazarr_key="${BAZARR_API_KEY:-}"
+  [[ -z "$bazarr_key" || -z "$ref_id" || "$ref_id" == "NULL" ]] && return 0
+
+  local endpoint http_code
+  if [[ "$media_type" == "series" ]]; then
+    local series_id
+    series_id="$(sqlite3 -cmd ".timeout 5000" "$BAZARR_DB" \
+      "SELECT sonarrSeriesId FROM table_episodes WHERE sonarrEpisodeId = $ref_id LIMIT 1;" 2>/dev/null)" || true
+    [[ -z "$series_id" ]] && return 0
+    endpoint="${bazarr_url}/api/series?seriesid=${series_id}&action=scan-disk"
+  else
+    endpoint="${bazarr_url}/api/movies?radarrid=${ref_id}&action=scan-disk"
+  fi
+
+  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+    -H "X-API-KEY: ${bazarr_key}" "$endpoint" 2>/dev/null)" || true
+  log "debug" "Bazarr scan-disk type=$media_type ref=$ref_id http=$http_code"
+}
+
+# Map 3-letter ISO 639-2 code → English name (inverse of lang_name_to_iso).
+iso_to_lang_name() {
+  case "${1,,}" in
+    eng) echo "English" ;; spa) echo "Spanish" ;; fre|fra) echo "French" ;;
+    ger|deu) echo "German" ;; ita) echo "Italian" ;; por) echo "Portuguese" ;;
+    zho|chi) echo "Chinese Simplified" ;; jpn) echo "Japanese" ;; kor) echo "Korean" ;;
+    ara) echo "Arabic" ;; rus) echo "Russian" ;; nld) echo "Dutch" ;;
+    swe) echo "Swedish" ;; dan) echo "Danish" ;; fin) echo "Finnish" ;;
+    nor) echo "Norwegian" ;; pol) echo "Polish" ;; ces) echo "Czech" ;;
+    hun) echo "Hungarian" ;; ron) echo "Romanian" ;; tur) echo "Turkish" ;;
+    tha) echo "Thai" ;; vie) echo "Vietnamese" ;; ell) echo "Greek" ;;
+    heb) echo "Hebrew" ;; hin) echo "Hindi" ;; ind) echo "Indonesian" ;;
+    ukr) echo "Ukrainian" ;; bul) echo "Bulgarian" ;; hrv) echo "Croatian" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Update Bazarr audio_language field to match actual audio tracks after conversion.
+# Sonarr/Radarr API won't update their import-time language tags, so we write directly.
+# $1=media_type  $2=bazarr_ref_id  $3=selected_audio_desc (comma-sep "idx:lang" pairs)
+update_bazarr_audio_language() {
+  local media_type="$1" ref_id="$2" selected_desc="$3"
+  [[ -z "$ref_id" || "$ref_id" == "NULL" || ! -f "$BAZARR_DB" ]] && return 0
+
+  # Build Python-style list: "['English', 'Spanish']"
+  local -A seen_names=()
+  local names_list="" name
+  IFS=',' read -ra pairs <<< "$selected_desc"
+  for pair in "${pairs[@]}"; do
+    local lang="${pair#*:}"
+    name="$(iso_to_lang_name "$lang")"
+    [[ -z "$name" || -n "${seen_names[$name]:-}" ]] && continue
+    seen_names["$name"]=1
+    [[ -n "$names_list" ]] && names_list+=", "
+    names_list+="'$name'"
+  done
+  [[ -z "$names_list" ]] && return 0
+  local new_val="[$names_list]"
+
+  if [[ "$media_type" == "series" ]]; then
+    sqlite3 -cmd ".timeout 5000" "$BAZARR_DB" \
+      "UPDATE table_episodes SET audio_language = '$new_val' WHERE sonarrEpisodeId = $ref_id;" 2>/dev/null || true
+  else
+    sqlite3 -cmd ".timeout 5000" "$BAZARR_DB" \
+      "UPDATE table_movies SET audio_language = '$new_val' WHERE radarrId = $ref_id;" 2>/dev/null || true
+  fi
+  log "debug" "Bazarr audio_language updated type=$media_type ref=$ref_id val=$new_val"
+}
+
 notify_discord_audit_done() {
   local processed="$1"
   local probe_ok="$2"
@@ -1355,6 +1460,9 @@ VALUES($media_id,'$(sql_quote "$src")','$(sql_quote "$backup_path")','$(sql_quot
 SQL
       insert_event "info" "convert" "$media_id" "swap completed" "{\"src\":\"$(sql_quote "$src")\",\"backup\":\"$(sql_quote "$backup_path")\"}"
       emby_refresh_item "$src" || log "warn" "Emby refresh failed for media_id=$media_id (non-fatal)"
+      arr_rescan_for_media "$media_type_ref" "$bazarr_ref_id_ref" || log "warn" "Arr rescan failed for media_id=$media_id (non-fatal)"
+      bazarr_rescan_for_media "$media_type_ref" "$bazarr_ref_id_ref" || log "warn" "Bazarr rescan failed for media_id=$media_id (non-fatal)"
+      update_bazarr_audio_language "$media_type_ref" "$bazarr_ref_id_ref" "$(IFS=,; echo "${selected_audio_desc[*]}")" || true
     else
       mv "$backup_path" "$src" || true
       db "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='rolled_back',error='swap_failed_rolled_back' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
