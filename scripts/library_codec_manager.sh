@@ -373,6 +373,164 @@ db() {
   sqlite3 "${flags[@]}" -cmd ".timeout 30000" "$DB_PATH" "$@"
 }
 
+# --- Inline language helpers (mirrors of lib_subtitle_common.sh — keep in sync) ---
+
+# Expand comma-separated lang codes to space-separated set with 2+3-letter variants.
+# Input: "en,es" or "eng,spa"   Output: "en eng es spa "
+expand_lang_codes_inline() {
+  local input="$1"
+  local -A seen=()
+  local result=""
+  IFS=',' read -ra codes <<< "$input"
+  for code in "${codes[@]}"; do
+    code="${code,,}"; code="${code// /}"
+    [[ -z "$code" || -n "${seen[$code]:-}" ]] && continue
+    seen["$code"]=1; result+="$code "
+    case "$code" in
+      en)  [[ -z "${seen[eng]:-}" ]] && { seen[eng]=1; result+="eng "; } ;;
+      eng) [[ -z "${seen[en]:-}" ]]  && { seen[en]=1;  result+="en "; }  ;;
+      es)  [[ -z "${seen[spa]:-}" ]] && { seen[spa]=1; result+="spa "; } ;;
+      spa) [[ -z "${seen[es]:-}" ]]  && { seen[es]=1;  result+="es "; }  ;;
+      fr)  [[ -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
+      fre|fra) [[ -z "${seen[fr]:-}" ]] && { seen[fr]=1; result+="fr "; }
+               [[ "$code" == "fre" && -z "${seen[fra]:-}" ]] && { seen[fra]=1; result+="fra "; }
+               [[ "$code" == "fra" && -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
+      pt)  [[ -z "${seen[por]:-}" ]] && { seen[por]=1; result+="por "; } ;;
+      por) [[ -z "${seen[pt]:-}" ]]  && { seen[pt]=1;  result+="pt "; }  ;;
+      de)  [[ -z "${seen[ger]:-}" ]] && { seen[ger]=1; result+="ger "; } ;;
+      ger|deu) [[ -z "${seen[de]:-}" ]] && { seen[de]=1; result+="de "; }
+               [[ "$code" == "ger" && -z "${seen[deu]:-}" ]] && { seen[deu]=1; result+="deu "; }
+               [[ "$code" == "deu" && -z "${seen[ger]:-}" ]] && { seen[ger]=1; result+="ger "; } ;;
+      it)  [[ -z "${seen[ita]:-}" ]] && { seen[ita]=1; result+="ita "; } ;;
+      ita) [[ -z "${seen[it]:-}" ]]  && { seen[it]=1;  result+="it "; }  ;;
+      zh)  [[ -z "${seen[zho]:-}" ]] && { seen[zho]=1; result+="zho chi "; seen[chi]=1; } ;;
+      zho|chi) [[ -z "${seen[zh]:-}" ]] && { seen[zh]=1; result+="zh "; } ;;
+      ja)  [[ -z "${seen[jpn]:-}" ]] && { seen[jpn]=1; result+="jpn "; } ;;
+      jpn) [[ -z "${seen[ja]:-}" ]]  && { seen[ja]=1;  result+="ja "; }  ;;
+      ko)  [[ -z "${seen[kor]:-}" ]] && { seen[kor]=1; result+="kor "; } ;;
+      kor) [[ -z "${seen[ko]:-}" ]]  && { seen[ko]=1;  result+="ko "; }  ;;
+    esac
+  done
+  echo "$result"
+}
+
+# Check if a language code is in an expanded set (space-separated).
+lang_in_set_inline() {
+  local lang="$1" set="$2"
+  [[ " $set " == *" ${lang,,} "* ]]
+}
+
+# Map English language name → 3-letter ISO 639-2 code (for Bazarr audio_language parsing).
+lang_name_to_iso() {
+  local name="$1"
+  case "${name,,}" in
+    english)              echo "eng" ;;
+    spanish)              echo "spa" ;;
+    french)               echo "fre" ;;
+    german)               echo "ger" ;;
+    italian)              echo "ita" ;;
+    portuguese)           echo "por" ;;
+    chinese*|mandarin)    echo "zho" ;;
+    japanese)             echo "jpn" ;;
+    korean)               echo "kor" ;;
+    arabic)               echo "ara" ;;
+    russian)              echo "rus" ;;
+    dutch)                echo "nld" ;;
+    swedish)              echo "swe" ;;
+    danish)               echo "dan" ;;
+    finnish)              echo "fin" ;;
+    norwegian)            echo "nor" ;;
+    polish)               echo "pol" ;;
+    czech)                echo "ces" ;;
+    hungarian)            echo "hun" ;;
+    romanian)             echo "ron" ;;
+    turkish)              echo "tur" ;;
+    thai)                 echo "tha" ;;
+    vietnamese)           echo "vie" ;;
+    greek)                echo "ell" ;;
+    hebrew)               echo "heb" ;;
+    hindi)                echo "hin" ;;
+    indonesian)           echo "ind" ;;
+    ukrainian)            echo "ukr" ;;
+    bulgarian)            echo "bul" ;;
+    croatian)             echo "hrv" ;;
+    "chinese simplified") echo "zho" ;;
+    *)                    echo "" ;;
+  esac
+}
+
+# --- Bazarr profile / original language resolvers ---
+
+# Resolve Bazarr language profile for a media file by its codec DB ref ID.
+# Returns comma-separated 2-letter codes (e.g. "en,es") or empty string.
+# $1=media_type ("series"|"movie")  $2=bazarr_ref_id  $3=bazarr_db_path
+resolve_profile_langs_by_id() {
+  local media_type="$1" ref_id="$2" bazarr_db="$3"
+  [[ -z "$ref_id" || "$ref_id" == "NULL" || ! -f "$bazarr_db" ]] && return 0
+
+  local items=""
+  if [[ "$media_type" == "series" ]]; then
+    items="$(sqlite3 -cmd ".timeout 5000" "$bazarr_db" "
+      SELECT lp.items FROM table_episodes e
+      JOIN table_shows s ON s.sonarrSeriesId = e.sonarrSeriesId
+      JOIN table_languages_profiles lp ON lp.profileId = s.profileId
+      WHERE e.sonarrEpisodeId = $ref_id LIMIT 1;
+    " 2>/dev/null)" || true
+  else
+    items="$(sqlite3 -cmd ".timeout 5000" "$bazarr_db" "
+      SELECT lp.items FROM table_movies m
+      JOIN table_languages_profiles lp ON lp.profileId = m.profileId
+      WHERE m.radarrId = $ref_id LIMIT 1;
+    " 2>/dev/null)" || true
+  fi
+
+  [[ -z "$items" ]] && return 0
+  # Parse JSON array: extract "language" values → comma-separated
+  jq -r '.[].language' <<< "$items" 2>/dev/null | paste -sd ',' -
+}
+
+# Resolve the TRUE original language of a media item from Bazarr metadata.
+# For series: uses the most common audio_language across all episodes of the same show
+#   (avoids per-episode variance from dual-audio releases).
+# For movies: uses table_movies.audio_language directly.
+# Returns space-separated 3-letter ISO codes (e.g. "eng") or empty string.
+# $1=media_type  $2=bazarr_ref_id  $3=bazarr_db_path
+resolve_original_lang_by_id() {
+  local media_type="$1" ref_id="$2" bazarr_db="$3"
+  [[ -z "$ref_id" || "$ref_id" == "NULL" || ! -f "$bazarr_db" ]] && return 0
+
+  local raw_lang=""
+  if [[ "$media_type" == "series" ]]; then
+    # Use the most common audio_language across all episodes of this show
+    # to avoid outlier multi-language releases (e.g. French+English in a mostly-English show).
+    raw_lang="$(sqlite3 -cmd ".timeout 5000" "$bazarr_db" "
+      SELECT e2.audio_language
+      FROM table_episodes e2
+      WHERE e2.sonarrSeriesId = (
+        SELECT sonarrSeriesId FROM table_episodes WHERE sonarrEpisodeId = $ref_id LIMIT 1
+      )
+      AND e2.audio_language IS NOT NULL AND e2.audio_language <> '[]'
+      GROUP BY e2.audio_language ORDER BY COUNT(*) DESC LIMIT 1;
+    " 2>/dev/null)" || true
+  else
+    raw_lang="$(sqlite3 -cmd ".timeout 5000" "$bazarr_db" "
+      SELECT audio_language FROM table_movies WHERE radarrId = $ref_id LIMIT 1;
+    " 2>/dev/null)" || true
+  fi
+
+  [[ -z "$raw_lang" || "$raw_lang" == "[]" ]] && return 0
+
+  # Parse Python-style list: "['English']" or "['French', 'English']"
+  # Take only the FIRST element — the primary/original language.
+  local first_name
+  first_name="$(echo "$raw_lang" | sed "s/^\[//;s/\]$//;s/'//g" | cut -d',' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -z "$first_name" ]] && return 0
+
+  local iso
+  iso="$(lang_name_to_iso "$first_name")"
+  [[ -n "$iso" ]] && echo "$iso"
+}
+
 init_db() {
   db <<'SQL' >/dev/null
 PRAGMA journal_mode=WAL;
@@ -932,6 +1090,8 @@ audio_streams_already_compliant() {
 
 select_audio_streams_for_conversion() {
   local src="$1"
+  local profile_lang_set="${2:-}"     # pre-expanded space-separated set (from expand_lang_codes_inline)
+  local orig_lang_override="${3:-}"   # 3-letter code from Bazarr metadata
   local rows="" orig_lang="und"
   local -A seen=()
 
@@ -949,49 +1109,73 @@ select_audio_streams_for_conversion() {
 
   [[ -n "$rows" ]] || return 1
 
-  while IFS=$'\t' read -r idx lang def; do
-    [[ -z "$idx" ]] && continue
-    if [[ "$def" == "1" && "$lang" != "und" ]]; then
-      orig_lang="$lang"
-      break
-    fi
-  done <<<"$rows"
-
-  if [[ "$orig_lang" == "und" ]]; then
+  # Determine original language: prefer Bazarr metadata override, then default-flag, then first non-und.
+  if [[ -n "$orig_lang_override" ]]; then
+    orig_lang="$orig_lang_override"
+  else
     while IFS=$'\t' read -r idx lang def; do
       [[ -z "$idx" ]] && continue
-      if [[ "$lang" != "und" ]]; then
+      if [[ "$def" == "1" && "$lang" != "und" ]]; then
         orig_lang="$lang"
         break
       fi
     done <<<"$rows"
+    if [[ "$orig_lang" == "und" ]]; then
+      while IFS=$'\t' read -r idx lang def; do
+        [[ -z "$idx" ]] && continue
+        if [[ "$lang" != "und" ]]; then
+          orig_lang="$lang"
+          break
+        fi
+      done <<<"$rows"
+    fi
   fi
 
   printf '__ORIG__\t%s\n' "$orig_lang"
 
-  if [[ "$orig_lang" == "und" ]]; then
+  # Profile-aware selection: keep streams matching profile OR original language.
+  if [[ -n "$profile_lang_set" ]]; then
+    local orig_expanded=""
+    [[ -n "$orig_lang_override" ]] && orig_expanded="$(expand_lang_codes_inline "$orig_lang_override")"
     while IFS=$'\t' read -r idx lang def; do
       [[ -z "$idx" ]] && continue
-      if [[ "$def" == "1" || "$lang" == "eng" || "$lang" == "spa" || "$lang" == "ita" ]]; then
-        if [[ -z "${seen[$idx]:-}" ]]; then
-          seen["$idx"]=1
-          printf '%s\t%s\n' "$idx" "$lang"
-        fi
+      local keep=0
+      if lang_in_set_inline "$lang" "$profile_lang_set"; then
+        keep=1
+      elif [[ -n "$orig_expanded" ]] && lang_in_set_inline "$lang" "$orig_expanded"; then
+        keep=1
+      fi
+      if [[ "$keep" -eq 1 && -z "${seen[$idx]:-}" ]]; then
+        seen["$idx"]=1
+        printf '%s\t%s\n' "$idx" "$lang"
       fi
     done <<<"$rows"
   else
-    while IFS=$'\t' read -r idx lang def; do
-      [[ -z "$idx" ]] && continue
-      if [[ "$lang" == "$orig_lang" || "$lang" == "eng" || "$lang" == "spa" || "$lang" == "ita" ]]; then
-        if [[ -z "${seen[$idx]:-}" ]]; then
-          seen["$idx"]=1
-          printf '%s\t%s\n' "$idx" "$lang"
+    # Legacy fallback: hardcoded language list (no profile available).
+    if [[ "$orig_lang" == "und" ]]; then
+      while IFS=$'\t' read -r idx lang def; do
+        [[ -z "$idx" ]] && continue
+        if [[ "$def" == "1" || "$lang" == "eng" || "$lang" == "spa" || "$lang" == "ita" ]]; then
+          if [[ -z "${seen[$idx]:-}" ]]; then
+            seen["$idx"]=1
+            printf '%s\t%s\n' "$idx" "$lang"
+          fi
         fi
-      fi
-    done <<<"$rows"
+      done <<<"$rows"
+    else
+      while IFS=$'\t' read -r idx lang def; do
+        [[ -z "$idx" ]] && continue
+        if [[ "$lang" == "$orig_lang" || "$lang" == "eng" || "$lang" == "spa" || "$lang" == "ita" ]]; then
+          if [[ -z "${seen[$idx]:-}" ]]; then
+            seen["$idx"]=1
+            printf '%s\t%s\n' "$idx" "$lang"
+          fi
+        fi
+      done <<<"$rows"
+    fi
   fi
 
-  # Ensure at least one audio stream is selected.
+  # Safety fallback: always select at least one stream.
   if [[ "${#seen[@]}" -eq 0 ]]; then
     while IFS=$'\t' read -r idx lang def; do
       [[ -z "$idx" ]] && continue
@@ -1069,6 +1253,21 @@ run_convert_for_media() {
 
   db "INSERT INTO conversion_runs(run_id,media_id,start_ts,status,attempt) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,'running',${attempt_no:-1});"
 
+  # Resolve Bazarr profile languages + true original language for audio stream selection.
+  local media_type_ref bazarr_ref_id_ref profile_langs="" profile_lang_set="" orig_lang_override=""
+  IFS=$'\t' read -r media_type_ref bazarr_ref_id_ref < <(
+    db -separator $'\t' "SELECT media_type, bazarr_ref_id FROM media_files WHERE id=$media_id LIMIT 1;"
+  ) || true
+
+  if [[ -n "$bazarr_ref_id_ref" && "$bazarr_ref_id_ref" != "NULL" && -f "$BAZARR_DB" ]]; then
+    profile_langs="$(resolve_profile_langs_by_id "$media_type_ref" "$bazarr_ref_id_ref" "$BAZARR_DB")" || true
+    if [[ -n "$profile_langs" ]]; then
+      profile_lang_set="$(expand_lang_codes_inline "$profile_langs")"
+    fi
+    orig_lang_override="$(resolve_original_lang_by_id "$media_type_ref" "$bazarr_ref_id_ref" "$BAZARR_DB")" || true
+    log "debug" "Profile langs media_id=$media_id type=$media_type_ref ref=$bazarr_ref_id_ref profile=$profile_langs orig_override=$orig_lang_override"
+  fi
+
   local ff_cmd=() audio_copy=0 video_copy=0 orig_lang="und"
   local -a audio_map_args=() selected_audio_desc=()
   while IFS=$'\t' read -r aidx alang; do
@@ -1079,7 +1278,7 @@ run_convert_for_media() {
     fi
     audio_map_args+=( -map "0:${aidx}" )
     selected_audio_desc+=( "${aidx}:${alang}" )
-  done < <(select_audio_streams_for_conversion "$src")
+  done < <(select_audio_streams_for_conversion "$src" "$profile_lang_set" "$orig_lang_override")
 
   if [[ "${#audio_map_args[@]}" -eq 0 ]]; then
     db "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'failed',${attempt_no:-1},'no_audio_stream_selected');"
@@ -1113,7 +1312,7 @@ run_convert_for_media() {
   fi
   ff_cmd+=( "$dst_tmp" )
 
-  log "info" "Audio selection media_id=$media_id original_lang=$orig_lang selected=$(IFS=,; echo "${selected_audio_desc[*]}")"
+  log "info" "Audio selection media_id=$media_id profile=${profile_langs:-none} original_lang=$orig_lang selected=$(IFS=,; echo "${selected_audio_desc[*]}")"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "info" "DRY-RUN convert media_id=$media_id src=$src dst=$dst_tmp"
