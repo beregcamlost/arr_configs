@@ -43,11 +43,13 @@ Key profiles: `enesfr` (id 5, languages: fr/en/es), profiles 3-4 (Chinese zh/zt)
 
 ### Codec manager (`automation/scripts/transcode/library_codec_manager.sh`)
 
-Subcommands: `audit`, `plan`, `report`, `convert`, `resume`, `daily-status`, `prune-backups`.
+Subcommands: `audit`, `plan`, `report`, `convert`, `resume`, `daily-status`, `enqueue-import`, `prune-backups`.
 
-State is persisted in SQLite at `/APPBOX_DATA/storage/.transcode-state/library_codec_state.db` with tables: `media_files`, `conversion_plan`, `conversion_runs`.
+State is persisted in SQLite at `/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db` with tables: `media_files`, `conversion_plan`, `conversion_runs`, `audit_status`, `probe_streams`.
 
-Conversion policy: H.264 CRF 19, AAC 192k stereo 48kHz. Skips UHD/4K/HDR. Safety workflow: temp output → codec+duration verification → swap with original backed up to `/APPBOX_DATA/storage/.transcode-state/backups/`.
+Conversion policy: H.264 CRF 19, AAC 192k stereo 48kHz. Skips UHD/4K/HDR. Safety workflow: temp output → codec+duration+subtitle verification → swap with original backed up to `/APPBOX_DATA/storage/.transcode-state-media/backups/`.
+
+Discord notifications: `DISCORD_WEBHOOK_AUDIT_DONE` (audit complete with progress bar, conversion stats, rate/ETA) and `DISCORD_WEBHOOK_STATUS` (daily status). Helper functions: `comma_fmt()`, `progress_bar()` (uses `printf '\uNNNN'` — never `tr` for multi-byte UTF-8).
 
 ### Supporting scripts
 
@@ -88,7 +90,7 @@ Conventional commits: `feat(subtitles): ...`, `fix(transcode): ...`
 - Bazarr runtime: `/opt/bazarr/data/` (config, DB, backups — not under `/config`)
 - Bazarr DB: `/opt/bazarr/data/db/bazarr.db`
 - Media root: `/APPBOX_DATA/storage/media/`
-- Transcode state: `/APPBOX_DATA/storage/.transcode-state/`
+- Transcode state: `/APPBOX_DATA/storage/.transcode-state-media/`
 - Canonical docs: `automation/docs/` (TASK_CONTEXT.md, runbooks)
 
 ## Documentation
