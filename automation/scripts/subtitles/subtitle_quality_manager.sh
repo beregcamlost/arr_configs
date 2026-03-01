@@ -748,6 +748,15 @@ cmd_auto_maintain() {
   local -a modified_dirs=()
   local -A bazarr_rescanned=()
 
+  # Cleanup orphaned temp files from interrupted operations (older than 1 hour)
+  local stale_count=0
+  while IFS= read -r stale_tmp; do
+    [[ -z "$stale_tmp" ]] && continue
+    rm -f "$stale_tmp"
+    stale_count=$((stale_count + 1))
+  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.striptmp.*" -o -name "*.bloattmp.*" -o -name "*.subtmp.*" -o -name "*.collisiontmp.*" \) -mmin +60 2>/dev/null)
+  [[ "$stale_count" -gt 0 ]] && log "CLEANUP $stale_count orphaned temp file(s)"
+
   # Find MKV files across all media dirs
   local -a mkv_files=()
   while IFS= read -r mkv_file; do
