@@ -174,8 +174,38 @@ is_file_being_converted() {
   local state_db="$CODEC_STATE_DIR/library_codec_state.db"
   [[ -f "$state_db" ]] || return 1
   local running
-  running="$(sqlite3 "$state_db" "SELECT COUNT(*) FROM conversion_plan WHERE status='running' AND media_id IN (SELECT media_id FROM media_files WHERE file_path='$(sql_escape "$filepath")');" 2>/dev/null || echo 0)"
-  [[ "$running" -gt 0 ]]
+  running="$(sqlite3 -cmd ".timeout 5000" "$state_db" \
+    "SELECT COUNT(*) FROM conversion_runs cr
+     JOIN media_files m ON m.id = cr.media_id
+     WHERE cr.status = 'running' AND cr.end_ts IS NULL
+       AND m.path = '$(sql_escape "$filepath")';" 2>/dev/null || echo 0)"
+  [[ "${running:-0}" -gt 0 ]]
+}
+
+STREAMING_STATE_DB="/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
+
+is_streaming_candidate() {
+  local filepath="$1"
+  [[ -f "$STREAMING_STATE_DB" ]] || return 1
+  local match_dir
+  if is_tv_path "$filepath"; then
+    if [[ "$filepath" == *"/Season "* ]]; then
+      # /tv/Show/Season 01/ep.mkv → /tv/Show
+      match_dir="$(printf '%s' "$filepath" | sed 's|/Season [0-9]*/.*||')"
+    else
+      # /tv/Show/ep.mkv → /tv/Show
+      match_dir="$(dirname "$filepath")"
+    fi
+  else
+    # /movies/Title (Year)/file.mkv → /movies/Title (Year)
+    match_dir="$(dirname "$filepath")"
+  fi
+  local count
+  count="$(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
+    "SELECT COUNT(*) FROM streaming_status
+     WHERE left_at IS NULL AND deleted_at IS NULL
+       AND '$(sql_escape "$match_dir")' LIKE path || '%';" 2>/dev/null || echo 0)"
+  [[ "${count:-0}" -gt 0 ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -383,7 +413,7 @@ cmd_audit() {
 cmd_mux() {
   log "Muxing external subtitles in: $PATH_PREFIX (recursive=$RECURSIVE, dry_run=$DRY_RUN, force=$FORCE)"
 
-  local total_files=0 muxed=0 skipped=0 failed=0
+  local total_files=0 muxed=0 skipped=0 skipped_streaming=0 failed=0
   local mux_summary=""
 
   while IFS= read -r mkv_file; do
@@ -397,6 +427,13 @@ cmd_mux() {
     if is_file_being_converted "$mkv_file"; then
       log "SKIP (converter running): $basename"
       skipped=$((skipped + 1))
+      continue
+    fi
+
+    # Skip streaming candidates
+    if is_streaming_candidate "$mkv_file"; then
+      log "SKIP (streaming): $basename"
+      skipped_streaming=$((skipped_streaming + 1))
       continue
     fi
 
@@ -512,7 +549,7 @@ cmd_mux() {
 
   done < <(find_media_files "$PATH_PREFIX")
 
-  log "Done. ${muxed} muxed, ${skipped} skipped, ${failed} failed."
+  log "Done. ${muxed} muxed, ${skipped} skipped, ${skipped_streaming} skipped(streaming), ${failed} failed."
 
   # Bazarr rescan (non-fatal — mux already succeeded)
   if [[ "$muxed" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]] && [[ -n "$BAZARR_API_KEY" ]]; then
@@ -535,7 +572,7 @@ cmd_strip() {
   fi
   log "Stripping ($mode_label) from: $PATH_PREFIX (recursive=$RECURSIVE, dry_run=$DRY_RUN)"
 
-  local total=0 stripped=0 skipped=0 failed=0
+  local total=0 stripped=0 skipped=0 skipped_streaming=0 failed=0
 
   # Pre-expand keep-only languages once
   local keep_set=""
@@ -549,6 +586,13 @@ cmd_strip() {
     if is_file_being_converted "$mkv_file"; then
       log "SKIP (converter running): $basename"
       skipped=$((skipped + 1))
+      continue
+    fi
+
+    # Skip streaming candidates
+    if is_streaming_candidate "$mkv_file"; then
+      log "SKIP (streaming): $basename"
+      skipped_streaming=$((skipped_streaming + 1))
       continue
     fi
 
@@ -628,7 +672,7 @@ cmd_strip() {
 
   done < <(find_media_files "$PATH_PREFIX")
 
-  log "Done. ${stripped} stripped, ${skipped} skipped, ${failed} failed."
+  log "Done. ${stripped} stripped, ${skipped} skipped, ${skipped_streaming} skipped(streaming), ${failed} failed."
 
   # Discord notification (non-fatal)
   if [[ "$stripped" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
@@ -645,7 +689,7 @@ cmd_auto_maintain() {
   [[ "$SINCE_MINUTES" -eq 0 ]] && init_state_db "$state_db"
 
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
-  local skipped_converter=0 skipped_playback=0 warned=0 deepl_deferred=0
+  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0
   local -a modified_dirs=()
 
   # Find MKV files across all media dirs
@@ -693,6 +737,13 @@ cmd_auto_maintain() {
     if is_file_being_played "$mkv_file"; then
       log "SKIP (playback): $basename"
       skipped_playback=$((skipped_playback + 1))
+      continue
+    fi
+
+    # Skip files that are streaming candidates (about to be deleted)
+    if is_streaming_candidate "$mkv_file"; then
+      log "SKIP (streaming): $basename"
+      skipped_streaming=$((skipped_streaming + 1))
       continue
     fi
 
@@ -1012,7 +1063,7 @@ cmd_auto_maintain() {
     done
   fi
 
-  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback"
+  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
 
   # Discord notification (non-fatal, only when actions taken)
   if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
@@ -1036,6 +1087,7 @@ cmd_auto_maintain() {
     [[ "$warned" -gt 0 ]] && desc+="⚠️ Manual review: ${warned}\n"
     [[ "$skipped_converter" -gt 0 ]] && desc+="🔄 Skipped (converter): ${skipped_converter}\n"
     [[ "$skipped_playback" -gt 0 ]] && desc+="▶️ Skipped (playback): ${skipped_playback}\n"
+    [[ "$skipped_streaming" -gt 0 ]] && desc+="📺 Skipped (streaming): ${skipped_streaming}\n"
     desc+="🔍 Scanned: ${total_files} files\n"
     [[ -n "$file_list" ]] && desc+="\n**Files modified:**\n${file_list}"
 

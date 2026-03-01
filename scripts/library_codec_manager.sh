@@ -553,6 +553,32 @@ sql_quote() {
   printf "%s" "$1" | sed "s/'/''/g"
 }
 
+STREAMING_STATE_DB="/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
+
+is_streaming_candidate_inline() {
+  local filepath="$1"
+  [[ -f "$STREAMING_STATE_DB" ]] || return 1
+  local match_dir
+  if [[ "$filepath" == *"/tv/"* || "$filepath" == *"/tvanimated/"* ]]; then
+    if [[ "$filepath" == *"/Season "* ]]; then
+      # /tv/Show/Season 01/ep.mkv → /tv/Show
+      match_dir="$(printf '%s' "$filepath" | sed 's|/Season [0-9]*/.*||')"
+    else
+      # /tv/Show/ep.mkv → /tv/Show
+      match_dir="$(dirname "$filepath")"
+    fi
+  else
+    # /movies/Title (Year)/file.mkv → /movies/Title (Year)
+    match_dir="$(dirname "$filepath")"
+  fi
+  local count
+  count="$(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
+    "SELECT COUNT(*) FROM streaming_status
+     WHERE left_at IS NULL AND deleted_at IS NULL
+       AND '$(sql_quote "$match_dir")' LIKE path || '%';" 2>/dev/null || echo 0)"
+  [[ "${count:-0}" -gt 0 ]]
+}
+
 # SQLite wrapper — ensures busy_timeout (30s) on every connection.
 # Accepts sqlite3 flags before the query (e.g., db -separator $'\t' "SQL").
 db() {
@@ -1125,6 +1151,8 @@ ORDER BY m.path${where_limit};
       skip_reason="hdr_skipped"
     elif [[ "$max_w" -ge 3840 || "$max_h" -ge 2160 ]]; then
       skip_reason="uhd_skipped"
+    elif is_streaming_candidate_inline "$path"; then
+      skip_reason="streaming_candidate"
     else
       if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
         skip_reason="already_compliant"
@@ -1744,6 +1772,10 @@ enqueue_import_cmd() {
     skip_reason="hdr_skipped"
   elif [[ "$max_w" -ge 3840 || "$max_h" -ge 2160 ]]; then
     skip_reason="uhd_skipped"
+  elif is_streaming_candidate_inline "$path"; then
+    skip_reason="streaming_candidate"
+    priority=99
+    log "info" "enqueue-import: streaming candidate, skipping: $path"
   elif [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
     skip_reason="already_compliant"
   else
