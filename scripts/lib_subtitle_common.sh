@@ -143,6 +143,14 @@ expand_lang_codes() {
   echo "$result"
 }
 
+# Text-based subtitle codecs that can be extracted to SRT.
+# Bitmap codecs (hdmv_pgs_subtitle, dvd_subtitle) cannot.
+TEXT_SUB_CODECS="subrip srt ass ssa mov_text webvtt"
+
+is_text_sub_codec() {
+  [[ " $TEXT_SUB_CODECS " == *" $1 "* ]]
+}
+
 # Normalize any track language tag (2-letter or 3-letter ISO) to canonical 2-letter form.
 # Pure bash, no subshell, no DB — safe in hot loops.
 # Returns input unchanged for unknown codes (fail-open).

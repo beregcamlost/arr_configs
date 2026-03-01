@@ -25,11 +25,6 @@ EMBY_URL="${EMBY_URL:-}"
 EMBY_API_KEY="${EMBY_API_KEY:-}"
 
 WATERMARK_PATTERNS="galaxytv|yify|yts|opensubtitles|addic7ed|subscene|podnapisi|sub[sz]cene"
-TEXT_SUB_CODECS="subrip srt ass ssa mov_text webvtt"
-
-is_text_sub_codec() {
-  [[ " $TEXT_SUB_CODECS " == *" $1 "* ]]
-}
 
 usage() {
   cat <<'EOF'

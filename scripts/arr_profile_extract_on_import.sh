@@ -197,6 +197,51 @@ main() {
     extract_target "$MEDIA_PATH" "$code" "$forced"
   done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
 
+  # Extract non-profile embedded text subs before stripping — preserves them
+  # as external SRTs for DeepL translation source use.
+  local profile_set=""
+  while IFS='|' read -r _plang _; do
+    [[ -z "$_plang" ]] && continue
+    profile_set+=" $(expand_lang_codes "${_plang,,}") "
+  done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
+
+  if [[ -n "$profile_set" ]]; then
+    local emb_json emb_count np_dir np_stem
+    emb_json="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$MEDIA_PATH" 2>/dev/null \
+      | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und")}, forced: (.disposition.forced // 0)}]')"
+    emb_count="$(jq 'length' <<<"$emb_json")"
+    np_dir="$(dirname "$MEDIA_PATH")"
+    np_stem="$(basename "${MEDIA_PATH%.*}")"
+
+    for ((i=0; i<emb_count; i++)); do
+      local np_lang np_codec np_idx np_forced
+      np_idx="$(jq -r ".[$i].index" <<<"$emb_json")"
+      np_lang="$(jq -r ".[$i].tags.language" <<<"$emb_json")"
+      np_codec="$(jq -r ".[$i].codec_name" <<<"$emb_json")"
+      np_forced="$(jq -r ".[$i].forced" <<<"$emb_json")"
+
+      lang_in_set "$np_lang" "$profile_set" && continue
+
+      is_text_sub_codec "$np_codec" || continue
+
+      local np_norm np_out_name np_out
+      np_norm="$(normalize_track_lang "$np_lang")"
+      np_out_name="${np_stem}.${np_norm}"
+      [[ "$np_forced" -eq 1 ]] && np_out_name+=".forced"
+      np_out_name+=".srt"
+      np_out="${np_dir}/${np_out_name}"
+
+      [[ -f "$np_out" ]] && continue
+
+      if ffmpeg -v quiet -i "$MEDIA_PATH" -map "0:${np_idx}" -f srt "$np_out" </dev/null 2>/dev/null && [[ -s "$np_out" ]]; then
+        log "EXTRACTED non-profile idx=${np_idx} lang=${np_norm} → ${np_out_name}"
+      else
+        rm -f "$np_out"
+        log "WARN: non-profile extraction failed idx=${np_idx} lang=${np_norm} (non-fatal)"
+      fi
+    done
+  fi
+
   # Strip ALL embedded subtitle tracks — after extraction, external SRTs are
   # the source of truth.  Removing embedded tracks eliminates Bazarr seeing
   # duplicates (e.g. "two en files") and keeps containers clean.
