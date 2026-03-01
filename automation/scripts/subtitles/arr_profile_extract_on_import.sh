@@ -235,6 +235,24 @@ main() {
 
       if ffmpeg -v quiet -i "$MEDIA_PATH" -map "0:${np_idx}" -f srt "$np_out" </dev/null 2>/dev/null && [[ -s "$np_out" ]]; then
         log "EXTRACTED non-profile idx=${np_idx} lang=${np_norm} → ${np_out_name}"
+
+        # Detect actual language for 'und' tracks and rename
+        if [[ "$np_norm" == "und" ]]; then
+          local detected_lang
+          if detected_lang="$(detect_srt_language "$np_out" "${DEEPL_API_KEY:-}")"; then
+            detected_lang="$(normalize_track_lang "$detected_lang")"
+            local renamed="${np_stem}.${detected_lang}"
+            [[ "$np_forced" -eq 1 ]] && renamed+=".forced"
+            renamed+=".srt"
+            local renamed_path="${np_dir}/${renamed}"
+            if [[ ! -f "$renamed_path" ]]; then
+              mv "$np_out" "$renamed_path"
+              log "DETECTED und → ${detected_lang} → renamed to ${renamed}"
+            fi
+          else
+            log "WARN: language detection failed for und track (kept as und)"
+          fi
+        fi
       else
         rm -f "$np_out"
         log "WARN: non-profile extraction failed idx=${np_idx} lang=${np_norm} (non-fatal)"

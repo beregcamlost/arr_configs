@@ -191,6 +191,51 @@ normalize_track_lang() {
   esac
 }
 
+# Detect the language of an SRT file.
+# Tries langdetect (offline, fast) first, falls back to DeepL API detection.
+# Returns 2-letter language code on stdout, or returns 1 if detection fails.
+# Usage: detect_srt_language "/path/to/file.srt" ["deepl_api_key"]
+detect_srt_language() {
+  local srt_file="$1"
+  local deepl_key="${2:-}"
+
+  # Extract text content: skip SRT indices, timing lines, and blank lines
+  local text
+  text="$(sed -n '/^[0-9][0-9]:[0-9][0-9]/,/^$/{ /^[0-9][0-9]:[0-9][0-9]/d; /^$/d; p; }' "$srt_file" | head -80 | tr '\n' ' ')"
+  [[ ${#text} -lt 20 ]] && return 1
+
+  # Method 1: langdetect (offline, fast)
+  local detected
+  detected="$(python3 -c "
+from langdetect import detect
+import sys
+try:
+    print(detect(sys.argv[1]))
+except:
+    pass
+" "$text" 2>/dev/null)" || true
+
+  if [[ -n "$detected" && ${#detected} -le 3 ]]; then
+    printf '%s' "${detected,,}"
+    return 0
+  fi
+
+  # Method 2: DeepL API (sends first 500 chars to detect source language)
+  if [[ -n "$deepl_key" ]]; then
+    detected="$(curl -sS -m 10 -X POST 'https://api-free.deepl.com/v2/translate' \
+      -d "auth_key=${deepl_key}" \
+      --data-urlencode "text=${text:0:500}" \
+      -d "target_lang=EN" 2>/dev/null \
+      | jq -r '.translations[0].detected_source_language // empty' 2>/dev/null)" || true
+    if [[ -n "$detected" ]]; then
+      printf '%s' "${detected,,}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 # Check if a language code is in an expanded set (space-separated)
 lang_in_set() {
   local lang="$1" set="$2"

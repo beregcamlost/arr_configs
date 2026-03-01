@@ -866,6 +866,26 @@ cmd_auto_maintain() {
                 if ffmpeg -v quiet -i "$mkv_file" -map "0:${p0_idx}" -f srt "$p0_out" </dev/null 2>/dev/null && [[ -s "$p0_out" ]]; then
                   log "EXTRACTED non-profile idx=${p0_idx} lang=${p0_norm_lang} → ${p0_out_name}: $basename"
                   extracted_nonprofile=$((extracted_nonprofile + 1))
+
+                  # Detect actual language for 'und' tracks and rename
+                  if [[ "$p0_norm_lang" == "und" ]]; then
+                    local detected_lang
+                    if detected_lang="$(detect_srt_language "$p0_out" "${DEEPL_API_KEY:-}")"; then
+                      detected_lang="$(normalize_track_lang "$detected_lang")"
+                      local renamed="${name_stem}.${detected_lang}"
+                      [[ "$p0_forced" -eq 1 ]] && renamed+=".forced"
+                      renamed+=".srt"
+                      local renamed_path="${dir}/${renamed}"
+                      if [[ ! -f "$renamed_path" ]]; then
+                        mv "$p0_out" "$renamed_path"
+                        log "DETECTED und → ${detected_lang} → renamed to ${renamed}: $basename"
+                      else
+                        debug "SKIP rename (${renamed} already exists): $basename"
+                      fi
+                    else
+                      log "WARN: language detection failed for und track (kept as und): $basename"
+                    fi
+                  fi
                 else
                   rm -f "$p0_out"
                   log "WARN: extraction failed idx=${p0_idx} lang=${p0_norm_lang} (non-fatal): $basename"
