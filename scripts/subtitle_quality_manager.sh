@@ -807,7 +807,8 @@ cmd_auto_maintain() {
     if [[ "$SINCE_MINUTES" -eq 0 ]]; then
       local current_mtime stored_mtime
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
-      stored_mtime="$(sqlite3 "$state_db" "PRAGMA busy_timeout=30000; SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null || echo 0)"
+      stored_mtime="$(sqlite3 "$state_db" "PRAGMA busy_timeout=30000; SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null | tail -1)" || stored_mtime=0
+      [[ -z "$stored_mtime" ]] && stored_mtime=0
       if [[ "$current_mtime" -eq "$stored_mtime" ]] && [[ "$stored_mtime" -gt 0 ]]; then
         debug "SKIP (unchanged): $basename"
         continue
