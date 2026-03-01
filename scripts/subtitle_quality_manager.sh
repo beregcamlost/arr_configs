@@ -159,9 +159,9 @@ init_state_db() {
 find_media_files() {
   local dir="$1"
   if [[ "$RECURSIVE" -eq 1 ]]; then
-    find "$dir" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) | sort
+    find "$dir" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" | sort
   else
-    find "$dir" -maxdepth 1 -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) | sort
+    find "$dir" -maxdepth 1 -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" | sort
   fi
 }
 
@@ -770,7 +770,7 @@ cmd_auto_maintain() {
     fi
 
     mkv_files+=("$mkv_file")
-  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) 2>/dev/null | sort)
+  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" 2>/dev/null | sort)
 
   log "auto-maintain: found ${#mkv_files[@]} candidate files"
 
@@ -807,8 +807,8 @@ cmd_auto_maintain() {
     if [[ "$SINCE_MINUTES" -eq 0 ]]; then
       local current_mtime stored_mtime
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
-      stored_mtime="$(sqlite3 "$state_db" "PRAGMA busy_timeout=30000; SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null | tail -1)" || stored_mtime=0
-      [[ -z "$stored_mtime" ]] && stored_mtime=0
+      stored_mtime="$(sqlite3 "$state_db" "PRAGMA busy_timeout=30000; SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null | tail -1 || true)"
+      [[ -z "$stored_mtime" || "$stored_mtime" == "30000" ]] && stored_mtime=0
       if [[ "$current_mtime" -eq "$stored_mtime" ]] && [[ "$stored_mtime" -gt 0 ]]; then
         debug "SKIP (unchanged): $basename"
         continue
