@@ -218,7 +218,7 @@ while IFS= read -r zombie; do
     log "Killing: ${line}"
     if curl -fsS -X POST "${EMBY_URL}/Sessions/${session_id}/Playing/Stop?api_key=${EMBY_API_KEY}" \
          -H "Content-Type: application/json" \
-         -d '{"Command":"Stop"}' >/dev/null 2>&1; then
+         -d '{"Command":"Stop"}' </dev/null >/dev/null 2>&1; then
       log "  Killed OK"
     else
       log "  Kill FAILED (session may already be gone)"

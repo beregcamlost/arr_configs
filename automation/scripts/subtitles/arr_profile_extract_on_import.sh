@@ -248,7 +248,7 @@ main() {
           search_endpoint="${bazarr_url}/api/movies/subtitles?radarrid=${MEDIA_ID}&language=${lang}&forced=${lang_forced}&hi=False"
         fi
         search_http="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
-          -H "X-API-KEY: ${bazarr_key}" "$search_endpoint" 2>/dev/null)" || true
+          -H "X-API-KEY: ${bazarr_key}" "$search_endpoint" </dev/null 2>/dev/null)" || true
         log "BAZARR_SEARCH $ARR_TYPE lang=$lang forced=$lang_forced ref=$bazarr_ref_id http=$search_http"
       done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
     fi
