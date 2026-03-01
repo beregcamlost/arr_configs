@@ -25,6 +25,11 @@ EMBY_URL="${EMBY_URL:-}"
 EMBY_API_KEY="${EMBY_API_KEY:-}"
 
 WATERMARK_PATTERNS="galaxytv|yify|yts|opensubtitles|addic7ed|subscene|podnapisi|sub[sz]cene"
+TEXT_SUB_CODECS="subrip srt ass ssa mov_text webvtt"
+
+is_text_sub_codec() {
+  [[ " $TEXT_SUB_CODECS " == *" $1 "* ]]
+}
 
 usage() {
   cat <<'EOF'
@@ -257,7 +262,7 @@ get_video_duration() {
 get_embedded_subs() {
   local mkv_file="$1"
   ffprobe -v quiet -print_format json -show_streams -select_streams s "$mkv_file" 2>/dev/null \
-    | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und"), title: (.tags.title // "")}}]'
+    | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und"), title: (.tags.title // "")}, forced: (.disposition.forced // 0)}]'
 }
 
 # ---------------------------------------------------------------------------
@@ -443,6 +448,21 @@ cmd_mux() {
       continue
     fi
 
+    # Build embedded language map for collision detection
+    local emb_json_mux emb_count_mux
+    emb_json_mux="$(get_embedded_subs "$mkv_file")"
+    emb_count_mux="$(jq 'length' <<<"$emb_json_mux")"
+    declare -A embedded_lang_idx=()
+    for ((ei=0; ei<emb_count_mux; ei++)); do
+      local ei_lang ei_idx ei_norm
+      ei_idx="$(jq -r ".[$ei].index" <<<"$emb_json_mux")"
+      ei_lang="$(jq -r ".[$ei].tags.language" <<<"$emb_json_mux")"
+      ei_norm="$(normalize_track_lang "$ei_lang")"
+      # Keep first (oldest) track index per normalized language for collision detection
+      [[ -z "${embedded_lang_idx[$ei_norm]:-}" ]] && embedded_lang_idx["$ei_norm"]="$ei_idx"
+    done
+    local -a premux_strip_indices=()
+
     # Find external SRT files for this MKV
     local -a srt_files=()
     local -a srt_langs=()
@@ -470,6 +490,16 @@ cmd_mux() {
         continue
       fi
 
+      # Pre-mux collision check: if embedded track exists for this language, mark for stripping
+      local srt_norm
+      srt_norm="$(normalize_track_lang "$ext_lang")"
+      if [[ -n "${embedded_lang_idx[$srt_norm]:-}" ]]; then
+        local collide_idx="${embedded_lang_idx[$srt_norm]}"
+        premux_strip_indices+=("$collide_idx")
+        log "COLLISION lang=$srt_norm: will replace embedded idx=$collide_idx with better external SRT: $srt_basename"
+        unset "embedded_lang_idx[$srt_norm]"
+      fi
+
       srt_files+=("$srt_file")
       srt_langs+=("$ext_lang")
     done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null | sort)
@@ -481,6 +511,9 @@ cmd_mux() {
     if [[ "$DRY_RUN" -eq 1 ]]; then
       log "[DRY-RUN] Would mux ${#srt_files[@]} subtitle(s) into: $basename"
       for sf in "${srt_files[@]}"; do log "  + $(basename "$sf")"; done
+      if [[ ${#premux_strip_indices[@]} -gt 0 ]]; then
+        log "[DRY-RUN] Would strip ${#premux_strip_indices[@]} superseded embedded track(s) from: $basename"
+      fi
       muxed=$((muxed + ${#srt_files[@]}))
       continue
     fi
@@ -550,6 +583,25 @@ cmd_mux() {
 
     muxed=$((muxed + ${#srt_files[@]}))
     log "MUXED ${#srt_files[@]} subtitle(s) into: $basename"
+
+    # Post-mux: strip superseded embedded tracks that collided with external SRTs
+    if [[ ${#premux_strip_indices[@]} -gt 0 ]]; then
+      local -a strip_cmd=(ffmpeg -y -v quiet -i "$mkv_file" -map 0)
+      for idx in "${premux_strip_indices[@]}"; do
+        strip_cmd+=(-map "-0:${idx}")
+      done
+      strip_cmd+=(-c copy)
+      local strip_ext="${mkv_file##*.}"
+      local strip_tmp="${mkv_file%.*}.collisiontmp.${strip_ext}"
+      if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]]; then
+        mv "$strip_tmp" "$mkv_file"
+        log "STRIPPED ${#premux_strip_indices[@]} superseded embedded track(s) from: $basename"
+      else
+        rm -f "$strip_tmp"
+        log "WARN: post-mux strip failed (non-fatal): $basename"
+      fi
+    fi
+
     mux_summary="${mux_summary}${basename}: ${#srt_files[@]} sub(s)\n"
     emby_refresh_item "$mkv_file" || log "WARN: Emby refresh failed (non-fatal)"
 
@@ -697,7 +749,7 @@ cmd_auto_maintain() {
   [[ "$SINCE_MINUTES" -eq 0 ]] && init_state_db "$state_db"
 
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
-  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0
+  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0
   local -a modified_dirs=()
 
   # Find MKV files across all media dirs
@@ -769,61 +821,109 @@ cmd_auto_maintain() {
     duration="$(get_video_duration "$mkv_file")"
     local file_modified=0
 
-    # --- Phase 0: Strip bloated subtitle tracks (keep-profile-langs) ---
+    # Resolve Bazarr profile once per file — used by Phase 0 (debloat), Phase 1 (mux filter), Phase 1.5 (cleanup)
+    local am_profile_langs="" am_profile_set=""
+    am_profile_langs="$(resolve_bazarr_profile_langs "$mkv_file" "$BAZARR_DB")" || am_profile_langs=""
+    [[ -n "$am_profile_langs" ]] && am_profile_set="$(expand_lang_codes "$am_profile_langs")"
+
+    # --- Phase 0: Extract + strip non-profile embedded tracks ---
     if [[ "$KEEP_PROFILE_LANGS" -eq 1 ]]; then
       local emb_json_p0 emb_count_p0
       emb_json_p0="$(get_embedded_subs "$mkv_file")"
       emb_count_p0="$(jq 'length' <<<"$emb_json_p0")"
 
-      if [[ "$emb_count_p0" -ge "$BLOAT_THRESHOLD" ]]; then
-        local profile_langs
-        profile_langs="$(resolve_bazarr_profile_langs "$mkv_file" "$BAZARR_DB")" || profile_langs=""
+      if [[ -n "$am_profile_set" ]] && [[ "$emb_count_p0" -gt 0 ]]; then
+        local -a p0_strip_indices=()
+        for ((i=0; i<emb_count_p0; i++)); do
+          local p0_idx p0_lang p0_codec p0_forced
+          p0_idx="$(jq -r ".[$i].index" <<<"$emb_json_p0")"
+          p0_lang="$(jq -r ".[$i].tags.language" <<<"$emb_json_p0")"
+          p0_codec="$(jq -r ".[$i].codec_name" <<<"$emb_json_p0")"
+          p0_forced="$(jq -r ".[$i].forced" <<<"$emb_json_p0")"
 
-        if [[ -n "$profile_langs" ]]; then
-          local keep_set_am
-          keep_set_am="$(expand_lang_codes "$profile_langs")"
-          local -a bloat_remove=()
-          for ((i=0; i<emb_count_p0; i++)); do
-            local p0_idx p0_lang
-            p0_idx="$(jq -r ".[$i].index" <<<"$emb_json_p0")"
-            p0_lang="$(jq -r ".[$i].tags.language" <<<"$emb_json_p0")"
-            if ! lang_in_set "$p0_lang" "$keep_set_am"; then
-              bloat_remove+=("$p0_idx")
-            fi
-          done
+          # Skip tracks that belong to the profile
+          lang_in_set "$p0_lang" "$am_profile_set" && continue
 
-          if [[ ${#bloat_remove[@]} -gt 0 ]]; then
-            if [[ "$DRY_RUN" -eq 1 ]]; then
-              log "[DRY-RUN] Would strip ${#bloat_remove[@]} bloated track(s) from: $basename (profile: $profile_langs)"
-              stripped_tracks=$((stripped_tracks + ${#bloat_remove[@]}))
-              stripped_files=$((stripped_files + 1))
-            else
-              local -a bloat_cmd=(ffmpeg -y -v quiet -i "$mkv_file" -map 0)
-              for idx in "${bloat_remove[@]}"; do
-                bloat_cmd+=(-map "-0:${idx}")
-              done
-              bloat_cmd+=(-c copy)
-              local ext_p0="${mkv_file##*.}"
-              local bloat_tmp="${mkv_file%.*}.bloattmp.${ext_p0}"
-              if "${bloat_cmd[@]}" "$bloat_tmp" </dev/null 2>/dev/null && [[ -s "$bloat_tmp" ]]; then
-                mv "$bloat_tmp" "$mkv_file"
-                stripped_tracks=$((stripped_tracks + ${#bloat_remove[@]}))
-                stripped_files=$((stripped_files + 1))
-                file_modified=1
-                log "DEBLOAT ${#bloat_remove[@]} track(s) from: $basename (profile: $profile_langs)"
+          local p0_norm_lang
+          p0_norm_lang="$(normalize_track_lang "$p0_lang")"
+
+          # Build output filename: {stem}.{lang}[.forced].srt
+          local p0_out_name="${name_stem}.${p0_norm_lang}"
+          [[ "$p0_forced" -eq 1 ]] && p0_out_name+=".forced"
+          p0_out_name+=".srt"
+          local p0_out="${dir}/${p0_out_name}"
+
+          # Extract text-based subs to external SRT (bitmap codecs can't be extracted)
+          if is_text_sub_codec "$p0_codec"; then
+            if [[ ! -f "$p0_out" ]]; then
+              if [[ "$DRY_RUN" -eq 0 ]]; then
+                if ffmpeg -v quiet -i "$mkv_file" -map "0:${p0_idx}" -f srt "$p0_out" </dev/null 2>/dev/null && [[ -s "$p0_out" ]]; then
+                  log "EXTRACTED non-profile idx=${p0_idx} lang=${p0_norm_lang} → ${p0_out_name}: $basename"
+                  extracted_nonprofile=$((extracted_nonprofile + 1))
+                else
+                  rm -f "$p0_out"
+                  log "WARN: extraction failed idx=${p0_idx} lang=${p0_norm_lang} (non-fatal): $basename"
+                fi
               else
-                rm -f "$bloat_tmp"
-                log "FAIL debloat: $basename"
+                log "[DRY-RUN] Would extract non-profile idx=${p0_idx} lang=${p0_norm_lang} → ${p0_out_name}: $basename"
+                extracted_nonprofile=$((extracted_nonprofile + 1))
               fi
+            else
+              debug "SKIP extract (external exists): ${p0_out_name}"
+            fi
+          else
+            debug "SKIP extract (bitmap codec=${p0_codec}): idx=${p0_idx} lang=${p0_norm_lang}: $basename"
+          fi
+
+          # Mark for stripping regardless of codec type
+          p0_strip_indices+=("$p0_idx")
+        done
+
+        if [[ ${#p0_strip_indices[@]} -gt 0 ]]; then
+          if [[ "$DRY_RUN" -eq 1 ]]; then
+            log "[DRY-RUN] Would strip ${#p0_strip_indices[@]} non-profile track(s) from: $basename (profile: $am_profile_langs)"
+            stripped_tracks=$((stripped_tracks + ${#p0_strip_indices[@]}))
+            stripped_files=$((stripped_files + 1))
+          else
+            local -a p0_strip_cmd=(ffmpeg -y -v quiet -i "$mkv_file" -map 0)
+            for idx in "${p0_strip_indices[@]}"; do
+              p0_strip_cmd+=(-map "-0:${idx}")
+            done
+            p0_strip_cmd+=(-c copy)
+            local ext_p0="${mkv_file##*.}"
+            local p0_strip_tmp="${mkv_file%.*}.bloattmp.${ext_p0}"
+            if "${p0_strip_cmd[@]}" "$p0_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p0_strip_tmp" ]]; then
+              mv "$p0_strip_tmp" "$mkv_file"
+              stripped_tracks=$((stripped_tracks + ${#p0_strip_indices[@]}))
+              stripped_files=$((stripped_files + 1))
+              file_modified=1
+              log "STRIPPED ${#p0_strip_indices[@]} non-profile track(s) from: $basename (profile: $am_profile_langs)"
+            else
+              rm -f "$p0_strip_tmp"
+              log "FAIL strip non-profile: $basename"
             fi
           fi
-        else
-          debug "SKIP debloat (no Bazarr profile): $basename"
         fi
+      elif [[ -z "$am_profile_set" ]]; then
+        debug "SKIP Phase 0 (no Bazarr profile): $basename"
       fi
     fi
 
     # --- Phase 1: Audit & mux external SRTs ---
+    # Build embedded language map for collision detection
+    local emb_json_p1 emb_count_p1
+    emb_json_p1="$(get_embedded_subs "$mkv_file")"
+    emb_count_p1="$(jq 'length' <<<"$emb_json_p1")"
+    declare -A embedded_lang_idx_p1=()
+    for ((ei=0; ei<emb_count_p1; ei++)); do
+      local ei_lang ei_idx ei_norm
+      ei_idx="$(jq -r ".[$ei].index" <<<"$emb_json_p1")"
+      ei_lang="$(jq -r ".[$ei].tags.language" <<<"$emb_json_p1")"
+      ei_norm="$(normalize_track_lang "$ei_lang")"
+      [[ -z "${embedded_lang_idx_p1[$ei_norm]:-}" ]] && embedded_lang_idx_p1["$ei_norm"]="$ei_idx"
+    done
+    local -a premux_strip_indices_p1=()
+
     local -a good_srts=() good_langs=()
     while IFS= read -r srt_file; do
       [[ -z "$srt_file" ]] && continue
@@ -865,6 +965,22 @@ cmd_auto_maintain() {
               fi
             fi
           fi
+          # Profile filter: skip non-profile languages (they're kept as DeepL sources, not muxed)
+          local srt_norm_p1
+          srt_norm_p1="$(normalize_track_lang "$ext_lang")"
+          if [[ -n "$am_profile_set" ]] && ! lang_in_set "$srt_norm_p1" "$am_profile_set"; then
+            debug "SKIP non-profile external SRT: $srt_basename (lang=$srt_norm_p1, profile=$am_profile_langs)"
+            continue
+          fi
+
+          # Pre-mux collision check
+          if [[ -n "${embedded_lang_idx_p1[$srt_norm_p1]:-}" ]]; then
+            local collide_idx_p1="${embedded_lang_idx_p1[$srt_norm_p1]}"
+            premux_strip_indices_p1+=("$collide_idx_p1")
+            log "COLLISION lang=$srt_norm_p1: will replace embedded idx=$collide_idx_p1 with external SRT: $srt_basename"
+            unset "embedded_lang_idx_p1[$srt_norm_p1]"
+          fi
+
           good_srts+=("$srt_file")
           good_langs+=("$ext_lang")
           ;;
@@ -881,6 +997,9 @@ cmd_auto_maintain() {
     if [[ ${#good_srts[@]} -gt 0 ]]; then
       if [[ "$DRY_RUN" -eq 1 ]]; then
         log "[DRY-RUN] Would mux ${#good_srts[@]} sub(s) into: $basename"
+        if [[ ${#premux_strip_indices_p1[@]} -gt 0 ]]; then
+          log "[DRY-RUN] Would strip ${#premux_strip_indices_p1[@]} superseded embedded track(s) from: $basename"
+        fi
         muxed_tracks=$((muxed_tracks + ${#good_srts[@]}))
         muxed_files=$((muxed_files + 1))
       else
@@ -923,6 +1042,26 @@ cmd_auto_maintain() {
             muxed_files=$((muxed_files + 1))
             file_modified=1
             log "MUXED ${#good_srts[@]} sub(s) into: $basename"
+
+            # Post-mux: strip superseded embedded tracks
+            if [[ ${#premux_strip_indices_p1[@]} -gt 0 ]]; then
+              local -a p1_strip_cmd=(ffmpeg -y -v quiet -i "$mkv_file" -map 0)
+              for idx in "${premux_strip_indices_p1[@]}"; do
+                p1_strip_cmd+=(-map "-0:${idx}")
+              done
+              p1_strip_cmd+=(-c copy)
+              local p1_strip_ext="${mkv_file##*.}"
+              local p1_strip_tmp="${mkv_file%.*}.collisiontmp.${p1_strip_ext}"
+              if "${p1_strip_cmd[@]}" "$p1_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p1_strip_tmp" ]]; then
+                mv "$p1_strip_tmp" "$mkv_file"
+                stripped_tracks=$((stripped_tracks + ${#premux_strip_indices_p1[@]}))
+                stripped_files=$((stripped_files + 1))
+                log "STRIPPED ${#premux_strip_indices_p1[@]} superseded embedded track(s) from: $basename"
+              else
+                rm -f "$p1_strip_tmp"
+                log "WARN: post-mux collision strip failed (non-fatal): $basename"
+              fi
+            fi
           else
             log "FAIL mux (count mismatch got=$new_sub_count expect=$expected): $basename"
             rm -f "$tmp_out"
@@ -931,6 +1070,72 @@ cmd_auto_maintain() {
           log "FAIL mux: $basename"
           rm -f "$tmp_out"
         fi
+      fi
+    fi
+
+    # --- Phase 1.5: Clean up non-profile external SRTs ---
+    # Once all profile languages are satisfied (embedded or external), non-profile
+    # SRTs are no longer needed as DeepL translation sources — safe to remove.
+    if [[ -n "$am_profile_set" ]]; then
+      # Check if ALL profile languages have subtitles (embedded or external)
+      # Re-read embedded after potential mux
+      local emb_json_p15 emb_count_p15
+      emb_json_p15="$(get_embedded_subs "$mkv_file")"
+      emb_count_p15="$(jq 'length' <<<"$emb_json_p15")"
+
+      declare -A emb_langs_p15=()
+      for ((ei=0; ei<emb_count_p15; ei++)); do
+        local el
+        el="$(jq -r ".[$ei].tags.language" <<<"$emb_json_p15")"
+        el="$(normalize_track_lang "$el")"
+        emb_langs_p15["$el"]=1
+      done
+
+      # Build set of remaining external SRT languages
+      declare -A ext_langs_p15=()
+      while IFS= read -r remaining_srt; do
+        [[ -z "$remaining_srt" ]] && continue
+        local rb el_p15
+        rb="$(basename "$remaining_srt")"
+        el_p15="$(echo "$rb" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+        [[ -z "$el_p15" ]] && el_p15="und"
+        el_p15="$(normalize_track_lang "$el_p15")"
+        ext_langs_p15["$el_p15"]=1
+      done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null)
+
+      # Check each profile language
+      local all_profile_satisfied=1
+      IFS=',' read -ra _profile_codes <<< "$am_profile_langs"
+      for pc in "${_profile_codes[@]}"; do
+        local pc_norm
+        pc_norm="$(normalize_track_lang "$pc")"
+        if [[ -z "${emb_langs_p15[$pc_norm]:-}" ]] && [[ -z "${ext_langs_p15[$pc_norm]:-}" ]]; then
+          all_profile_satisfied=0
+          break
+        fi
+      done
+
+      if [[ "$all_profile_satisfied" -eq 1 ]]; then
+        # Delete non-profile external SRTs
+        while IFS= read -r remaining_srt; do
+          [[ -z "$remaining_srt" ]] && continue
+          local rb el_p15
+          rb="$(basename "$remaining_srt")"
+          el_p15="$(echo "$rb" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+          [[ -z "$el_p15" ]] && el_p15="und"
+          local el_norm_p15
+          el_norm_p15="$(normalize_track_lang "$el_p15")"
+          if ! lang_in_set "$el_norm_p15" "$am_profile_set"; then
+            if [[ "$DRY_RUN" -eq 0 ]]; then
+              rm -f "$remaining_srt" "${remaining_srt}.deepl"
+            fi
+            log "CLEANUP non-profile external SRT: $rb (lang=$el_norm_p15, profile=$am_profile_langs)"
+            cleaned_nonprofile=$((cleaned_nonprofile + 1))
+            file_modified=1
+          fi
+        done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null)
+      else
+        debug "SKIP cleanup (profile not fully satisfied): $basename (profile=$am_profile_langs)"
       fi
     fi
 
@@ -946,7 +1151,11 @@ cmd_auto_maintain() {
 
       if [[ "$emb_count" -gt 1 ]]; then
         # First pass: score ALL embedded tracks and cache results
-        local -a emb_ratings=() emb_norm_langs=() emb_stream_ids=()
+        local -a emb_ratings=() emb_norm_langs=() emb_stream_ids=() emb_scores=()
+        local media_secs_p2
+        media_secs_p2="$(media_duration_seconds "$mkv_file")"
+        [[ -z "$media_secs_p2" ]] && media_secs_p2=0
+
         for ((i=0; i<emb_count; i++)); do
           local stream_idx lang title
           stream_idx="$(jq -r ".[$i].index" <<<"$embedded_json")"
@@ -954,9 +1163,8 @@ cmd_auto_maintain() {
           title="$(jq -r ".[$i].tags.title" <<<"$embedded_json")"
 
           emb_stream_ids+=("$stream_idx")
-          local norm_lang="$lang"
-          [[ "$norm_lang" == "eng" ]] && norm_lang="en"
-          [[ "$norm_lang" == "spa" ]] && norm_lang="es"
+          local norm_lang
+          norm_lang="$(normalize_track_lang "$lang")"
           emb_norm_langs+=("$norm_lang")
 
           # Extract to temp file for scoring
@@ -964,6 +1172,7 @@ cmd_auto_maintain() {
           if ! ffmpeg -v quiet -i "$mkv_file" -map "0:${stream_idx}" -f srt "$tmpfile" </dev/null 2>/dev/null; then
             rm -f "$tmpfile"
             emb_ratings+=("UNKNOWN")
+            emb_scores+=(0)
             continue
           fi
 
@@ -974,42 +1183,75 @@ cmd_auto_maintain() {
             watermarks=1
           fi
           emb_rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
+
+          # Compute numeric quality score for tie-breaking
+          local num_score
+          num_score="$(subtitle_quality_score "$tmpfile" "$media_secs_p2" 0)"
           rm -f "$tmpfile"
+
           emb_ratings+=("$emb_rating")
+          emb_scores+=("$num_score")
 
           [[ "$emb_rating" == "WARN" ]] && warned=$((warned + 1))
         done
 
-        # Second pass: identify BAD tracks with a GOOD replacement
+        # Second pass: dedup — strip BAD tracks with GOOD replacement, AND collapse
+        # GOOD-GOOD duplicates for the same normalized language (keep highest scorer)
         local -a strip_indices=()
+        declare -A lang_best_idx=()   # norm_lang -> array index of best track
+        declare -A lang_best_score=()  # norm_lang -> best numeric score
+
+        # Normalize good_langs from Phase 1 for comparison
+        declare -A muxed_lang_set=()
+        for gl in "${good_langs[@]+"${good_langs[@]}"}"; do
+          local gl_norm
+          gl_norm="$(normalize_track_lang "$gl")"
+          muxed_lang_set["$gl_norm"]=1
+        done
+
         for ((i=0; i<emb_count; i++)); do
-          [[ "${emb_ratings[$i]}" != "BAD" ]] && continue
-
+          [[ "${emb_ratings[$i]}" == "UNKNOWN" ]] && continue
           local norm_lang="${emb_norm_langs[$i]}"
-          local has_good=0
+          local this_score="${emb_scores[$i]}"
 
-          # Check 1: Was a GOOD SRT just muxed in this language? (good_langs from Phase 1)
-          for gl in "${good_langs[@]+"${good_langs[@]}"}"; do
-            if [[ "$gl" == "$norm_lang" ]]; then
-              has_good=1
-              break
+          if [[ "${emb_ratings[$i]}" == "BAD" ]]; then
+            # BAD track: strip if a GOOD mux or GOOD embedded exists for this lang
+            local has_good=0
+            [[ -n "${muxed_lang_set[$norm_lang]:-}" ]] && has_good=1
+            if [[ "$has_good" -eq 0 ]]; then
+              for ((j=0; j<emb_count; j++)); do
+                [[ "$j" -eq "$i" ]] && continue
+                if [[ "${emb_norm_langs[$j]}" == "$norm_lang" ]] && [[ "${emb_ratings[$j]}" == "GOOD" ]]; then
+                  has_good=1
+                  break
+                fi
+              done
             fi
-          done
-
-          # Check 2: Is another embedded track in the same language rated GOOD?
-          if [[ "$has_good" -eq 0 ]]; then
-            for ((j=0; j<emb_count; j++)); do
-              [[ "$j" -eq "$i" ]] && continue
-              if [[ "${emb_norm_langs[$j]}" == "$norm_lang" ]] && [[ "${emb_ratings[$j]}" == "GOOD" ]]; then
-                has_good=1
-                break
-              fi
-            done
+            if [[ "$has_good" -eq 1 ]]; then
+              strip_indices+=("${emb_stream_ids[$i]}")
+              log "AUTO-STRIP BAD embedded idx=${emb_stream_ids[$i]} lang=${norm_lang}: $basename"
+            fi
+            continue
           fi
 
-          if [[ "$has_good" -eq 1 ]]; then
-            strip_indices+=("${emb_stream_ids[$i]}")
-            log "AUTO-STRIP BAD embedded idx=${emb_stream_ids[$i]} lang=${norm_lang}: $basename"
+          # GOOD/WARN track: dedup by language — keep highest scorer
+          if [[ -z "${lang_best_idx[$norm_lang]:-}" ]]; then
+            lang_best_idx["$norm_lang"]="$i"
+            lang_best_score["$norm_lang"]="$this_score"
+          else
+            local prev_idx="${lang_best_idx[$norm_lang]}"
+            local prev_score="${lang_best_score[$norm_lang]}"
+            if [[ "$this_score" -gt "$prev_score" ]]; then
+              # Current track is better — strip previous
+              strip_indices+=("${emb_stream_ids[$prev_idx]}")
+              log "DEDUP lang=$norm_lang: keep idx=${emb_stream_ids[$i]} (score=$this_score) over idx=${emb_stream_ids[$prev_idx]} (score=$prev_score): $basename"
+              lang_best_idx["$norm_lang"]="$i"
+              lang_best_score["$norm_lang"]="$this_score"
+            else
+              # Previous is better or equal — strip current
+              strip_indices+=("${emb_stream_ids[$i]}")
+              log "DEDUP lang=$norm_lang: keep idx=${emb_stream_ids[$prev_idx]} (score=$prev_score) over idx=${emb_stream_ids[$i]} (score=$this_score): $basename"
+            fi
           fi
         done
 
@@ -1026,13 +1268,13 @@ cmd_auto_maintain() {
             stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))
             stripped_files=$((stripped_files + 1))
             file_modified=1
-            log "STRIPPED ${#strip_indices[@]} BAD track(s) from: $basename"
+            log "STRIPPED ${#strip_indices[@]} track(s) from: $basename"
           else
             rm -f "$strip_tmp"
             log "FAIL strip: $basename"
           fi
         elif [[ ${#strip_indices[@]} -gt 0 ]]; then
-          log "[DRY-RUN] Would strip ${#strip_indices[@]} BAD track(s) from: $basename"
+          log "[DRY-RUN] Would strip ${#strip_indices[@]} track(s) from: $basename"
           stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))
           stripped_files=$((stripped_files + 1))
         fi
@@ -1071,10 +1313,10 @@ cmd_auto_maintain() {
     done
   fi
 
-  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
+  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
 
   # Discord notification (non-fatal, only when actions taken)
-  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files + extracted_nonprofile + cleaned_nonprofile)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
     local mode="quick"
     [[ "$SINCE_MINUTES" -eq 0 ]] && mode="full"
 
@@ -1091,6 +1333,8 @@ cmd_auto_maintain() {
     local desc=""
     [[ "$muxed_files" -gt 0 ]] && desc+="📥 Muxed: ${muxed_files} file(s), ${muxed_tracks} track(s)\n"
     [[ "$stripped_files" -gt 0 ]] && desc+="🗑 Stripped: ${stripped_files} file(s), ${stripped_tracks} track(s)\n"
+    [[ "$extracted_nonprofile" -gt 0 ]] && desc+="📤 Extracted non-profile: ${extracted_nonprofile} track(s)\n"
+    [[ "$cleaned_nonprofile" -gt 0 ]] && desc+="🧹 Cleaned non-profile: ${cleaned_nonprofile} SRT(s)\n"
     [[ "$deepl_deferred" -gt 0 ]] && desc+="⏳ DeepL deferred: ${deepl_deferred} (grace period)\n"
     [[ "$warned" -gt 0 ]] && desc+="⚠️ Manual review: ${warned}\n"
     [[ "$skipped_converter" -gt 0 ]] && desc+="🔄 Skipped (converter): ${skipped_converter}\n"

@@ -143,6 +143,46 @@ expand_lang_codes() {
   echo "$result"
 }
 
+# Normalize any track language tag (2-letter or 3-letter ISO) to canonical 2-letter form.
+# Pure bash, no subshell, no DB — safe in hot loops.
+# Returns input unchanged for unknown codes (fail-open).
+normalize_track_lang() {
+  case "${1,,}" in
+    eng|en)       printf 'en' ;;
+    spa|es)       printf 'es' ;;
+    fra|fre|fr)   printf 'fr' ;;
+    deu|ger|de)   printf 'de' ;;
+    ita|it)       printf 'it' ;;
+    por|pt)       printf 'pt' ;;
+    zho|chi|zh)   printf 'zh' ;;
+    jpn|ja)       printf 'ja' ;;
+    kor|ko)       printf 'ko' ;;
+    ara|ar)       printf 'ar' ;;
+    rus|ru)       printf 'ru' ;;
+    nld|nl)       printf 'nl' ;;
+    swe|sv)       printf 'sv' ;;
+    dan|da)       printf 'da' ;;
+    fin|fi)       printf 'fi' ;;
+    nor|no)       printf 'no' ;;
+    pol|pl)       printf 'pl' ;;
+    ces|cs)       printf 'cs' ;;
+    hun|hu)       printf 'hu' ;;
+    ron|ro)       printf 'ro' ;;
+    tur|tr)       printf 'tr' ;;
+    tha|th)       printf 'th' ;;
+    vie|vi)       printf 'vi' ;;
+    ell|el)       printf 'el' ;;
+    heb|he)       printf 'he' ;;
+    hin|hi)       printf 'hi' ;;
+    ind|id)       printf 'id' ;;
+    ukr|uk)       printf 'uk' ;;
+    bul|bg)       printf 'bg' ;;
+    hrv|hr)       printf 'hr' ;;
+    und)          printf 'und' ;;
+    *)            printf '%s' "${1,,}" ;;
+  esac
+}
+
 # Check if a language code is in an expanded set (space-separated)
 lang_in_set() {
   local lang="$1" set="$2"
