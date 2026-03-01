@@ -751,6 +751,7 @@ cmd_auto_maintain() {
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
   local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0
   local -a modified_dirs=()
+  local -A bazarr_rescanned=()
 
   # Find MKV files across all media dirs
   local -a mkv_files=()
@@ -1281,10 +1282,24 @@ cmd_auto_maintain() {
       fi
     fi
 
-    # --- Phase 3: Emby refresh per modified file ---
+    # --- Phase 3: Emby refresh + Bazarr rescan per modified file ---
     if [[ "$DRY_RUN" -eq 0 ]] && [[ "$file_modified" -eq 1 ]]; then
       emby_refresh_item "$mkv_file" || log "WARN: Emby refresh failed (non-fatal)"
       modified_dirs+=("$mkv_file")
+
+      # Bazarr scan-disk (deduplicated per series/movie dir)
+      if [[ -n "$BAZARR_API_KEY" ]]; then
+        local rescan_key
+        if is_tv_path "$mkv_file"; then
+          rescan_key="$(echo "$mkv_file" | sed 's|/Season.*||' | sed 's|/$||')"
+        else
+          rescan_key="$(dirname "$mkv_file")"
+        fi
+        if [[ -z "${bazarr_rescanned[$rescan_key]:-}" ]]; then
+          bazarr_rescanned["$rescan_key"]=1
+          bazarr_rescan_for_file "$mkv_file" "$BAZARR_DB" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr rescan failed"
+        fi
+      fi
     fi
 
     # Update state DB (full mode only)
@@ -1296,22 +1311,6 @@ cmd_auto_maintain() {
       sqlite3 "$state_db" "PRAGMA busy_timeout=30000; INSERT OR REPLACE INTO file_audits (file_path, mtime, last_audit_ts, action_taken) VALUES ('$(sql_escape "$mkv_file")', $current_mtime, $(date +%s), '$action_val');" 2>/dev/null || true
     fi
   done
-
-  # Bazarr rescan (deduplicated per parent dir, non-fatal)
-  if [[ "$DRY_RUN" -eq 0 ]] && [[ ${#modified_dirs[@]} -gt 0 ]] && [[ -n "$BAZARR_API_KEY" ]]; then
-    local -A rescanned=()
-    for mod_file in "${modified_dirs[@]}"; do
-      local rescan_key
-      if is_tv_path "$mod_file"; then
-        rescan_key="$(echo "$mod_file" | sed 's|/Season.*||' | sed 's|/$||')"
-      else
-        rescan_key="$(dirname "$mod_file")"
-      fi
-      [[ -n "${rescanned[$rescan_key]:-}" ]] && continue
-      rescanned["$rescan_key"]=1
-      bazarr_rescan_for_file "$mod_file" "$BAZARR_DB" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr rescan failed"
-    done
-  fi
 
   log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
 
