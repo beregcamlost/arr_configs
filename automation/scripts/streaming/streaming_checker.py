@@ -20,6 +20,7 @@ from streaming.arr_client import (
     fetch_movies,
     fetch_series,
     get_item,
+    get_tag_id,
     remove_tag_from_item,
 )
 from streaming.config import PROVIDER_MAP, load_config
@@ -33,6 +34,7 @@ from streaming.db import (
     mark_deleted,
     mark_left_streaming,
     record_scan,
+    touch_keep_local_items,
     upsert_streaming_item,
 )
 from streaming.discord import format_size, notify_deletion, notify_scan_results
@@ -42,6 +44,28 @@ from streaming.tmdb_client import batch_check
 log = logging.getLogger("streaming_checker")
 
 TAG_LABEL = "streaming-available"
+
+
+def _get_keep_local_set(cfg):
+    """Build set of (arr_id, media_type) for keep-local tagged items."""
+    keep_local_set = set()
+    try:
+        kl_radarr = get_tag_id(cfg.radarr_url, cfg.radarr_key, "keep-local")
+        if kl_radarr:
+            for m in fetch_movies(cfg.radarr_url, cfg.radarr_key):
+                if kl_radarr in m.get("tags", []):
+                    keep_local_set.add((m["arr_id"], "movie"))
+    except Exception:
+        log.debug("Could not check Radarr keep-local tags")
+    try:
+        kl_sonarr = get_tag_id(cfg.sonarr_url, cfg.sonarr_key, "keep-local")
+        if kl_sonarr:
+            for s in fetch_series(cfg.sonarr_url, cfg.sonarr_key):
+                if kl_sonarr in s.get("tags", []):
+                    keep_local_set.add((s["arr_id"], "tv"))
+    except Exception:
+        log.debug("Could not check Sonarr keep-local tags")
+    return keep_local_set
 
 
 def _setup_logging(verbose):
@@ -93,16 +117,25 @@ def scan(country, providers, dry_run, verbose, db_path):
     keep_local_sonarr = ensure_tag(cfg.sonarr_url, cfg.sonarr_key, "keep-local") if not cfg.dry_run else None
 
     all_items = []
+    keep_local_ids = []
     for m in movies:
         if keep_local_radarr and keep_local_radarr in m.get("tags", []):
             log.debug("Skipping keep-local: %s", m["title"])
+            keep_local_ids.append((m["arr_id"], m["media_type"]))
             continue
         all_items.append(m)
     for s in series:
         if keep_local_sonarr and keep_local_sonarr in s.get("tags", []):
             log.debug("Skipping keep-local: %s", s["title"])
+            keep_local_ids.append((s["arr_id"], s["media_type"]))
             continue
         all_items.append(s)
+
+    # Touch keep-local items in DB so they aren't flagged as left-streaming
+    if keep_local_ids:
+        touched = touch_keep_local_items(cfg.db_path, keep_local_ids, scan_time)
+        if touched:
+            log.info("Touched %d keep-local DB records", touched)
 
     log.info("Checking %d items against TMDB (providers: %s, country: %s)",
              len(all_items), cfg.providers, cfg.country)
@@ -230,6 +263,18 @@ def report(json_out, provider, library, min_size, sort_by, since_days, db_path):
         min_size=min_size_bytes, since_days=since_days, sort_by=sort_by,
     )
     left = get_left_streaming(cfg.db_path)
+
+    # Filter out keep-local tagged items
+    if active or left:
+        try:
+            keep_local_set = _get_keep_local_set(cfg)
+            if keep_local_set:
+                active = [a for a in active
+                          if (a.get("arr_id"), a.get("media_type")) not in keep_local_set]
+                left = [l for l in left
+                        if (l.get("arr_id"), l.get("media_type")) not in keep_local_set]
+        except Exception as e:
+            log.warning("Could not filter keep-local items: %s", e)
 
     if json_out:
         click.echo(json.dumps({"active": active, "left_streaming": left}, indent=2))

@@ -144,6 +144,36 @@ def get_left_streaming(db_path):
     return rows
 
 
+def touch_keep_local_items(db_path, arr_id_types, timestamp):
+    """Update last_seen and clear left_at for keep-local items.
+
+    Prevents keep-local items from being flagged as left-streaming,
+    and clears the flag if they were already marked.
+
+    Args:
+        arr_id_types: list of (arr_id, media_type) tuples.
+        timestamp: ISO timestamp to set as last_seen.
+
+    Returns:
+        Number of DB rows updated.
+    """
+    if not arr_id_types:
+        return 0
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA busy_timeout=30000")
+    count = 0
+    for arr_id, media_type in arr_id_types:
+        cursor = conn.execute(
+            "UPDATE streaming_status SET last_seen=?, left_at=NULL "
+            "WHERE arr_id=? AND media_type=? AND deleted_at IS NULL",
+            (timestamp, arr_id, media_type),
+        )
+        count += cursor.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
+
 def mark_deleted(db_path, tmdb_id, media_type, provider_id):
     """Mark an item as deleted."""
     now = _now_iso()

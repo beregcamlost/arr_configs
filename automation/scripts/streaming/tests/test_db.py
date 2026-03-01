@@ -13,6 +13,7 @@ from streaming.db import (
     mark_deleted,
     mark_left_streaming,
     record_scan,
+    touch_keep_local_items,
     upsert_streaming_item,
 )
 
@@ -120,6 +121,69 @@ class TestLeftStreaming:
 
         left = get_left_streaming(tmp_db)
         assert len(left) == 1
+
+
+class TestTouchKeepLocal:
+    def test_prevents_left_streaming(self, tmp_db):
+        """Keep-local items should not be flagged as left-streaming."""
+        upsert_streaming_item(tmp_db, 550, "movie", 8, "Netflix", "Fight Club",
+                              arr_id=42)
+        # Simulate old last_seen
+        import sqlite3
+        conn = sqlite3.connect(tmp_db)
+        conn.execute("UPDATE streaming_status SET last_seen='2026-01-01T00:00:00Z'")
+        conn.commit()
+        conn.close()
+
+        # Touch as keep-local
+        touched = touch_keep_local_items(tmp_db, [(42, "movie")], "2026-02-01T00:00:00Z")
+        assert touched == 1
+
+        # Should NOT be flagged as left
+        left = mark_left_streaming(tmp_db, "2026-02-01T00:00:00Z")
+        assert len(left) == 0
+
+    def test_clears_existing_left_at(self, tmp_db):
+        """Touch should clear left_at for items already flagged."""
+        upsert_streaming_item(tmp_db, 550, "movie", 8, "Netflix", "Fight Club",
+                              arr_id=42)
+        import sqlite3
+        conn = sqlite3.connect(tmp_db)
+        conn.execute("UPDATE streaming_status SET last_seen='2026-01-01T00:00:00Z'")
+        conn.commit()
+        conn.close()
+        mark_left_streaming(tmp_db, "2026-02-01T00:00:00Z")
+
+        # Item is now "left streaming"
+        assert len(get_left_streaming(tmp_db)) == 1
+
+        # Touch clears left_at
+        touch_keep_local_items(tmp_db, [(42, "movie")], "2026-03-01T00:00:00Z")
+        assert len(get_left_streaming(tmp_db)) == 0
+
+        # Should now be active again
+        item = get_streaming_item(tmp_db, 550, "movie", 8)
+        assert item["left_at"] is None
+        assert item["last_seen"] == "2026-03-01T00:00:00Z"
+
+    def test_no_match_returns_zero(self, tmp_db):
+        """Touch with non-existent arr_id returns 0."""
+        touched = touch_keep_local_items(tmp_db, [(999, "movie")], "2026-02-01T00:00:00Z")
+        assert touched == 0
+
+    def test_empty_list(self, tmp_db):
+        """Empty list is a no-op."""
+        touched = touch_keep_local_items(tmp_db, [], "2026-02-01T00:00:00Z")
+        assert touched == 0
+
+    def test_skips_deleted_items(self, tmp_db):
+        """Touch should not update items that are already deleted."""
+        upsert_streaming_item(tmp_db, 550, "movie", 8, "Netflix", "Fight Club",
+                              arr_id=42)
+        mark_deleted(tmp_db, 550, "movie", 8)
+
+        touched = touch_keep_local_items(tmp_db, [(42, "movie")], "2026-03-01T00:00:00Z")
+        assert touched == 0
 
 
 class TestActiveMatches:
