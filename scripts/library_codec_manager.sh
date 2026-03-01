@@ -555,28 +555,33 @@ sql_quote() {
 
 STREAMING_STATE_DB="/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
 
+# Pre-loaded streaming candidate paths (populated by load_streaming_candidates)
+declare -A _STREAMING_PATHS=()
+
+load_streaming_candidates() {
+  _STREAMING_PATHS=()
+  [[ -f "$STREAMING_STATE_DB" ]] || return 0
+  while IFS= read -r spath; do
+    [[ -n "$spath" ]] && _STREAMING_PATHS["$spath"]=1
+  done < <(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
+    "SELECT path FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL;" 2>/dev/null)
+}
+
+# Pure bash lookup — safe inside pipelines (no subprocess spawning)
 is_streaming_candidate_inline() {
   local filepath="$1"
-  [[ -f "$STREAMING_STATE_DB" ]] || return 1
+  [[ ${#_STREAMING_PATHS[@]} -eq 0 ]] && return 1
   local match_dir
   if [[ "$filepath" == *"/tv/"* || "$filepath" == *"/tvanimated/"* ]]; then
     if [[ "$filepath" == *"/Season "* ]]; then
-      # /tv/Show/Season 01/ep.mkv → /tv/Show
-      match_dir="$(printf '%s' "$filepath" | sed 's|/Season [0-9]*/.*||')"
+      match_dir="${filepath%%/Season [0-9]*}"
     else
-      # /tv/Show/ep.mkv → /tv/Show
       match_dir="$(dirname "$filepath")"
     fi
   else
-    # /movies/Title (Year)/file.mkv → /movies/Title (Year)
     match_dir="$(dirname "$filepath")"
   fi
-  local count
-  count="$(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
-    "SELECT COUNT(*) FROM streaming_status
-     WHERE left_at IS NULL AND deleted_at IS NULL
-       AND '$(sql_quote "$match_dir")' LIKE path || '%';" 2>/dev/null || echo 0)"
-  [[ "${count:-0}" -gt 0 ]]
+  [[ -n "${_STREAMING_PATHS[$match_dir]:-}" ]]
 }
 
 # SQLite wrapper — ensures busy_timeout (30s) on every connection.
@@ -1110,6 +1115,7 @@ audit_cmd() {
 
 plan_cmd() {
   log "info" "Building conversion plan"
+  load_streaming_candidates
 
   db "DELETE FROM conversion_plan;"
 
@@ -1708,6 +1714,7 @@ enqueue_import_cmd() {
     log "warn" "enqueue-import: file not found (may not be settled yet): $IMPORT_FILE"
     return 0
   fi
+  load_streaming_candidates
 
   local path="$IMPORT_FILE"
   local media_type="$IMPORT_MEDIA_TYPE"

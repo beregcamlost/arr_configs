@@ -178,34 +178,39 @@ is_file_being_converted() {
     "SELECT COUNT(*) FROM conversion_runs cr
      JOIN media_files m ON m.id = cr.media_id
      WHERE cr.status = 'running' AND cr.end_ts IS NULL
-       AND m.path = '$(sql_escape "$filepath")';" 2>/dev/null || echo 0)"
+       AND m.path = '$(sql_escape "$filepath")';" </dev/null 2>/dev/null || echo 0)"
   [[ "${running:-0}" -gt 0 ]]
 }
 
 STREAMING_STATE_DB="/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
 
+# Pre-loaded streaming candidate paths (populated by load_streaming_candidates)
+declare -A _STREAMING_PATHS=()
+
+load_streaming_candidates() {
+  _STREAMING_PATHS=()
+  [[ -f "$STREAMING_STATE_DB" ]] || return 0
+  while IFS= read -r spath; do
+    [[ -n "$spath" ]] && _STREAMING_PATHS["$spath"]=1
+  done < <(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
+    "SELECT path FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL;" 2>/dev/null)
+}
+
+# Pure bash lookup — safe inside pipelines (no subprocess spawning)
 is_streaming_candidate() {
   local filepath="$1"
-  [[ -f "$STREAMING_STATE_DB" ]] || return 1
+  [[ ${#_STREAMING_PATHS[@]} -eq 0 ]] && return 1
   local match_dir
   if is_tv_path "$filepath"; then
     if [[ "$filepath" == *"/Season "* ]]; then
-      # /tv/Show/Season 01/ep.mkv → /tv/Show
-      match_dir="$(printf '%s' "$filepath" | sed 's|/Season [0-9]*/.*||')"
+      match_dir="${filepath%%/Season [0-9]*}"
     else
-      # /tv/Show/ep.mkv → /tv/Show
       match_dir="$(dirname "$filepath")"
     fi
   else
-    # /movies/Title (Year)/file.mkv → /movies/Title (Year)
     match_dir="$(dirname "$filepath")"
   fi
-  local count
-  count="$(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
-    "SELECT COUNT(*) FROM streaming_status
-     WHERE left_at IS NULL AND deleted_at IS NULL
-       AND '$(sql_escape "$match_dir")' LIKE path || '%';" 2>/dev/null || echo 0)"
-  [[ "${count:-0}" -gt 0 ]]
+  [[ -n "${_STREAMING_PATHS[$match_dir]:-}" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -411,6 +416,7 @@ cmd_audit() {
 }
 
 cmd_mux() {
+  load_streaming_candidates
   log "Muxing external subtitles in: $PATH_PREFIX (recursive=$RECURSIVE, dry_run=$DRY_RUN, force=$FORCE)"
 
   local total_files=0 muxed=0 skipped=0 skipped_streaming=0 failed=0
@@ -564,6 +570,7 @@ cmd_mux() {
   fi
 }
 cmd_strip() {
+  load_streaming_candidates
   local mode_label
   if [[ -n "$KEEP_ONLY" ]]; then
     mode_label="keep-only=$KEEP_ONLY"
@@ -683,6 +690,7 @@ cmd_strip() {
 }
 
 cmd_auto_maintain() {
+  load_streaming_candidates
   log "auto-maintain: path=$PATH_PREFIX_ROOT since=$SINCE_MINUTES keep_profile_langs=$KEEP_PROFILE_LANGS bloat_threshold=$BLOAT_THRESHOLD dry_run=$DRY_RUN"
 
   local state_db="$STATE_DIR/subtitle_quality_state.db"
