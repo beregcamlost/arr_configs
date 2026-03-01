@@ -8,6 +8,8 @@ from streaming.discord import (
     BLUE,
     GREEN,
     ORANGE,
+    RED,
+    YELLOW,
     format_size,
     notify_deletion,
     notify_scan_results,
@@ -93,7 +95,7 @@ class TestNotifyScanResults:
         notify_scan_results("https://hook", [], left_items, stats)
         mock_send.assert_called_once()
         args = mock_send.call_args
-        assert args[0][3] == ORANGE  # color
+        assert args[0][3] == YELLOW  # color (left-only = yellow)
 
 
 class TestNotifyDeletion:
@@ -105,7 +107,7 @@ class TestNotifyDeletion:
         notify_deletion("https://hook", deleted, 5_000_000_000)
         mock_send.assert_called_once()
         args = mock_send.call_args
-        assert args[0][3] == BLUE
+        assert args[0][3] == RED  # color (deletion = red)
         fields = args[1].get("fields") or args[0][4]
         assert any("4.7 GB" in f["value"] for f in fields)
 

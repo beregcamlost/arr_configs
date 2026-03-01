@@ -1,6 +1,7 @@
 """Discord webhook notifications for streaming checker."""
 
 import logging
+from datetime import datetime, timezone
 
 import requests
 
@@ -25,7 +26,12 @@ def format_size(size_bytes):
     return f"{size_bytes:.1f} PB"
 
 
-def send_embed(webhook_url, title, description, color, fields=None):
+def _now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def send_embed(webhook_url, title, description, color, fields=None,
+               footer=None, timestamp=True):
     """Send a Discord embed message.
 
     Args:
@@ -34,6 +40,8 @@ def send_embed(webhook_url, title, description, color, fields=None):
         description: Embed description text
         color: Embed color (integer)
         fields: Optional list of {name, value, inline} dicts
+        footer: Optional footer text
+        timestamp: If True, add current UTC timestamp
     """
     if not webhook_url:
         log.debug("No Discord webhook URL configured, skipping notification")
@@ -46,6 +54,10 @@ def send_embed(webhook_url, title, description, color, fields=None):
     }
     if fields:
         embed["fields"] = fields
+    if footer:
+        embed["footer"] = {"text": footer}
+    if timestamp:
+        embed["timestamp"] = _now_iso()
 
     payload = {"embeds": [embed]}
 
@@ -67,12 +79,26 @@ def notify_scan_results(webhook_url, new_items, left_items, stats):
     if not new_items and not left_items:
         return
 
-    parts = []
-    parts.append(
-        f"Checked {stats.get('movies_checked', 0)} movies + "
-        f"{stats.get('series_checked', 0)} series in "
-        f"{stats.get('duration_seconds', 0):.1f}s"
+    # Build description with stats summary
+    movies = stats.get("movies_checked", 0)
+    series = stats.get("series_checked", 0)
+    matches = stats.get("matches_found", 0)
+    duration = stats.get("duration_seconds", 0)
+
+    desc_lines = []
+    desc_lines.append(
+        f"Scanned **{movies}** movies + **{series}** series "
+        f"({matches} active matches)"
     )
+
+    # Size summary of new items
+    if new_items:
+        new_size = sum(it.get("size_bytes", 0) or 0 for it in new_items)
+        desc_lines.append(
+            f"📥 **{len(new_items)}** newly streaming ({format_size(new_size)})"
+        )
+    if left_items:
+        desc_lines.append(f"📤 **{len(left_items)}** left streaming")
 
     fields = []
 
@@ -83,63 +109,114 @@ def notify_scan_results(webhook_url, new_items, left_items, stats):
             pname = item.get("provider_name", "Unknown")
             by_provider.setdefault(pname, []).append(item)
 
-        for provider, items in by_provider.items():
+        for provider, items in sorted(by_provider.items()):
+            psize = sum(it.get("size_bytes", 0) or 0 for it in items)
             lines = []
-            for it in items[:15]:  # Cap at 15 per provider to fit Discord limits
+            for it in items[:10]:
                 size = format_size(it.get("size_bytes", 0))
-                lines.append(f"- {it['title']} ({it.get('year', '?')}) [{it.get('library', '?')}] {size}")
-            if len(items) > 15:
-                lines.append(f"...and {len(items) - 15} more")
+                lines.append(
+                    f"• `{it['title']}` ({it.get('year', '?')}) "
+                    f"[{it.get('library', '?')}] {size}"
+                )
+            if len(items) > 10:
+                lines.append(f"…and {len(items) - 10} more")
             fields.append({
-                "name": f"New on {provider} ({len(items)})",
+                "name": f"📺 New on {provider} — {len(items)} items, {format_size(psize)}",
                 "value": "\n".join(lines),
                 "inline": False,
             })
 
     if left_items:
         lines = []
-        for it in left_items[:10]:
-            lines.append(f"- {it['title']} (was on {it.get('provider_name', '?')})")
+        for it in sorted(left_items, key=lambda x: x.get("title", ""))[:10]:
+            lines.append(
+                f"• `{it['title']}` — was on {it.get('provider_name', '?')}"
+            )
         if len(left_items) > 10:
-            lines.append(f"...and {len(left_items) - 10} more")
+            lines.append(f"…and {len(left_items) - 10} more")
         fields.append({
-            "name": f"Left Streaming ({len(left_items)})",
+            "name": f"🚫 Left Streaming ({len(left_items)})",
             "value": "\n".join(lines),
             "inline": False,
         })
 
-    color = GREEN if new_items and not left_items else ORANGE if left_items else YELLOW
-    send_embed(webhook_url, "Streaming Availability Scan", "\n".join(parts), color, fields)
+    # Determine color and emoji
+    if new_items and left_items:
+        color = ORANGE
+        emoji = "🔄"
+    elif new_items:
+        color = GREEN
+        emoji = "📺"
+    else:
+        color = YELLOW
+        emoji = "📤"
+
+    title = f"{emoji} Streaming Scan"
+    footer = f"Duration: {duration:.1f}s"
+
+    send_embed(webhook_url, title, "\n".join(desc_lines), color, fields, footer)
 
 
 def notify_deletion(webhook_url, deleted_items, total_freed_bytes):
     """Send deletion confirmation notification to Discord.
 
     Args:
-        deleted_items: list of dicts with title, year, provider_name
+        deleted_items: list of dicts with title, year, provider_name, library, size_bytes
         total_freed_bytes: total bytes freed by deletions
     """
     if not deleted_items:
         return
 
-    lines = []
-    for it in deleted_items[:20]:
-        lines.append(f"- {it['title']} ({it.get('year', '?')})")
-    if len(deleted_items) > 20:
-        lines.append(f"...and {len(deleted_items) - 20} more")
+    # Group by library
+    by_library = {}
+    for it in deleted_items:
+        lib = it.get("library", "unknown")
+        by_library.setdefault(lib, []).append(it)
 
-    description = "\n".join(lines)
-    fields = [
-        {
-            "name": "Space Freed",
-            "value": format_size(total_freed_bytes),
-            "inline": True,
-        },
-        {
-            "name": "Items Deleted",
-            "value": str(len(deleted_items)),
-            "inline": True,
-        },
+    desc_lines = [
+        f"🗑 Deleted **{len(deleted_items)}** items, "
+        f"freed **{format_size(total_freed_bytes)}**"
     ]
 
-    send_embed(webhook_url, "Streaming Checker — Deletions", description, BLUE, fields)
+    fields = []
+
+    # Items list (capped at 20)
+    lines = []
+    for it in deleted_items[:20]:
+        size = format_size(it.get("size_bytes", 0) or 0)
+        lines.append(f"• `{it['title']}` ({it.get('year', '?')}) {size}")
+    if len(deleted_items) > 20:
+        lines.append(f"…and {len(deleted_items) - 20} more")
+    fields.append({
+        "name": "Deleted Items",
+        "value": "\n".join(lines),
+        "inline": False,
+    })
+
+    # Stats row
+    fields.append({
+        "name": "Space Freed",
+        "value": format_size(total_freed_bytes),
+        "inline": True,
+    })
+    fields.append({
+        "name": "Items",
+        "value": str(len(deleted_items)),
+        "inline": True,
+    })
+    if by_library:
+        lib_parts = [f"{lib}: {len(items)}" for lib, items in sorted(by_library.items())]
+        fields.append({
+            "name": "By Library",
+            "value": ", ".join(lib_parts),
+            "inline": True,
+        })
+
+    send_embed(
+        webhook_url,
+        "🗑 Streaming Checker — Deletions",
+        "\n".join(desc_lines),
+        RED,
+        fields,
+        footer=f"Freed {format_size(total_freed_bytes)} total",
+    )
