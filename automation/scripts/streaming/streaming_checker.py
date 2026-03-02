@@ -376,6 +376,103 @@ def check_seasons(verbose, dry_run, db_path):
         click.echo("  (dry-run — no tags modified)")
 
 
+def _probe_audio_langs(file_path):
+    """Probe a media file and return set of 3-letter audio language codes."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-select_streams", "a", file_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        data = json.loads(result.stdout)
+        langs = set()
+        for stream in data.get("streams", []):
+            lang = stream.get("tags", {}).get("language", "").lower()
+            if lang in ("ja", "jpn", "japanese"):
+                langs.add("jpn")
+            elif lang in ("es", "spa", "spanish"):
+                langs.add("spa")
+            elif lang in ("en", "eng", "english"):
+                langs.add("eng")
+        return langs
+    except Exception:
+        return set()
+
+
+def _find_sample_file(directory):
+    """Find the first video file in a directory tree."""
+    import os
+    for root, _dirs, files in os.walk(directory):
+        for f in sorted(files):
+            if f.endswith((".mkv", ".mp4", ".m4v")):
+                return os.path.join(root, f)
+    return None
+
+
+def _is_dual_audio_keep_local(path):
+    """Check if a media path has dual audio (jpn+spa or eng+spa) worth keeping."""
+    import os
+    if not path or not os.path.exists(path):
+        return False
+    if os.path.isdir(path):
+        sample = _find_sample_file(path)
+    else:
+        sample = path
+    if not sample:
+        return False
+    langs = _probe_audio_langs(sample)
+    return ("spa" in langs and ("jpn" in langs or "eng" in langs) and len(langs) >= 2)
+
+
+@cli.command("check-audio")
+@click.option("--verbose", is_flag=True, help="Enable debug logging")
+@click.option("--dry-run", is_flag=True, help="Show what would be tagged without tagging")
+def check_audio(verbose, dry_run):
+    """Auto-tag keep-local for items with dual audio (jpn+spa or eng+spa).
+
+    Scans ALL library items and tags any with multi-language audio tracks
+    as keep-local to protect them from cleanup.
+    """
+    _setup_logging(verbose)
+    cfg = load_config(dry_run=dry_run, verbose=verbose)
+
+    movies = fetch_movies(cfg.radarr_url, cfg.radarr_key)
+    series = fetch_series(cfg.sonarr_url, cfg.sonarr_key)
+
+    movies_with_files = [m for m in movies if m.get("has_file")]
+    log.info("Checking %d movies + %d series for dual audio", len(movies_with_files), len(series))
+
+    kl_radarr = ensure_tag(cfg.radarr_url, cfg.radarr_key, "keep-local") if not dry_run else None
+    kl_sonarr = ensure_tag(cfg.sonarr_url, cfg.sonarr_key, "keep-local") if not dry_run else None
+
+    tagged = 0
+    checked = 0
+
+    for item in movies_with_files + series:
+        path = item.get("path", "")
+        if not path:
+            continue
+        checked += 1
+        if _is_dual_audio_keep_local(path):
+            title = item["title"]
+            if dry_run:
+                click.echo(f"  [dry-run] Would tag keep-local: {title} ({item.get('year', '?')})")
+            else:
+                if item["media_type"] == "movie":
+                    add_tag_to_item(cfg.radarr_url, cfg.radarr_key, "movie", item["arr_id"], kl_radarr)
+                else:
+                    add_tag_to_item(cfg.sonarr_url, cfg.sonarr_key, "series", item["arr_id"], kl_sonarr)
+                log.info("Tagged %s (%s) as keep-local (dual audio)", title, item.get("year", "?"))
+            tagged += 1
+
+    click.echo(f"\ncheck-audio complete")
+    click.echo(f"  Checked: {checked}")
+    click.echo(f"  Dual audio tagged: {tagged}")
+    if dry_run:
+        click.echo("  (dry-run — no tags modified)")
+
+
 @cli.command()
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="Output as JSON")
 @click.option("--provider", default=None, help="Filter by provider name (case-insensitive)")
@@ -773,6 +870,9 @@ def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path):
             continue
         # Exclude active streaming matches
         if item.get("path") in streaming_paths:
+            continue
+        # Exclude dual-audio items (jpn+spa or eng+spa)
+        if _is_dual_audio_keep_local(item.get("path", "")):
             continue
         # Check play history
         path = item.get("path", "")

@@ -61,7 +61,9 @@ Subcommands: `scan`, `report`, `confirm-delete`, `check-seasons`, `stale-cleanup
 - **Tier 1 (weekly Sunday 6 AM):** `check-seasons` + `confirm-delete --yes` — deletes all items available on streaming (no play-day filter). `check-seasons` auto-tags `keep-local` for series with seasons not on the provider.
 - **Tier 2 (monthly 1st 7 AM):** `stale-cleanup --yes --no-play-days 365 --min-size-gb 3.0` — scans entire library, auto-deletes >3 GB items not played in 1 year, Discord reports the rest. Excludes keep-local and active streaming matches.
 
-Both tiers exclude keep-local tagged items and verify against Emby active playback before deleting.
+Both tiers exclude keep-local tagged items, dual-audio items (jpn+spa or eng+spa), and verify against Emby active playback before deleting.
+
+**Dual-audio auto-protect rule:** Any item with dual audio tracks (Japanese+Spanish or English+Spanish) is automatically tagged `keep-local` via `check-audio` subcommand. These are hard to re-acquire and must never be auto-deleted.
 
 ### Supporting scripts
 
