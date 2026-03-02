@@ -67,6 +67,14 @@ def fetch_series(sonarr_url, api_key):
         # Sonarr uses tvdbId primarily; tmdbId may not always be present
         tmdb_id = s.get("tmdbId", 0) or 0
         stats = s.get("statistics", {})
+        # Extract owned season numbers (seasons with at least one episode file)
+        seasons_data = s.get("seasons", [])
+        owned_seasons = [
+            sn["seasonNumber"]
+            for sn in seasons_data
+            if sn.get("seasonNumber", 0) > 0
+            and sn.get("statistics", {}).get("episodeFileCount", 0) > 0
+        ]
         series.append({
             "tmdb_id": tmdb_id,
             "arr_id": s["id"],
@@ -77,6 +85,8 @@ def fetch_series(sonarr_url, api_key):
             "tags": s.get("tags", []),
             "library": _detect_library(path, "tv"),
             "media_type": "tv",
+            "season_count": len(owned_seasons),
+            "season_numbers": owned_seasons,
         })
     return series
 

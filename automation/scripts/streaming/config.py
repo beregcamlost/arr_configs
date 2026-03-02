@@ -30,6 +30,7 @@ class Config:
     emby_url: str = "http://127.0.0.1:8096"
     country: str = DEFAULT_COUNTRY
     providers: List[str] = field(default_factory=lambda: list(DEFAULT_PROVIDERS))
+    rapidapi_key: str = ""
     dry_run: bool = False
     verbose: bool = False
     db_path: str = DEFAULT_DB_PATH
@@ -77,6 +78,7 @@ def load_config(
         radarr_url=os.environ.get("RADARR_URL", "http://127.0.0.1:7878/radarr"),
         sonarr_url=os.environ.get("SONARR_URL", "http://127.0.0.1:8989/sonarr"),
         emby_url=os.environ.get("EMBY_URL", "http://127.0.0.1:8096"),
+        rapidapi_key=os.environ.get("RAPIDAPI_KEY", ""),
         country=country or DEFAULT_COUNTRY,
         providers=parsed_providers,
         dry_run=dry_run,

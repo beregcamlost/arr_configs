@@ -31,6 +31,8 @@ def init_db(db_path):
             last_seen TEXT NOT NULL,
             left_at TEXT,
             deleted_at TEXT,
+            season_count INTEGER,
+            streaming_seasons TEXT,
             PRIMARY KEY (tmdb_id, media_type, provider_id)
         );
         CREATE TABLE IF NOT EXISTS scan_history (
@@ -45,13 +47,28 @@ def init_db(db_path):
             duration_seconds REAL
         );
     """)
+    # Migration: add columns to existing DBs
+    try:
+        conn.execute("ALTER TABLE streaming_status ADD COLUMN season_count INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        conn.execute("ALTER TABLE streaming_status ADD COLUMN streaming_seasons TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.close()
 
 
 def upsert_streaming_item(db_path, tmdb_id, media_type, provider_id, provider_name,
                            title, year=None, arr_id=None, library=None,
-                           size_bytes=None, path=None):
-    """Insert or update a streaming match. Clears left_at if item returns."""
+                           size_bytes=None, path=None, season_count=None,
+                           streaming_seasons=None):
+    """Insert or update a streaming match. Clears left_at if item returns.
+
+    Args:
+        season_count: Number of seasons owned locally (from Sonarr).
+        streaming_seasons: JSON string of season numbers available on this provider.
+    """
     now = _now_iso()
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA busy_timeout=30000")
@@ -64,19 +81,24 @@ def upsert_streaming_item(db_path, tmdb_id, media_type, provider_id, provider_na
         conn.execute("""
             UPDATE streaming_status
             SET provider_name=?, title=?, year=?, arr_id=?, library=?,
-                size_bytes=?, path=?, last_seen=?, left_at=NULL
+                size_bytes=?, path=?, last_seen=?, left_at=NULL,
+                season_count=COALESCE(?, season_count),
+                streaming_seasons=COALESCE(?, streaming_seasons)
             WHERE tmdb_id=? AND media_type=? AND provider_id=?
         """, (provider_name, title, year, arr_id, library, size_bytes, path,
-              now, tmdb_id, media_type, provider_id))
+              now, season_count, streaming_seasons,
+              tmdb_id, media_type, provider_id))
         is_new = False
     else:
         conn.execute("""
             INSERT INTO streaming_status
             (tmdb_id, media_type, provider_id, provider_name, title, year,
-             arr_id, library, size_bytes, path, first_seen, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             arr_id, library, size_bytes, path, first_seen, last_seen,
+             season_count, streaming_seasons)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (tmdb_id, media_type, provider_id, provider_name, title, year,
-              arr_id, library, size_bytes, path, now, now))
+              arr_id, library, size_bytes, path, now, now,
+              season_count, streaming_seasons))
         is_new = True
     conn.commit()
     conn.close()
@@ -172,6 +194,33 @@ def touch_keep_local_items(db_path, arr_id_types, timestamp):
     conn.commit()
     conn.close()
     return count
+
+
+def update_streaming_seasons(db_path, tmdb_id, provider_id, streaming_seasons, season_count=None):
+    """Update streaming_seasons (and optionally season_count) for a specific item.
+
+    Args:
+        streaming_seasons: JSON string of season numbers available on this provider.
+        season_count: Number of seasons owned locally (optional update).
+    """
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA busy_timeout=30000")
+    if season_count is not None:
+        conn.execute("""
+            UPDATE streaming_status
+            SET streaming_seasons=?, season_count=?
+            WHERE tmdb_id=? AND media_type='tv' AND provider_id=?
+              AND deleted_at IS NULL
+        """, (streaming_seasons, season_count, tmdb_id, provider_id))
+    else:
+        conn.execute("""
+            UPDATE streaming_status
+            SET streaming_seasons=?
+            WHERE tmdb_id=? AND media_type='tv' AND provider_id=?
+              AND deleted_at IS NULL
+        """, (streaming_seasons, tmdb_id, provider_id))
+    conn.commit()
+    conn.close()
 
 
 def mark_deleted(db_path, tmdb_id, media_type, provider_id):

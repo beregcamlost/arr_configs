@@ -55,3 +55,12 @@ class TestLoadConfig:
         db = str(tmp_path / "custom.db")
         cfg = load_config(db_path=db)
         assert cfg.db_path == db
+
+    def test_rapidapi_key_from_env(self, env_config, monkeypatch):
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-rapid-key")
+        cfg = load_config()
+        assert cfg.rapidapi_key == "test-rapid-key"
+
+    def test_rapidapi_key_default_empty(self, env_config):
+        cfg = load_config()
+        assert cfg.rapidapi_key == ""

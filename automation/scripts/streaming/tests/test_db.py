@@ -14,6 +14,7 @@ from streaming.db import (
     mark_left_streaming,
     record_scan,
     touch_keep_local_items,
+    update_streaming_seasons,
     upsert_streaming_item,
 )
 
@@ -32,6 +33,14 @@ class TestInitDb:
     def test_idempotent(self, tmp_db):
         # Calling init_db again should not fail
         init_db(tmp_db)
+
+    def test_has_season_columns(self, tmp_db):
+        import sqlite3
+        conn = sqlite3.connect(tmp_db)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(streaming_status)").fetchall()]
+        conn.close()
+        assert "season_count" in cols
+        assert "streaming_seasons" in cols
 
 
 class TestUpsertAndGet:
@@ -70,6 +79,26 @@ class TestUpsertAndGet:
         upsert_streaming_item(tmp_db, 550, "movie", 337, "Disney Plus", "Fight Club")
         assert get_streaming_item(tmp_db, 550, "movie", 8) is not None
         assert get_streaming_item(tmp_db, 550, "movie", 337) is not None
+
+    def test_insert_with_season_fields(self, tmp_db):
+        upsert_streaming_item(
+            tmp_db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008,
+            season_count=5, streaming_seasons="[1, 2, 3]",
+        )
+        item = get_streaming_item(tmp_db, 1396, "tv", 8)
+        assert item["season_count"] == 5
+        assert item["streaming_seasons"] == "[1, 2, 3]"
+
+    def test_update_preserves_season_fields_when_none(self, tmp_db):
+        upsert_streaming_item(
+            tmp_db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008,
+            season_count=5, streaming_seasons="[1, 2, 3]",
+        )
+        # Update without season fields — should preserve existing
+        upsert_streaming_item(tmp_db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008)
+        item = get_streaming_item(tmp_db, 1396, "tv", 8)
+        assert item["season_count"] == 5
+        assert item["streaming_seasons"] == "[1, 2, 3]"
 
 
 class TestLeftStreaming:
@@ -339,3 +368,27 @@ class TestSummaryStats:
         assert stats["by_provider"] == []
         assert stats["by_library"] == []
         assert stats["last_scan"] is None
+
+
+class TestUpdateStreamingSeasons:
+    def test_updates_seasons(self, tmp_db):
+        upsert_streaming_item(tmp_db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008)
+        update_streaming_seasons(tmp_db, 1396, 8, "[1, 2, 3]", season_count=5)
+        item = get_streaming_item(tmp_db, 1396, "tv", 8)
+        assert item["streaming_seasons"] == "[1, 2, 3]"
+        assert item["season_count"] == 5
+
+    def test_updates_without_season_count(self, tmp_db):
+        upsert_streaming_item(tmp_db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008,
+                              season_count=5)
+        update_streaming_seasons(tmp_db, 1396, 8, "[1, 2]")
+        item = get_streaming_item(tmp_db, 1396, "tv", 8)
+        assert item["streaming_seasons"] == "[1, 2]"
+        assert item["season_count"] == 5  # unchanged
+
+    def test_skips_deleted_items(self, tmp_db):
+        upsert_streaming_item(tmp_db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008)
+        mark_deleted(tmp_db, 1396, "tv", 8)
+        update_streaming_seasons(tmp_db, 1396, 8, "[1, 2, 3]", season_count=5)
+        item = get_streaming_item(tmp_db, 1396, "tv", 8)
+        assert item["streaming_seasons"] is None

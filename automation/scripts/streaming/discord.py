@@ -68,13 +68,14 @@ def send_embed(webhook_url, title, description, color, fields=None,
         log.warning("Discord webhook failed: %s", e)
 
 
-def notify_scan_results(webhook_url, new_items, left_items, stats):
+def notify_scan_results(webhook_url, new_items, left_items, stats, stale_count=None):
     """Send scan results notification to Discord.
 
     Args:
         new_items: list of newly streaming items (dicts with title, year, provider_name, library, size_bytes)
         left_items: list of items that left streaming (dicts with title, provider_name)
         stats: dict with movies_checked, series_checked, matches_found, duration_seconds
+        stale_count: optional number of items with no plays in 90+ days
     """
     if not new_items and not left_items:
         return
@@ -99,6 +100,8 @@ def notify_scan_results(webhook_url, new_items, left_items, stats):
         )
     if left_items:
         desc_lines.append(f"📤 **{len(left_items)}** left streaming")
+    if stale_count:
+        desc_lines.append(f"⏳ **{stale_count}** items with no plays in 90+ days")
 
     fields = []
 
@@ -180,18 +183,28 @@ def notify_deletion(webhook_url, deleted_items, total_freed_bytes):
 
     fields = []
 
-    # Items list (capped at 20)
-    lines = []
-    for it in deleted_items[:20]:
+    # Items list — split into chunks to fit Discord's 1024-char field limit
+    all_lines = []
+    for it in deleted_items:
         size = format_size(it.get("size_bytes", 0) or 0)
-        lines.append(f"• `{it['title']}` ({it.get('year', '?')}) {size}")
-    if len(deleted_items) > 20:
-        lines.append(f"…and {len(deleted_items) - 20} more")
-    fields.append({
-        "name": "Deleted Items",
-        "value": "\n".join(lines),
-        "inline": False,
-    })
+        all_lines.append(f"• `{it['title']}` ({it.get('year', '?')}) {size}")
+
+    chunk = []
+    chunk_len = 0
+    chunk_idx = 0
+    for line in all_lines:
+        line_len = len(line) + 1  # +1 for newline
+        if chunk and chunk_len + line_len > 1000:
+            label = "Deleted Items" if chunk_idx == 0 else "⠀"  # invisible braille char for continuation
+            fields.append({"name": label, "value": "\n".join(chunk), "inline": False})
+            chunk = []
+            chunk_len = 0
+            chunk_idx += 1
+        chunk.append(line)
+        chunk_len += line_len
+    if chunk:
+        label = "Deleted Items" if chunk_idx == 0 else "⠀"
+        fields.append({"name": label, "value": "\n".join(chunk), "inline": False})
 
     # Stats row
     fields.append({

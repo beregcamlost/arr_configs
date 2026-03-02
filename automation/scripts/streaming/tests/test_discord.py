@@ -97,6 +97,19 @@ class TestNotifyScanResults:
         args = mock_send.call_args
         assert args[0][3] == YELLOW  # color (left-only = yellow)
 
+    @patch("streaming.discord.send_embed")
+    def test_stale_count_in_description(self, mock_send):
+        new_items = [
+            {"title": "Test", "year": 2020, "provider_name": "Netflix",
+             "library": "movies", "size_bytes": 1_000_000_000},
+        ]
+        stats = {"movies_checked": 50, "series_checked": 20, "matches_found": 1, "duration_seconds": 2.0}
+        notify_scan_results("https://hook", new_items, [], stats, stale_count=15)
+        mock_send.assert_called_once()
+        desc = mock_send.call_args[0][2]
+        assert "15" in desc
+        assert "90+" in desc
+
 
 class TestNotifyDeletion:
     @patch("streaming.discord.send_embed")

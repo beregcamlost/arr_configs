@@ -81,9 +81,26 @@ After editing any canonical script in `automation/scripts/`, always sync the com
   - Library path patterns (`/tv/`, `/movies/`, etc.) must use `is_tv_path()`/`is_movie_path()` helpers, never inline globs
   - Language code mappings use `expand_lang_codes()`, `lang_in_set()`, `lang_to_iso639_2()` from the shared lib
 
+## Discord Notification Standard
+
+All Discord notifications must follow this consistent rich embed format:
+
+- **Title:** Emoji + system name + context (e.g., `📺 Streaming Scan`, `📥 Subtitle Auto-Maintain (quick)`)
+- **Description:** Summary stats with emoji prefixes and bold values (e.g., `📥 Muxed: **3** file(s)`)
+- **Fields:** Use inline fields for key metrics (3 per row). Use non-inline fields for item lists.
+- **Footer:** System identifier or context info (e.g., `Duration: 15.3s`, `Event: Download`)
+- **Timestamp:** Always include UTC ISO8601 timestamp
+- **Colors:** `3066993` (green=success), `15105570` (orange=partial/warning), `15844367` (yellow=info/skip), `15158332` (red=error/deletion), `3447003` (blue=neutral)
+- **Item lists:** Backtick-wrapped titles (`` `Title` ``), capped at 10–20 items with "…and N more"
+- **Curl options (bash):** `-sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors`
+- **Error handling:** Always non-fatal (`|| log "WARN: Discord failed"` or `|| true`)
+- Reference: codec manager audit notification (best example) in `library_codec_manager.sh`
+
 ## Commit Style
 
 Conventional commits: `feat(subtitles): ...`, `fix(transcode): ...`
+
+**NEVER** include `Co-Authored-By: Claude`, `Co-Authored-By: Claude Code`, or any Claude/Anthropic references in commit messages. No AI attribution in commits — ever.
 
 ## Key External Paths
 

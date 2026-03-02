@@ -57,6 +57,14 @@ SONARR_SERIES = [
         "path": "/media/tv/Breaking Bad",
         "tags": [],
         "statistics": {"sizeOnDisk": 80_000_000_000},
+        "seasons": [
+            {"seasonNumber": 0, "statistics": {"episodeFileCount": 2}},
+            {"seasonNumber": 1, "statistics": {"episodeFileCount": 7}},
+            {"seasonNumber": 2, "statistics": {"episodeFileCount": 13}},
+            {"seasonNumber": 3, "statistics": {"episodeFileCount": 13}},
+            {"seasonNumber": 4, "statistics": {"episodeFileCount": 13}},
+            {"seasonNumber": 5, "statistics": {"episodeFileCount": 16}},
+        ],
     },
     {
         "id": 11,
@@ -66,6 +74,9 @@ SONARR_SERIES = [
         "path": "/media/tvanimated/No TMDB",
         "tags": [],
         "statistics": {"sizeOnDisk": 1_000_000},
+        "seasons": [
+            {"seasonNumber": 1, "statistics": {"episodeFileCount": 0}},
+        ],
     },
 ]
 
@@ -104,6 +115,26 @@ class TestFetchSeries:
         assert series[0]["size_bytes"] == 80_000_000_000
         assert series[1]["library"] == "tvanimated"
         assert series[1]["tmdb_id"] == 0
+
+    @patch("streaming.arr_client.requests.get")
+    def test_season_count_and_numbers(self, mock_get):
+        mock_get.return_value = _mock_response(SONARR_SERIES)
+        series = fetch_series("http://localhost:8989/sonarr", "key")
+        # Breaking Bad: seasons 1-5 have episodes (season 0 excluded)
+        assert series[0]["season_count"] == 5
+        assert series[0]["season_numbers"] == [1, 2, 3, 4, 5]
+        # No TMDB: season 1 has 0 episodes
+        assert series[1]["season_count"] == 0
+        assert series[1]["season_numbers"] == []
+
+    @patch("streaming.arr_client.requests.get")
+    def test_no_seasons_key(self, mock_get):
+        data = [{"id": 20, "tmdbId": 100, "title": "Test", "year": 2020,
+                 "path": "/media/tv/Test", "tags": [], "statistics": {"sizeOnDisk": 0}}]
+        mock_get.return_value = _mock_response(data)
+        series = fetch_series("http://localhost:8989/sonarr", "key")
+        assert series[0]["season_count"] == 0
+        assert series[0]["season_numbers"] == []
 
 
 class TestTagCrud:

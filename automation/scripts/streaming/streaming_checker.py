@@ -35,10 +35,12 @@ from streaming.db import (
     mark_left_streaming,
     record_scan,
     touch_keep_local_items,
+    update_streaming_seasons,
     upsert_streaming_item,
 )
 from streaming.discord import format_size, notify_deletion, notify_scan_results
-from streaming.emby_client import is_playing, refresh_library
+from streaming.emby_client import get_last_played_map, is_playing, refresh_library
+from streaming.streaming_api_client import get_season_availability
 from streaming.tmdb_client import batch_check
 
 log = logging.getLogger("streaming_checker")
@@ -241,6 +243,134 @@ def scan(country, providers, dry_run, verbose, db_path):
         click.echo("  (dry-run — no tags modified)")
 
 
+@cli.command("check-seasons")
+@click.option("--verbose", is_flag=True, help="Enable debug logging")
+@click.option("--dry-run", is_flag=True, help="Check seasons without tagging keep-local")
+@click.option("--db-path", default=None, help="Path to state database")
+def check_seasons(verbose, dry_run, db_path):
+    """Check per-season streaming availability and auto-tag keep-local."""
+    _setup_logging(verbose)
+    cfg = load_config(dry_run=dry_run, verbose=verbose, db_path=db_path)
+
+    if not cfg.rapidapi_key:
+        click.echo("Error: RAPIDAPI_KEY environment variable is required for check-seasons")
+        sys.exit(1)
+
+    init_db(cfg.db_path)
+
+    # Get all active TV matches
+    active = get_active_matches_filtered(cfg.db_path)
+    tv_matches = [a for a in active if a["media_type"] == "tv" and a.get("tmdb_id")]
+
+    if not tv_matches:
+        click.echo("No active TV matches to check.")
+        return
+
+    # Deduplicate by tmdb_id — we only need one API call per series
+    seen_tmdb = {}
+    for item in tv_matches:
+        tid = item["tmdb_id"]
+        if tid not in seen_tmdb:
+            seen_tmdb[tid] = []
+        seen_tmdb[tid].append(item)
+
+    log.info("Checking %d unique TV series for per-season availability", len(seen_tmdb))
+
+    # Get owned season info from Sonarr
+    series_list = fetch_series(cfg.sonarr_url, cfg.sonarr_key)
+    sonarr_by_tmdb = {s["tmdb_id"]: s for s in series_list if s["tmdb_id"]}
+
+    tagged_count = 0
+    checked_count = 0
+
+    for tmdb_id, db_items in seen_tmdb.items():
+        # Get per-season streaming data from API
+        season_avail = get_season_availability(
+            cfg.rapidapi_key, tmdb_id, country=cfg.country,
+        )
+        checked_count += 1
+
+        if not season_avail:
+            log.debug("No season data for TMDB %s (%s)", tmdb_id, db_items[0]["title"])
+            continue
+
+        # Get owned seasons from Sonarr
+        sonarr_item = sonarr_by_tmdb.get(tmdb_id)
+        owned_seasons = set(sonarr_item["season_numbers"]) if sonarr_item else set()
+        season_count = len(owned_seasons) if owned_seasons else None
+
+        if not owned_seasons:
+            log.debug("No owned seasons for TMDB %s (%s)", tmdb_id, db_items[0]["title"])
+            continue
+
+        title = db_items[0]["title"]
+
+        # Map TMDB provider IDs to Streaming Availability API service IDs
+        # TMDB names like "Netflix", "Disney Plus" → API IDs like "netflix", "disney"
+        _provider_to_service = {
+            8: "netflix",       # Netflix
+            337: "disney",      # Disney Plus
+            384: "hbo",         # HBO Max
+            119: "prime",       # Amazon Prime
+            350: "apple",       # Apple TV+
+            531: "paramount",   # Paramount+
+        }
+
+        # For each provider match, determine which owned seasons are streaming
+        for db_item in db_items:
+            service_id = _provider_to_service.get(db_item["provider_id"], "")
+
+            # Find which owned seasons are on this provider
+            streaming_nums = []
+            for snum, providers in season_avail.items():
+                if service_id and service_id in providers:
+                    streaming_nums.append(snum)
+
+            streaming_seasons_json = json.dumps(sorted(streaming_nums))
+
+            # Update DB
+            update_streaming_seasons(
+                cfg.db_path, tmdb_id, db_item["provider_id"],
+                streaming_seasons_json, season_count=season_count,
+            )
+
+            # Check if we own seasons NOT available on this provider
+            streaming_set = set(streaming_nums)
+            missing_on_provider = owned_seasons - streaming_set
+
+            if missing_on_provider and sonarr_item:
+                sorted_owned = sorted(owned_seasons)
+                sorted_streaming = sorted(streaming_set & owned_seasons)
+                log.info(
+                    "%s: own S%s, %s has S%s — missing S%s",
+                    title,
+                    ",".join(str(s) for s in sorted_owned),
+                    db_item["provider_name"],
+                    ",".join(str(s) for s in sorted_streaming) if sorted_streaming else "none",
+                    ",".join(str(s) for s in sorted(missing_on_provider)),
+                )
+
+                if not dry_run:
+                    keep_tag = ensure_tag(cfg.sonarr_url, cfg.sonarr_key, "keep-local")
+                    add_tag_to_item(
+                        cfg.sonarr_url, cfg.sonarr_key, "series",
+                        sonarr_item["arr_id"], keep_tag,
+                    )
+                    log.info("Tagged %s as keep-local", title)
+                    tagged_count += 1
+                else:
+                    click.echo(f"  [dry-run] Would tag keep-local: {title}")
+                    tagged_count += 1
+                # Only tag once per series (any provider mismatch is enough)
+                break
+
+    click.echo(f"\ncheck-seasons complete")
+    click.echo(f"  Series checked:  {checked_count}")
+    click.echo(f"  Keep-local tags: {tagged_count}")
+    if dry_run:
+        click.echo("  (dry-run — no tags modified)")
+
+
 @cli.command()
 @click.option("--json-output", "--json", "json_out", is_flag=True, help="Output as JSON")
 @click.option("--provider", default=None, help="Filter by provider name (case-insensitive)")
@@ -249,8 +379,9 @@ def scan(country, providers, dry_run, verbose, db_path):
 @click.option("--sort-by", default="title", type=click.Choice(["title", "size", "date", "provider"]),
               help="Sort order")
 @click.option("--since-days", default=None, type=int, help="Only items first seen within N days")
+@click.option("--no-play-days", default=None, type=int, help="Only show items with no Emby plays in last N days")
 @click.option("--db-path", default=None, help="Path to state database")
-def report(json_out, provider, library, min_size, sort_by, since_days, db_path):
+def report(json_out, provider, library, min_size, sort_by, since_days, no_play_days, db_path):
     """Show current streaming availability status from state DB."""
     _setup_logging(False)
     cfg = load_config(db_path=db_path)
@@ -265,6 +396,7 @@ def report(json_out, provider, library, min_size, sort_by, since_days, db_path):
     left = get_left_streaming(cfg.db_path)
 
     # Filter out keep-local tagged items
+    keep_local_set = set()
     if active or left:
         try:
             keep_local_set = _get_keep_local_set(cfg)
@@ -275,6 +407,43 @@ def report(json_out, provider, library, min_size, sort_by, since_days, db_path):
                         if (l.get("arr_id"), l.get("media_type")) not in keep_local_set]
         except Exception as e:
             log.warning("Could not filter keep-local items: %s", e)
+
+    # Enrich with Emby last-played data
+    play_map = {}
+    if no_play_days is not None and cfg.emby_api_key:
+        try:
+            play_map = get_last_played_map(cfg.emby_url, cfg.emby_api_key)
+        except Exception as e:
+            log.warning("Could not fetch Emby play history: %s", e)
+
+    if play_map and no_play_days is not None:
+        from datetime import datetime, timezone
+        cutoff = datetime.now(timezone.utc)
+        filtered = []
+        for item in active:
+            path = item.get("path", "")
+            last_played = play_map.get(path)
+            item["_last_played"] = last_played
+            if last_played:
+                try:
+                    played_dt = datetime.fromisoformat(last_played.replace("Z", "+00:00"))
+                    days_ago = (cutoff - played_dt).days
+                    item["_days_ago"] = days_ago
+                    if days_ago >= no_play_days:
+                        filtered.append(item)
+                except (ValueError, TypeError):
+                    item["_days_ago"] = None
+                    filtered.append(item)
+            else:
+                item["_days_ago"] = None
+                filtered.append(item)  # never played → include
+        active = filtered
+    elif play_map:
+        # Enrich without filtering
+        for item in active:
+            path = item.get("path", "")
+            last_played = play_map.get(path)
+            item["_last_played"] = last_played
 
     if json_out:
         click.echo(json.dumps({"active": active, "left_streaming": left}, indent=2))
@@ -299,7 +468,34 @@ def report(json_out, provider, library, min_size, sort_by, since_days, db_path):
             click.echo(f"\n  {prov_name} ({len(items)} items, {format_size(psize)}):")
             for it in items:  # already sorted by DB query
                 size = format_size(it.get("size_bytes", 0))
-                click.echo(f"    - {it['title']} ({it.get('year', '?')}) [{it.get('library', '?')}] {size}")
+                extras = []
+
+                # Season info for TV items
+                sc = it.get("season_count")
+                ss = it.get("streaming_seasons")
+                if sc and ss:
+                    try:
+                        streaming_list = json.loads(ss)
+                        extras.append(f"{len(streaming_list)}/{sc} seasons")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                # Play history
+                days_ago = it.get("_days_ago")
+                if "_last_played" in it:
+                    if it["_last_played"] is None:
+                        extras.append("never played")
+                    elif days_ago is not None:
+                        extras.append(f"played {days_ago}d ago")
+
+                # Keep-local indicator
+                if (it.get("arr_id"), it.get("media_type")) in keep_local_set:
+                    extras.append("keep-local")
+
+                extra_str = " ".join(f"[{e}]" for e in extras)
+                if extra_str:
+                    extra_str = " " + extra_str
+                click.echo(f"    - {it['title']} ({it.get('year', '?')}) [{it.get('library', '?')}] {size}{extra_str}")
 
     if left:
         click.echo(f"\n=== Left Streaming ({len(left)}) ===")
@@ -313,10 +509,12 @@ def report(json_out, provider, library, min_size, sort_by, since_days, db_path):
 @click.option("--library", default=None, help="Only delete items from this library")
 @click.option("--min-size", default=None, type=float, help="Minimum size in GB")
 @click.option("--tmdb-ids", default=None, help="Comma-separated TMDB IDs to delete")
+@click.option("--no-play-days", default=None, type=int,
+              help="Only delete items with no Emby plays in last N days")
 @click.option("--dry-run", is_flag=True, help="Show what would be deleted without acting")
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
 @click.option("--db-path", default=None, help="Path to state database")
-def confirm_delete(yes, provider, library, min_size, tmdb_ids, dry_run, verbose, db_path):
+def confirm_delete(yes, provider, library, min_size, tmdb_ids, no_play_days, dry_run, verbose, db_path):
     """Delete items that are available on streaming. Requires --yes flag."""
     _setup_logging(verbose)
     cfg = load_config(dry_run=dry_run, verbose=verbose, db_path=db_path)
@@ -331,6 +529,42 @@ def confirm_delete(yes, provider, library, min_size, tmdb_ids, dry_run, verbose,
     if tmdb_ids:
         id_set = {int(x.strip()) for x in tmdb_ids.split(",")}
         active = [a for a in active if a["tmdb_id"] in id_set]
+
+    # Filter by Emby play history
+    if no_play_days is not None and cfg.emby_api_key:
+        try:
+            play_map = get_last_played_map(cfg.emby_url, cfg.emby_api_key)
+        except Exception as e:
+            log.warning("Could not fetch Emby play history: %s", e)
+            play_map = {}
+
+        if play_map:
+            from datetime import datetime, timezone
+            cutoff = datetime.now(timezone.utc)
+            filtered = []
+            for item in active:
+                path = item.get("path", "")
+                last_played = play_map.get(path)
+                if last_played:
+                    try:
+                        played_dt = datetime.fromisoformat(last_played.replace("Z", "+00:00"))
+                        days_ago = (cutoff - played_dt).days
+                        if days_ago >= no_play_days:
+                            filtered.append(item)
+                    except (ValueError, TypeError):
+                        filtered.append(item)
+                else:
+                    filtered.append(item)  # never played → include
+            active = filtered
+
+    # Filter out keep-local tagged items
+    try:
+        keep_local_set = _get_keep_local_set(cfg)
+        if keep_local_set:
+            active = [a for a in active
+                      if (a.get("arr_id"), a.get("media_type")) not in keep_local_set]
+    except Exception as e:
+        log.warning("Could not filter keep-local items: %s", e)
 
     if not active:
         click.echo("No items to delete.")
