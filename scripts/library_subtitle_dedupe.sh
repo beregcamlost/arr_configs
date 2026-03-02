@@ -106,6 +106,8 @@ fi
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG_PATH")"
 
+_dedupe_start=$SECONDS
+
 source "$(dirname "$0")/lib_subtitle_common.sh"
 
 # Override lib_subtitle_common.sh log() — dedupe uses tee and LOG_PATH instead of LOG
@@ -584,8 +586,49 @@ fi
 
 # Discord notification (only when changes were made)
 if [[ "$DRY_RUN" -eq 0 && "$changed" -gt 0 && -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
-  discord_body="**Scanned:** $scanned · **Processed:** $processed · **Changed:** $changed"$'\n'"**Converted:** $total_converted · **Stripped:** $total_stripped · **Removed:** $total_removed · **Renamed:** $total_renamed · **Rescans:** $rescan_count"
-  notify_discord_embed "Subtitle Dedupe Complete" "$discord_body" 3066993
+  _elapsed=$(( SECONDS - _dedupe_start ))
+  _scan_label="full"
+  [[ "$SINCE_MINUTES" -gt 0 ]] && _scan_label="quick (--since $SINCE_MINUTES)"
+
+  _desc="Scanned **$scanned** files · **$processed** processed · **$changed** changed"
+
+  _fields="$(jq -nc \
+    --arg converted "$total_converted" \
+    --arg stripped "$total_stripped" \
+    --arg removed "$total_removed" \
+    --arg renamed "$total_renamed" \
+    --arg rescans "$rescan_count" \
+    --arg elapsed "${_elapsed}s" \
+    '[
+      {name: "🔄 Converted", value: $converted, inline: true},
+      {name: "✂️ Stripped",   value: $stripped,  inline: true},
+      {name: "🗑️ Removed",   value: $removed,   inline: true},
+      {name: "🏷️ Renamed",   value: $renamed,   inline: true},
+      {name: "🔍 Rescans",   value: $rescans,   inline: true},
+      {name: "⏱️ Duration",  value: $elapsed,   inline: true}
+    ]')"
+
+  # Build changed files list for the notification
+  if [[ "${#changed_paths[@]}" -gt 0 ]]; then
+    _file_lines=""
+    _shown=0
+    for _fp in "${changed_paths[@]}"; do
+      _fname="$(basename "$_fp")"
+      _file_lines="${_file_lines}• \`${_fname}\`\n"
+      _shown=$((_shown + 1))
+      [[ "$_shown" -ge 15 ]] && break
+    done
+    [[ "${#changed_paths[@]}" -gt 15 ]] && _file_lines="${_file_lines}…and $(( ${#changed_paths[@]} - 15 )) more"
+    _fields="$(echo "$_fields" | jq --arg files "$(printf '%b' "$_file_lines")" \
+      '. + [{name: "📝 Changed Files", value: $files, inline: false}]')"
+  fi
+
+  notify_discord_embed \
+    "📋 Subtitle Dedupe ($_scan_label)" \
+    "$_desc" \
+    3066993 \
+    "Scanned $scanned · Changed $changed" \
+    "$_fields"
 fi
 
 log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed converted=$total_converted renamed=$total_renamed removed=$total_removed stripped=$total_stripped rescans=$rescan_count"

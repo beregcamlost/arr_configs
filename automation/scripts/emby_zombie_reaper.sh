@@ -142,17 +142,23 @@ if [[ "$RESTART_THRESHOLD" -gt 0 ]] && [[ "$zombie_count" -ge "$RESTART_THRESHOL
         # Discord notification
         if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
           discord_payload="$(jq -nc \
-            --arg title "Emby Auto-Restart" \
-            --arg desc "$(printf "**Restarted Emby to clear %d stale sessions.**\n\nServer will be back in ~30 seconds." "$zombie_count")" \
+            --arg title "🔄 Emby Auto-Restart" \
+            --arg desc "Restarted Emby to clear **$zombie_count** stale sessions" \
+            --argjson zombies "$zombie_count" \
             --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             '{embeds: [{
               title: $title,
               description: $desc,
               color: 3066993,
+              fields: [
+                {name: "👻 Zombies Cleared", value: ($zombies | tostring), inline: true},
+                {name: "⏳ Server Status", value: "Restarting (~30s)", inline: true}
+              ],
               footer: {text: "Emby Zombie Reaper"},
               timestamp: $ts
             }]}')"
-          curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
+          curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+            -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "$discord_payload" >/dev/null 2>&1 || true
         fi
@@ -242,32 +248,57 @@ fi
 # Discord notification — only when there are new zombies
 if [[ "$new_count" -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    title="Emby Zombie Reaper [DRY RUN]"
-    action_word="detected"
+    _zr_title="👻 Emby Zombie Reaper [DRY RUN]"
+    _zr_action="detected"
   else
-    title="Emby Zombie Reaper"
-    action_word="killed"
+    _zr_title="👻 Emby Zombie Reaper"
+    _zr_action="killed"
   fi
 
-  fail_note=""
-  [[ "$kill_failed" -gt 0 ]] && fail_note="\n(${kill_failed} session(s) failed to stop)"
+  _zr_desc="$_zr_action **$new_count** zombie session(s)"
+  [[ "$seen_count" -gt 0 ]] && _zr_desc="${_zr_desc} · **$seen_count** previously seen (skipped)"
 
-  context_note=""
-  [[ "$seen_count" -gt 0 ]] && context_note="\n(${seen_count} previously-seen zombie(s) skipped)"
+  # Build session list for field
+  _zr_sessions="$(printf '%b' "$killed_summary" | while IFS= read -r _line; do
+    [[ -n "$_line" ]] && printf '• `%s`\n' "$_line"
+  done)"
+
+  # Color: red for kills, orange for dry-run
+  _zr_color=15158332
+  [[ "$DRY_RUN" -eq 1 ]] && _zr_color=15105570
+
+  _zr_fields="$(jq -nc \
+    --arg sessions "$_zr_sessions" \
+    --arg new "$new_count" \
+    --arg seen "$seen_count" \
+    --arg failed "$kill_failed" \
+    '[
+      {name: "💀 Sessions", value: $sessions, inline: false},
+      {name: "🆕 New", value: $new, inline: true},
+      {name: "👀 Seen", value: $seen, inline: true},
+      {name: "❌ Failed", value: $failed, inline: true}
+    ]')"
+
+  _zr_footer="Threshold: $(( MAX_IDLE_MIN / 60 ))h idle · Restart at $RESTART_THRESHOLD zombies"
 
   discord_payload="$(jq -nc \
-    --arg title "$title" \
-    --arg desc "$(printf "**%s %d new zombie session(s):**\n\n\`\`\`\n%b\`\`\`%b%b" "$action_word" "$new_count" "$killed_summary" "$fail_note" "$context_note")" \
+    --arg title "$_zr_title" \
+    --arg desc "$_zr_desc" \
+    --argjson color "$_zr_color" \
+    --arg footer "$_zr_footer" \
+    --argjson fields "$_zr_fields" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: $title,
       description: $desc,
-      color: 15158332,
-      footer: {text: "Emby Zombie Reaper"},
+      color: $color,
+      fields: $fields,
+      footer: {text: $footer},
       timestamp: $ts
     }]}')"
 
-  curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
+  curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+    -X POST "$DISCORD_WEBHOOK_URL" \
     -H "Content-Type: application/json" \
     -d "$discord_payload" \
     >/dev/null 2>&1 \

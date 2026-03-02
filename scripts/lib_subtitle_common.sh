@@ -388,24 +388,72 @@ curl_with_retry() {
 # Discord notification helper (generic embed)
 # ---------------------------------------------------------------------------
 
-# notify_discord_embed TITLE DESCRIPTION COLOR
+# notify_discord_embed TITLE DESCRIPTION COLOR [FOOTER] [FIELDS_JSON]
 # COLOR: 3066993=green, 15105570=orange, 15844367=yellow, 3447003=blue
+# FIELDS_JSON: raw jq array e.g. '[{"name":"X","value":"1","inline":true}]'
 notify_discord_embed() {
-  local title="$1" desc="$2" color="${3:-3066993}"
+  local title="$1" desc="$2" color="${3:-3066993}" footer="${4:-}" fields_json="${5:-}"
   [[ -n "${DISCORD_WEBHOOK_URL:-}" ]] || return 0
   local payload
-  payload="$(jq -nc \
-    --arg title "$title" \
-    --arg desc "$desc" \
-    --argjson color "$color" \
-    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-    '{embeds: [{
-      title: $title,
-      description: $desc,
-      color: $color,
-      timestamp: $ts
-    }]}')"
-  curl -sS -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
+  if [[ -n "$fields_json" && -n "$footer" ]]; then
+    payload="$(jq -nc \
+      --arg title "$title" \
+      --arg desc "$desc" \
+      --argjson color "$color" \
+      --arg footer "$footer" \
+      --argjson fields "$fields_json" \
+      --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '{embeds: [{
+        title: $title,
+        description: $desc,
+        color: $color,
+        fields: $fields,
+        footer: {text: $footer},
+        timestamp: $ts
+      }]}')"
+  elif [[ -n "$fields_json" ]]; then
+    payload="$(jq -nc \
+      --arg title "$title" \
+      --arg desc "$desc" \
+      --argjson color "$color" \
+      --argjson fields "$fields_json" \
+      --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '{embeds: [{
+        title: $title,
+        description: $desc,
+        color: $color,
+        fields: $fields,
+        timestamp: $ts
+      }]}')"
+  elif [[ -n "$footer" ]]; then
+    payload="$(jq -nc \
+      --arg title "$title" \
+      --arg desc "$desc" \
+      --argjson color "$color" \
+      --arg footer "$footer" \
+      --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '{embeds: [{
+        title: $title,
+        description: $desc,
+        color: $color,
+        footer: {text: $footer},
+        timestamp: $ts
+      }]}')"
+  else
+    payload="$(jq -nc \
+      --arg title "$title" \
+      --arg desc "$desc" \
+      --argjson color "$color" \
+      --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      '{embeds: [{
+        title: $title,
+        description: $desc,
+        color: $color,
+        timestamp: $ts
+      }]}')"
+  fi
+  curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+    -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
 file_size_bytes() {
