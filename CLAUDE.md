@@ -83,7 +83,9 @@ After editing any canonical script in `automation/scripts/`, always sync the com
 
 ## Discord Notification Standard
 
-All Discord notifications must follow this consistent rich embed format:
+**ALL** Discord notifications **MUST** use rich embeds with fields. No plain-text or description-only embeds. Every notification needs: emoji title, fields (inline for metrics, non-inline for lists), footer, timestamp, and color coding.
+
+Rich embed format:
 
 - **Title:** Emoji + system name + context (e.g., `📺 Streaming Scan`, `📥 Subtitle Auto-Maintain (quick)`)
 - **Description:** Summary stats with emoji prefixes and bold values (e.g., `📥 Muxed: **3** file(s)`)

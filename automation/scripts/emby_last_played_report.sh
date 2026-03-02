@@ -346,25 +346,29 @@ echo "Watched at least once: ${watched_items}"
 echo "Never watched: ${never_items}"
 
 if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
-  discord_payload="$(jq -nc \
+  _report_fields="$(jq -nc \
     --arg total "$total_items" \
     --arg watched "$watched_items" \
     --arg never "$never_items" \
     --arg report "$OUTPUT_CSV" \
+    '[
+      {name:"📊 Total Items",    value:$total,   inline:true},
+      {name:"✅ Watched",        value:$watched, inline:true},
+      {name:"⏸️ Never Watched",  value:$never,   inline:true},
+      {name:"📁 Report",         value:("`" + $report + "`"), inline:false}
+    ]')"
+  discord_payload="$(jq -nc \
+    --argjson fields "$_report_fields" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: "📺 Emby — Weekly Last-Played Report",
-      description: (
-        "📊 **Total items:** " + $total + "\n" +
-        "✅ **Watched:** " + $watched + "\n" +
-        "⏸️ **Never watched:** " + $never + "\n\n" +
-        "📁 `" + $report + "`"
-      ),
       color: 10181046,
+      fields: $fields,
       footer: {text: "Emby Last Played Report"},
       timestamp: $ts
     }]}')"
-  curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
+  curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+    -X POST "$DISCORD_WEBHOOK_URL" \
     -H "Content-Type: application/json" \
     -d "$discord_payload" \
     >/dev/null 2>&1 \

@@ -274,7 +274,6 @@ process_file() {
 
 notify_discord() {
   local status="$1"
-  local details="$2"
   local color
 
   [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
@@ -285,21 +284,46 @@ notify_discord() {
     color=3066993   # green
   fi
 
+  local _desc=""
+  if [[ $DRY_RUN -eq 1 ]]; then
+    _desc="_(dry run — no changes made)_"
+  fi
+
+  local _fields
+  _fields="$(jq -nc \
+    --arg profiles "${#profile_ids[@]}" \
+    --arg files "$FILES_SCANNED" \
+    --arg writes "$WRITES" \
+    --arg skips "$SKIPS" \
+    --arg prunes "$PRUNES" \
+    --arg errors "$ERRORS" \
+    '[
+      {name:"🏷️ Profiles",  value:$profiles, inline:true},
+      {name:"📂 Files",     value:$files,    inline:true},
+      {name:"✅ Writes",    value:$writes,   inline:true},
+      {name:"⏭️ Skips",     value:$skips,    inline:true},
+      {name:"🗑️ Prunes",    value:$prunes,   inline:true},
+      {name:"❌ Errors",    value:$errors,   inline:true}
+    ]')"
+
   local payload
   payload="$(jq -nc \
     --arg title "📦 Batch Extract — $status" \
-    --arg desc "$details" \
+    --arg desc "$_desc" \
     --argjson color "$color" \
+    --argjson fields "$_fields" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: $title,
       description: $desc,
       color: $color,
+      fields: $fields,
       footer: {text: "Batch Subtitle Extractor"},
       timestamp: $ts
     }]}')"
 
-  curl -sS -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
+  curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+    -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------

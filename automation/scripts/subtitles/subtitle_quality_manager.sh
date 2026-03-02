@@ -611,9 +611,22 @@ cmd_mux() {
 
   # Discord notification (non-fatal)
   if [[ "$muxed" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
-    notify_discord_embed "Subtitle Quality Manager — Mux" \
-      "$(printf "Muxed %d subtitle(s) into %d file(s)\n\n%b" "$muxed" "$total_files" "$mux_summary")" \
-      3066993 || log "WARN: Discord notification failed (non-fatal)"
+    local _mux_fields
+    _mux_fields="$(jq -nc \
+      --arg muxed "$muxed" \
+      --arg files "$total_files" \
+      --arg skipped "$skipped" \
+      --arg summary "$(printf '%b' "$mux_summary")" \
+      '[
+        {name: "📥 Muxed",   value: ($muxed + " track(s)"), inline: true},
+        {name: "📁 Files",   value: $files,                 inline: true},
+        {name: "⏭️ Skipped", value: $skipped,               inline: true},
+        {name: "📝 Details", value: $summary,               inline: false}
+      ]')"
+    notify_discord_embed "📥 Subtitle Mux" \
+      "Muxed **$muxed** subtitle(s) into **$total_files** file(s)" \
+      3066993 "Subtitle Quality Manager" "$_mux_fields" \
+      || log "WARN: Discord notification failed (non-fatal)"
   fi
 }
 cmd_strip() {
@@ -730,9 +743,22 @@ cmd_strip() {
 
   # Discord notification (non-fatal)
   if [[ "$stripped" -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
-    notify_discord_embed "Subtitle Quality Manager — Strip" \
-      "$(printf "Stripped %d track(s) (%s) from %d file(s)" "$stripped" "$mode_label" "$total")" \
-      15158332 || log "WARN: Discord notification failed (non-fatal)"
+    local _strip_fields
+    _strip_fields="$(jq -nc \
+      --arg stripped "$stripped" \
+      --arg files "$total" \
+      --arg skipped "$skipped" \
+      --arg mode "$mode_label" \
+      '[
+        {name: "✂️ Stripped", value: ($stripped + " track(s)"), inline: true},
+        {name: "📁 Files",   value: $files,                   inline: true},
+        {name: "⏭️ Skipped", value: $skipped,                 inline: true},
+        {name: "🏷️ Mode",    value: $mode,                    inline: true}
+      ]')"
+    notify_discord_embed "✂️ Subtitle Strip" \
+      "Stripped **$stripped** track(s) from **$total** file(s)" \
+      15158332 "Subtitle Quality Manager" "$_strip_fields" \
+      || log "WARN: Discord notification failed (non-fatal)"
   fi
 }
 
@@ -1344,38 +1370,51 @@ cmd_auto_maintain() {
     local mode="quick"
     [[ "$SINCE_MINUTES" -eq 0 ]] && mode="full"
 
-    # Build file list (basenames, capped at 20)
+    # Build file list (basenames, capped at 15)
     local file_list="" file_count=${#modified_dirs[@]}
     local show_count=$file_count
-    [[ "$show_count" -gt 20 ]] && show_count=20
+    [[ "$show_count" -gt 15 ]] && show_count=15
     for ((fi=0; fi<show_count; fi++)); do
-      file_list+="• $(basename "${modified_dirs[$fi]}")\n"
+      file_list+="• \`$(basename "${modified_dirs[$fi]}")\`\n"
     done
-    [[ "$file_count" -gt 20 ]] && file_list+="+ $((file_count - 20)) more\n"
+    [[ "$file_count" -gt 15 ]] && file_list+="…and $((file_count - 15)) more\n"
 
-    # Build description lines
-    local desc=""
-    [[ "$muxed_files" -gt 0 ]] && desc+="📥 Muxed: ${muxed_files} file(s), ${muxed_tracks} track(s)\n"
-    [[ "$stripped_files" -gt 0 ]] && desc+="🗑 Stripped: ${stripped_files} file(s), ${stripped_tracks} track(s)\n"
-    [[ "$extracted_nonprofile" -gt 0 ]] && desc+="📤 Extracted non-profile: ${extracted_nonprofile} track(s)\n"
-    [[ "$cleaned_nonprofile" -gt 0 ]] && desc+="🧹 Cleaned non-profile: ${cleaned_nonprofile} SRT(s)\n"
-    [[ "$deepl_deferred" -gt 0 ]] && desc+="⏳ DeepL deferred: ${deepl_deferred} (grace period)\n"
-    [[ "$warned" -gt 0 ]] && desc+="⚠️ Manual review: ${warned}\n"
-    [[ "$skipped_converter" -gt 0 ]] && desc+="🔄 Skipped (converter): ${skipped_converter}\n"
-    [[ "$skipped_playback" -gt 0 ]] && desc+="▶️ Skipped (playback): ${skipped_playback}\n"
-    [[ "$skipped_streaming" -gt 0 ]] && desc+="📺 Skipped (streaming): ${skipped_streaming}\n"
-    desc+="🔍 Scanned: ${total_files} files\n"
-    [[ -n "$file_list" ]] && desc+="\n**Files modified:**\n${file_list}"
+    # Build fields JSON
+    local _am_fields="["
+    _am_fields+="{\"name\":\"📥 Muxed\",\"value\":\"${muxed_files} file(s), ${muxed_tracks} track(s)\",\"inline\":true},"
+    _am_fields+="{\"name\":\"✂️ Stripped\",\"value\":\"${stripped_files} file(s), ${stripped_tracks} track(s)\",\"inline\":true},"
+    _am_fields+="{\"name\":\"🔍 Scanned\",\"value\":\"${total_files}\",\"inline\":true}"
+    [[ "$extracted_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"📤 Extracted\",\"value\":\"${extracted_nonprofile} track(s)\",\"inline\":true}"
+    [[ "$cleaned_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"🧹 Cleaned\",\"value\":\"${cleaned_nonprofile} SRT(s)\",\"inline\":true}"
+    [[ "$deepl_deferred" -gt 0 ]] && _am_fields+=",{\"name\":\"⏳ DeepL Deferred\",\"value\":\"${deepl_deferred}\",\"inline\":true}"
+    [[ "$warned" -gt 0 ]] && _am_fields+=",{\"name\":\"⚠️ Manual Review\",\"value\":\"${warned}\",\"inline\":true}"
+    local _skips=""
+    [[ "$skipped_converter" -gt 0 ]] && _skips+="🔄 converter: ${skipped_converter}  "
+    [[ "$skipped_playback" -gt 0 ]] && _skips+="▶️ playback: ${skipped_playback}  "
+    [[ "$skipped_streaming" -gt 0 ]] && _skips+="📺 streaming: ${skipped_streaming}"
+    [[ -n "$_skips" ]] && _am_fields+=",{\"name\":\"⏭️ Skipped\",\"value\":\"${_skips}\",\"inline\":false}"
+    if [[ -n "$file_list" ]]; then
+      local _fl_rendered
+      _fl_rendered="$(printf '%b' "$file_list")"
+      _am_fields+=",$(jq -nc --arg v "$_fl_rendered" '{name: "📝 Modified Files", value: $v, inline: false}')"
+    fi
+    _am_fields+="]"
 
-    local payload desc_rendered
-    desc_rendered="$(printf '%b' "$desc")"
-    payload="$(jq -nc --arg title "Subtitle Auto-Maintain ($mode)" \
-      --arg desc "$desc_rendered" \
+    local _am_desc
+    _am_desc="$(printf '%b' "Scanned **${total_files}** files · **$((muxed_files + stripped_files))** modified")"
+
+    local payload
+    payload="$(jq -nc --arg title "📥 Subtitle Auto-Maintain ($mode)" \
+      --arg desc "$_am_desc" \
+      --argjson fields "$_am_fields" \
+      --arg footer "Scanned $total_files · Mode: $mode" \
       --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
       '{embeds: [{
         title: $title,
         description: $desc,
         color: 3066993,
+        fields: $fields,
+        footer: {text: $footer},
         timestamp: $ts
       }]}')"
 

@@ -266,19 +266,48 @@ for line in open(sys.argv[1], 'r'):
 notify_discord() {
   local title="$1" body="$2"
   [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
+  local _fields
+  _fields="$(jq -nc \
+    --arg scanned "$scanned" \
+    --arg bazarr "$bazarr_attempts" \
+    --arg translations "$translations" \
+    --arg arr "$arr_triggers" \
+    --arg regrab "$regrab_triggers" \
+    '[
+      {name: "🔍 Scanned",       value: $scanned,      inline: true},
+      {name: "🎯 Bazarr",        value: $bazarr,        inline: true},
+      {name: "🌐 Translations",  value: $translations,  inline: true},
+      {name: "🔁 Arr Triggers",  value: $arr,           inline: true},
+      {name: "💀 Regrabs",       value: $regrab,        inline: true}
+    ]')"
+  # Add details if available
+  if [[ "${#ACTION_DETAILS[@]}" -gt 0 ]]; then
+    local _details=""
+    local _shown=0
+    for _d in "${ACTION_DETAILS[@]}"; do
+      _details+="• \`${_d}\`\n"
+      _shown=$((_shown + 1))
+      [[ "$_shown" -ge 15 ]] && break
+    done
+    [[ "${#ACTION_DETAILS[@]}" -gt 15 ]] && _details+="…and $(( ${#ACTION_DETAILS[@]} - 15 )) more"
+    _fields="$(echo "$_fields" | jq --arg v "$(printf '%b' "$_details")" '. + [{name: "📋 Details", value: $v, inline: false}]')"
+  fi
   local payload
   payload="$(jq -nc \
     --arg title "$title" \
     --arg body "$body" \
+    --argjson fields "$_fields" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: $title,
       description: $body,
       color: 3066993,
+      fields: $fields,
       footer: {text: "Bazarr Subtitle Recovery"},
       timestamp: $ts
     }]}')"
-  curl -sS -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
+  curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+    -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
 state_get_col() {

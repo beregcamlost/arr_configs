@@ -376,7 +376,6 @@ notify_discord_daily_status() {
 
   local payload
   payload="$(jq -nc \
-    --arg now "$(date '+%Y-%m-%d %H:%M:%S %Z')" \
     --arg db "$DB_PATH" \
     --arg m "$media_count" \
     --arg e "$eligible_count" \
@@ -394,16 +393,18 @@ notify_discord_daily_status() {
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: "📊 Codec Manager — Daily Status",
-      description: (
-        "🗃️ **Media tracked:** " + $m + " · 📋 **Eligible:** " + $e + " (🔊 audio-only: " + $ao + " · 🎬 video: " + $vt + ")\n\n" +
-        "**All Time**\n" +
-        "✅ Swapped: " + $st + " · ❌ Failed: " + $ft + " · ⚠️ Attempt limited: " + $at + "\n\n" +
-        "**Last 24h**\n" +
-        "✅ Swapped: " + $s24 + " · ❌ Failed: " + $f24 + " · ⚠️ Attempt limited: " + $a24 + " · 🔧 Recovered: " + $rec24 + "\n\n" +
-        "🔄 **Running now:** " + $r + "\n" +
-        "📌 **Last run:** `" + $lr + "`"
-      ),
+      description: ("🗃️ **" + $m + "** tracked · 📋 **" + $e + "** eligible · 🔄 **" + $r + "** running"),
       color: 3447003,
+      fields: [
+        {name: "🔊 Audio-only", value: $ao, inline: true},
+        {name: "🎬 Video",      value: $vt, inline: true},
+        {name: "🔄 Running",    value: $r,  inline: true},
+        {name: "✅ Swapped",    value: ($st + " (24h: " + $s24 + ")"), inline: true},
+        {name: "❌ Failed",     value: ($ft + " (24h: " + $f24 + ")"), inline: true},
+        {name: "⚠️ Attempt Ltd", value: ($at + " (24h: " + $a24 + ")"), inline: true},
+        {name: "🔧 Recovered (24h)", value: $rec24, inline: true},
+        {name: "📌 Last Run",   value: ("`" + $lr + "`"), inline: false}
+      ],
       footer: {text: ("State DB: " + $db)},
       timestamp: $ts
     }]}')"
@@ -440,17 +441,16 @@ notify_discord_attempt_limit() {
     --arg path "$path" \
     --arg attempts "$attempts" \
     --arg max "$max_attempts" \
-    --arg db "$DB_PATH" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: "⚠️ Codec Manager — Attempt Limit Reached",
-      description: (
-        "🆔 **Media ID:** " + $media_id + "\n" +
-        "🔄 **Attempts:** " + $attempts + " / " + $max + "\n" +
-        "📁 `" + $path + "`\n\n" +
-        "_Skipped for now — other files continue processing._"
-      ),
+      description: "Skipped for now — other files continue processing.",
       color: 15105570,
+      fields: [
+        {name: "🆔 Media ID",  value: $media_id, inline: true},
+        {name: "🔄 Attempts",  value: ($attempts + " / " + $max), inline: true},
+        {name: "📁 File",      value: ("`" + $path + "`"), inline: false}
+      ],
       footer: {text: "Codec Manager"},
       timestamp: $ts
     }]}')"

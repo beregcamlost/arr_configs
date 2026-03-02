@@ -1,6 +1,7 @@
 """Discord webhook notifications for translation results."""
 
 import logging
+from datetime import datetime, timezone
 from typing import List
 
 import requests
@@ -14,15 +15,23 @@ BLUE = 3447003
 RED = 15158332
 
 
-def _send_embed(webhook_url, title, description, color, fields=None):
+def _send_embed(
+    webhook_url, title, description, color, fields=None, footer=None
+):
     """Send a Discord embed message."""
     if not webhook_url:
         return
     embed = {"title": title, "description": description, "color": color}
     if fields:
         embed["fields"] = fields
+    embed["footer"] = {"text": footer or "DeepL Translation"}
+    embed["timestamp"] = datetime.now(timezone.utc).isoformat()
     try:
-        requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
+        requests.post(
+            webhook_url,
+            json={"embeds": [embed]},
+            timeout=20,
+        )
     except Exception as e:
         log.warning("Discord webhook failed: %s", e)
 
@@ -44,14 +53,13 @@ def notify_translations(
     if not webhook_url:
         return
 
-    desc_parts = []
-    if translated:
-        desc_parts.append(f"**{len(translated)}** translated ({total_chars:,} chars)")
-    if failed:
-        desc_parts.append(f"**{len(failed)}** failed")
-    desc_parts.append(f"Monthly usage: {monthly_chars:,} / 500,000 chars")
+    fields = [
+        {"name": "✅ Translated", "value": str(len(translated)), "inline": True},
+        {"name": "❌ Failed", "value": str(len(failed)), "inline": True},
+        {"name": "📊 Chars Used", "value": f"{total_chars:,}", "inline": True},
+        {"name": "📈 Monthly", "value": f"{monthly_chars:,} / 500,000", "inline": True},
+    ]
 
-    fields = []
     if translated:
         lines = []
         for t in translated[:10]:
@@ -73,7 +81,7 @@ def notify_translations(
         fields.append({"name": "Failed", "value": "\n".join(lines), "inline": False})
 
     color = GREEN if not failed else ORANGE
-    _send_embed(webhook_url, "DeepL Translation", "\n".join(desc_parts), color, fields)
+    _send_embed(webhook_url, "🌐 DeepL Translation", "", color, fields)
 
 
 def notify_quota_warning(webhook_url: str, chars_used: int, chars_limit: int):
@@ -81,10 +89,15 @@ def notify_quota_warning(webhook_url: str, chars_used: int, chars_limit: int):
     if not webhook_url:
         return
     pct = (chars_used / chars_limit * 100) if chars_limit > 0 else 100
+    fields = [
+        {"name": "📊 Characters Used", "value": f"{chars_used:,}", "inline": True},
+        {"name": "📏 Limit", "value": f"{chars_limit:,}", "inline": True},
+        {"name": "📈 Usage", "value": f"{pct:.0f}%", "inline": True},
+    ]
     _send_embed(
         webhook_url,
-        "DeepL Quota Warning",
-        f"**{chars_used:,}** / {chars_limit:,} characters used ({pct:.0f}%)\n"
+        "⚠️ DeepL Quota Warning",
         "Translation paused until next month.",
         RED,
+        fields,
     )

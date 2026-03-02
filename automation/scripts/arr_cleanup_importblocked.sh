@@ -179,11 +179,9 @@ send_discord_summary() {
     title="🧹 Arr Cleanup — Complete"
   fi
 
-  desc="📊 **Candidates:** $total_candidates"$'\n'
-  desc+="🗑️ **Queue removed:** $total_removed"$'\n'
-  desc+="📡 **Transmission removed:** $transmission_removed"
+  desc="Processed **$total_candidates** candidates"
   if [[ "$DRY_RUN" == true ]]; then
-    desc+=$'\n\n'"_⚠️ Dry run — no changes made_"
+    desc+=" _(dry run — no changes made)_"
   fi
 
   local payload
@@ -191,16 +189,25 @@ send_discord_summary() {
     --arg title "$title" \
     --arg desc "$desc" \
     --argjson color "$color" \
+    --arg candidates "$total_candidates" \
+    --arg removed "$total_removed" \
+    --arg tx_removed "$transmission_removed" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: $title,
       description: $desc,
       color: $color,
+      fields: [
+        {name: "📊 Candidates",           value: $candidates, inline: true},
+        {name: "🗑️ Queue Removed",        value: $removed,    inline: true},
+        {name: "📡 Transmission Removed",  value: $tx_removed, inline: true}
+      ],
       footer: {text: "Import Blocked Cleanup"},
       timestamp: $ts
     }]}')"
 
-  curl -sS -X POST -H 'Content-Type: application/json' \
+  curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+    -X POST -H 'Content-Type: application/json' \
     -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null || true
 }
 
