@@ -51,6 +51,18 @@ Conversion policy: H.264 CRF 19, AAC 192k stereo 48kHz. Skips UHD/4K/HDR. Safety
 
 Discord notifications: `DISCORD_WEBHOOK_AUDIT_DONE` (audit complete with progress bar, conversion stats, rate/ETA) and `DISCORD_WEBHOOK_STATUS` (daily status). Helper functions: `comma_fmt()`, `progress_bar()` (uses `printf '\uNNNN'` — never `tr` for multi-byte UTF-8).
 
+### Streaming checker (`automation/scripts/streaming/`)
+
+Python CLI (`streaming_checker.py`) cross-referencing library against TMDB streaming providers (Netflix, Disney+). State DB at streaming state path.
+
+Subcommands: `scan`, `report`, `confirm-delete`, `check-seasons`, `stale-cleanup`, `summary`, `providers`.
+
+**Two-tier cleanup (cron):**
+- **Tier 1 (weekly Sunday 6 AM):** `check-seasons` + `confirm-delete --yes` — deletes all items available on streaming (no play-day filter). `check-seasons` auto-tags `keep-local` for series with seasons not on the provider.
+- **Tier 2 (monthly 1st 7 AM):** `stale-cleanup --yes --no-play-days 365 --min-size-gb 3.0` — scans entire library, auto-deletes >3 GB items not played in 1 year, Discord reports the rest. Excludes keep-local and active streaming matches.
+
+Both tiers exclude keep-local tagged items and verify against Emby active playback before deleting.
+
 ### Supporting scripts
 
 - `library_subtitle_dedupe.sh` — removes duplicate/low-quality external subtitles
