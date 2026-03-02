@@ -38,7 +38,12 @@ from streaming.db import (
     update_streaming_seasons,
     upsert_streaming_item,
 )
-from streaming.discord import format_size, notify_deletion, notify_scan_results
+from streaming.discord import (
+    format_size,
+    notify_deletion,
+    notify_scan_results,
+    notify_stale_cleanup,
+)
 from streaming.emby_client import get_last_played_map, is_playing, refresh_library
 from streaming.streaming_api_client import get_season_availability
 from streaming.tmdb_client import batch_check
@@ -694,6 +699,191 @@ def summary(json_out, db_path):
         for h in history:
             click.echo(f"    {h['timestamp']} — {h['matches_found']} matches, "
                        f"+{h['newly_streaming']} new, -{h['left_streaming']} left")
+
+
+@cli.command("stale-cleanup")
+@click.option("--no-play-days", default=365, type=int,
+              help="Delete items not played in this many days (default: 365)")
+@click.option("--min-size-gb", default=3.0, type=float,
+              help="Auto-delete items larger than this (default: 3.0 GB)")
+@click.option("--yes", is_flag=True, required=True, help="Required safety gate")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without deleting")
+@click.option("--verbose", is_flag=True, help="Enable debug logging")
+@click.option("--db-path", default=None, help="Path to streaming state database")
+def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path):
+    """Delete stale library items not played in N days.
+
+    Scans ALL library items (not just streaming matches). Auto-deletes items
+    above the size threshold and sends a Discord report for everything.
+    Excludes keep-local tagged items and active streaming matches.
+    """
+    _setup_logging(verbose)
+    cfg = load_config(dry_run=dry_run, verbose=verbose, db_path=db_path)
+
+    if not cfg.emby_api_key:
+        click.echo("Error: EMBY_API_KEY is required for stale-cleanup")
+        sys.exit(1)
+
+    init_db(cfg.db_path)
+
+    # 1. Fetch all library items
+    log.info("Fetching movies from Radarr...")
+    movies = fetch_movies(cfg.radarr_url, cfg.radarr_key)
+    log.info("Fetching series from Sonarr...")
+    series = fetch_series(cfg.sonarr_url, cfg.sonarr_key)
+
+    all_items = [m for m in movies if m.get("has_file")] + list(series)
+    log.info("Library: %d movies + %d series = %d items",
+             len(movies), len(series), len(all_items))
+
+    # 2. Get Emby play history
+    log.info("Fetching Emby play history...")
+    try:
+        play_map = get_last_played_map(cfg.emby_url, cfg.emby_api_key)
+    except Exception as e:
+        log.error("Failed to fetch Emby play history: %s", e)
+        sys.exit(1)
+    log.info("Play history: %d paths with playback data", len(play_map))
+
+    # 3. Build exclusion sets
+    # a) Keep-local tags
+    keep_local_set = _get_keep_local_set(cfg)
+    log.info("Keep-local items: %d", len(keep_local_set))
+
+    # b) Active streaming matches (handled by tier 1 weekly cleanup)
+    streaming_paths = set()
+    try:
+        active_streaming = get_active_matches_filtered(cfg.db_path)
+        for item in active_streaming:
+            if item.get("path"):
+                streaming_paths.add(item["path"])
+    except Exception:
+        log.debug("Could not load streaming matches for exclusion")
+    log.info("Active streaming matches: %d (excluded)", len(streaming_paths))
+
+    # 4. Filter to stale items
+    from datetime import datetime, timezone
+    cutoff = datetime.now(timezone.utc)
+    min_size_bytes = int(min_size_gb * 1_000_000_000)
+
+    stale_items = []
+    for item in all_items:
+        # Exclude keep-local
+        if (item["arr_id"], item["media_type"]) in keep_local_set:
+            continue
+        # Exclude active streaming matches
+        if item.get("path") in streaming_paths:
+            continue
+        # Check play history
+        path = item.get("path", "")
+        last_played = play_map.get(path)
+        if last_played:
+            try:
+                played_dt = datetime.fromisoformat(last_played.replace("Z", "+00:00"))
+                days_ago = (cutoff - played_dt).days
+                if days_ago < no_play_days:
+                    continue  # played recently enough
+                item["_days_ago"] = days_ago
+            except (ValueError, TypeError):
+                item["_days_ago"] = None
+        else:
+            item["_days_ago"] = None  # never played
+
+        stale_items.append(item)
+
+    log.info("Stale items (not played in %dd): %d", no_play_days, len(stale_items))
+
+    if not stale_items:
+        click.echo(f"No items found that haven't been played in {no_play_days} days.")
+        return
+
+    # 5. Split into auto-delete (> threshold) and report-only (< threshold)
+    to_delete = []
+    to_report = []
+    for item in stale_items:
+        size = item.get("size_bytes", 0) or 0
+        if size > min_size_bytes:
+            to_delete.append(item)
+        else:
+            to_report.append(item)
+
+    click.echo(f"\nStale items (not played in {no_play_days}d): {len(stale_items)}")
+    click.echo(f"  Auto-delete (>{min_size_gb} GB): {len(to_delete)}")
+    click.echo(f"  Report only (<={min_size_gb} GB): {len(to_report)}")
+
+    if to_delete:
+        total_delete_size = sum(it.get("size_bytes", 0) or 0 for it in to_delete)
+        click.echo(f"\nWill delete {len(to_delete)} items ({format_size(total_delete_size)}):")
+        for it in sorted(to_delete, key=lambda x: x.get("size_bytes", 0) or 0, reverse=True):
+            size = format_size(it.get("size_bytes", 0) or 0)
+            days = it.get("_days_ago")
+            play_label = f"played {days}d ago" if days else "never played"
+            click.echo(f"  - {it['title']} ({it.get('year', '?')}) [{it.get('library', '?')}] {size} [{play_label}]")
+
+    if to_report:
+        click.echo(f"\nReport only ({len(to_report)} items):")
+        for it in sorted(to_report, key=lambda x: x.get("size_bytes", 0) or 0, reverse=True):
+            size = format_size(it.get("size_bytes", 0) or 0)
+            days = it.get("_days_ago")
+            play_label = f"played {days}d ago" if days else "never played"
+            click.echo(f"  - {it['title']} ({it.get('year', '?')}) [{it.get('library', '?')}] {size} [{play_label}]")
+
+    if dry_run:
+        click.echo("\n(dry-run — no deletions performed)")
+        return
+
+    # 6. Delete items above threshold
+    keep_local_radarr = ensure_tag(cfg.radarr_url, cfg.radarr_key, "keep-local")
+    keep_local_sonarr = ensure_tag(cfg.sonarr_url, cfg.sonarr_key, "keep-local")
+
+    deleted_items = []
+    freed_bytes = 0
+
+    for item in to_delete:
+        if item["media_type"] == "movie":
+            base_url, api_key, app = cfg.radarr_url, cfg.radarr_key, "movie"
+            keep_tag = keep_local_radarr
+        else:
+            base_url, api_key, app = cfg.sonarr_url, cfg.sonarr_key, "series"
+            keep_tag = keep_local_sonarr
+
+        # Re-fetch to verify keep-local
+        current = get_item(base_url, api_key, app, item["arr_id"])
+        if current is None:
+            log.warning("Item %s not found in arr, skipping", item["title"])
+            continue
+        if keep_tag in current.get("tags", []):
+            log.info("Skipping %s — has keep-local tag", item["title"])
+            continue
+
+        # Check if playing in Emby
+        if item.get("path"):
+            if is_playing(cfg.emby_url, cfg.emby_api_key, item["path"]):
+                log.info("Skipping %s — currently being played", item["title"])
+                continue
+
+        log.info("Deleting %s (%s/%d)", item["title"], app, item["arr_id"])
+        delete_item(base_url, api_key, app, item["arr_id"])
+        deleted_items.append(item)
+        freed_bytes += item.get("size_bytes", 0) or 0
+
+    # 7. Refresh Emby
+    if deleted_items:
+        try:
+            refresh_library(cfg.emby_url, cfg.emby_api_key)
+        except Exception as e:
+            log.warning("Emby refresh failed: %s", e)
+
+    # 8. Discord notification (always send if there are stale items)
+    if cfg.discord_webhook_url and (deleted_items or to_report):
+        notify_stale_cleanup(
+            cfg.discord_webhook_url, deleted_items, to_report,
+            freed_bytes, no_play_days, min_size_gb,
+        )
+
+    click.echo(f"\nDeleted {len(deleted_items)} items, freed {format_size(freed_bytes)}")
+    if to_report:
+        click.echo(f"Reported {len(to_report)} items below {min_size_gb} GB threshold")
 
 
 @cli.command()

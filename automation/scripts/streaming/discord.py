@@ -233,3 +233,83 @@ def notify_deletion(webhook_url, deleted_items, total_freed_bytes):
         fields,
         footer=f"Freed {format_size(total_freed_bytes)} total",
     )
+
+
+def _chunk_item_lines(lines, field_label):
+    """Split item lines into multiple fields respecting Discord's 1024-char limit."""
+    fields = []
+    chunk = []
+    chunk_len = 0
+    chunk_idx = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if chunk and chunk_len + line_len > 1000:
+            label = field_label if chunk_idx == 0 else "\u2800"
+            fields.append({"name": label, "value": "\n".join(chunk), "inline": False})
+            chunk = []
+            chunk_len = 0
+            chunk_idx += 1
+        chunk.append(line)
+        chunk_len += line_len
+    if chunk:
+        label = field_label if chunk_idx == 0 else "\u2800"
+        fields.append({"name": label, "value": "\n".join(chunk), "inline": False})
+    return fields
+
+
+def notify_stale_cleanup(webhook_url, deleted_items, kept_items,
+                         freed_bytes, no_play_days, min_size_gb):
+    """Send stale library cleanup notification to Discord.
+
+    Args:
+        deleted_items: items that were auto-deleted (> min_size_gb)
+        kept_items: items that are stale but below size threshold (report only)
+        freed_bytes: total bytes freed
+        no_play_days: the N-day threshold used
+        min_size_gb: the size threshold for auto-deletion
+    """
+    if not deleted_items and not kept_items:
+        return
+
+    total_stale = len(deleted_items) + len(kept_items)
+    kept_size = sum(it.get("size_bytes", 0) or 0 for it in kept_items)
+
+    desc = (
+        f"Found **{total_stale}** items not played in **{no_play_days}** days"
+    )
+
+    fields = [
+        {"name": "🗑 Auto-Deleted", "value": f"{len(deleted_items)} (>{min_size_gb} GB)", "inline": True},
+        {"name": "📋 Report Only", "value": f"{len(kept_items)} (<={min_size_gb} GB)", "inline": True},
+        {"name": "💾 Space Freed", "value": format_size(freed_bytes), "inline": True},
+    ]
+    if kept_items:
+        fields.append(
+            {"name": "📦 Kept Size", "value": format_size(kept_size), "inline": True},
+        )
+
+    # Deleted items list
+    if deleted_items:
+        lines = []
+        for it in sorted(deleted_items, key=lambda x: x.get("size_bytes", 0) or 0, reverse=True):
+            size = format_size(it.get("size_bytes", 0) or 0)
+            lines.append(f"• `{it['title']}` ({it.get('year', '?')}) [{it.get('library', '?')}] {size}")
+        fields.extend(_chunk_item_lines(lines, "🗑 Deleted"))
+
+    # Kept items list (report only)
+    if kept_items:
+        lines = []
+        for it in sorted(kept_items, key=lambda x: x.get("size_bytes", 0) or 0, reverse=True):
+            size = format_size(it.get("size_bytes", 0) or 0)
+            lines.append(f"• `{it['title']}` ({it.get('year', '?')}) [{it.get('library', '?')}] {size}")
+        fields.extend(_chunk_item_lines(lines, "📋 Kept (below threshold)"))
+
+    color = RED if deleted_items else YELLOW
+    send_embed(
+        webhook_url,
+        "🧹 Library Stale Cleanup",
+        desc,
+        color,
+        fields,
+        footer=f"Threshold: {no_play_days}d no play, >{min_size_gb} GB auto-delete",
+    )
