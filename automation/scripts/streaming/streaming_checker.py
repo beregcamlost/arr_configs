@@ -10,6 +10,7 @@ import json
 import logging
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 import click
 
@@ -23,18 +24,21 @@ from streaming.arr_client import (
     get_tag_id,
     remove_tag_from_item,
 )
-from streaming.config import PROVIDER_MAP, load_config
+from streaming.config import PROVIDER_MAP, Config, load_config
 from streaming.db import (
+    flag_stale_item,
     get_active_matches,
     get_active_matches_filtered,
     get_left_streaming,
     get_scan_history,
+    get_stale_flagged_items,
     get_summary_stats,
     init_db,
     mark_deleted,
     mark_left_streaming,
     record_scan,
     touch_keep_local_items,
+    unflag_stale_item,
     update_streaming_seasons,
     upsert_streaming_item,
 )
@@ -43,6 +47,7 @@ from streaming.discord import (
     notify_deletion,
     notify_scan_results,
     notify_stale_cleanup,
+    notify_stale_flag,
 )
 from streaming.emby_client import get_last_played_map, is_playing, refresh_library
 from streaming.streaming_api_client import get_season_availability
@@ -984,6 +989,171 @@ def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path):
     click.echo(f"\nDeleted {len(deleted_items)} items, freed {format_size(freed_bytes)}")
     if to_report:
         click.echo(f"Reported {len(to_report)} items below {min_size_gb} GB threshold")
+
+
+@cli.command("stale-flag")
+@click.option("--no-play-days", default=90, type=int, help="Days without play to consider stale")
+@click.option("--dry-run", is_flag=True, help="Show what would be flagged")
+@click.option("--db-path", default=None, help="Override DB path")
+def stale_flag_cmd(no_play_days, dry_run, db_path):
+    """Tier 1.5: Flag items unwatched N days that are on streaming."""
+    cfg = load_config(dry_run=dry_run, db_path=db_path)
+    init_db(cfg.db_path)
+
+    if not cfg.emby_api_key:
+        click.echo("Error: EMBY_API_KEY required for play history")
+        raise SystemExit(1)
+
+    play_map = get_last_played_map(cfg.emby_url, cfg.emby_api_key)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=no_play_days)
+
+    keep_local_set = _get_keep_local_set(cfg)
+    active = get_active_matches_filtered(cfg.db_path)
+
+    seen = set()
+    streaming_items = []
+    for item in active:
+        key = (item["arr_id"], item["media_type"])
+        if key in seen or key in keep_local_set:
+            continue
+        seen.add(key)
+        if _is_dual_audio_keep_local(item.get("path")):
+            continue
+        streaming_items.append(item)
+
+    newly_flagged = []
+    unflagged = []
+
+    for item in streaming_items:
+        path = item.get("path", "")
+        last_play = play_map.get(path)
+
+        if last_play:
+            play_dt = datetime.fromisoformat(last_play.replace("Z", "+00:00"))
+            is_stale = play_dt < cutoff
+        else:
+            is_stale = True
+
+        if is_stale:
+            if not dry_run:
+                count = flag_stale_item(cfg.db_path, item["tmdb_id"], item["media_type"])
+                if count > 0:
+                    newly_flagged.append(item)
+            else:
+                newly_flagged.append(item)
+        elif item.get("stale_flagged_at"):
+            if not dry_run:
+                unflag_stale_item(cfg.db_path, item["tmdb_id"], item["media_type"])
+            unflagged.append(item)
+
+    if not dry_run:
+        all_flagged = get_stale_flagged_items(cfg.db_path)
+        active_tmdb = {(i["tmdb_id"], i["media_type"]) for i in active}
+        for fi in all_flagged:
+            if (fi["tmdb_id"], fi["media_type"]) not in active_tmdb:
+                unflag_stale_item(cfg.db_path, fi["tmdb_id"], fi["media_type"])
+                unflagged.append(fi)
+
+    prefix = "[DRY-RUN] " if dry_run else ""
+    click.echo(f"{prefix}Flagged: {len(newly_flagged)}, Unflagged: {len(unflagged)}")
+
+    if cfg.discord_webhook_url and not dry_run:
+        notify_stale_flag(cfg.discord_webhook_url, newly_flagged, unflagged)
+
+
+@cli.command("stale-delete")
+@click.option("--grace-days", default=15, type=int, help="Days after flagging before deletion")
+@click.option("--yes", is_flag=True, help="Actually delete (otherwise dry-run)")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted")
+@click.option("--db-path", default=None, help="Override DB path")
+def stale_delete_cmd(grace_days, yes, dry_run, db_path):
+    """Tier 1.5: Delete items flagged stale for grace-days+ that are still unwatched."""
+    cfg = load_config(db_path=db_path)
+    init_db(cfg.db_path)
+
+    if not cfg.emby_api_key:
+        click.echo("Error: EMBY_API_KEY required")
+        raise SystemExit(1)
+
+    flagged = get_stale_flagged_items(cfg.db_path)
+    if not flagged:
+        click.echo("No stale-flagged items found.")
+        return
+
+    grace_cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
+    play_map = get_last_played_map(cfg.emby_url, cfg.emby_api_key)
+    keep_local_set = _get_keep_local_set(cfg)
+
+    seen = {}
+    for item in flagged:
+        key = (item["arr_id"], item["media_type"])
+        flag_dt = datetime.fromisoformat(item["stale_flagged_at"].replace("Z", "+00:00"))
+        if flag_dt >= grace_cutoff:
+            continue
+        if key in keep_local_set:
+            continue
+        if _is_dual_audio_keep_local(item.get("path")):
+            continue
+        path = item.get("path", "")
+        last_play = play_map.get(path)
+        if last_play:
+            play_dt = datetime.fromisoformat(last_play.replace("Z", "+00:00"))
+            if play_dt > flag_dt:
+                continue
+        if key not in seen:
+            seen[key] = item
+
+    to_delete = list(seen.values())
+    click.echo(f"Eligible for deletion: {len(to_delete)}")
+    for item in to_delete:
+        click.echo(f"  {item['title']} ({item.get('year', '?')}) [{item['media_type']}]")
+
+    if dry_run or not yes:
+        click.echo(f"Deleted: 0 (dry-run)")
+        return
+
+    kl_radarr = None
+    kl_sonarr = None
+    try:
+        kl_radarr = get_tag_id(cfg.radarr_url, cfg.radarr_key, "keep-local")
+    except Exception:
+        pass
+    try:
+        kl_sonarr = get_tag_id(cfg.sonarr_url, cfg.sonarr_key, "keep-local")
+    except Exception:
+        pass
+
+    deleted_items = []
+    for item in to_delete:
+        arr_id = item["arr_id"]
+        media_type = item["media_type"]
+        if media_type == "movie":
+            base_url, api_key, app = cfg.radarr_url, cfg.radarr_key, "radarr"
+            kl_tag = kl_radarr
+        else:
+            base_url, api_key, app = cfg.sonarr_url, cfg.sonarr_key, "sonarr"
+            kl_tag = kl_sonarr
+
+        current = get_item(base_url, api_key, app, arr_id)
+        if not current:
+            continue
+        if kl_tag and kl_tag in current.get("tags", []):
+            continue
+        if is_playing(cfg.emby_url, cfg.emby_api_key, item.get("path", "")):
+            continue
+
+        delete_item(base_url, api_key, app, arr_id)
+        mark_deleted(cfg.db_path, item["tmdb_id"], media_type)
+        deleted_items.append(item)
+
+    total_freed = sum(i.get("size_bytes", 0) for i in deleted_items)
+    click.echo(f"Deleted: {len(deleted_items)}, freed: {total_freed / 1_073_741_824:.1f} GB")
+
+    if deleted_items:
+        if cfg.emby_url and cfg.emby_api_key:
+            refresh_library(cfg.emby_url, cfg.emby_api_key)
+        if cfg.discord_webhook_url:
+            notify_deletion(cfg.discord_webhook_url, deleted_items, total_freed)
 
 
 @cli.command()

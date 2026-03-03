@@ -376,3 +376,162 @@ class TestReportEnhanced:
         # Toy Story should appear (never played), Fight Club should not (played recently)
         assert "Toy Story" in result.output
         assert "never played" in result.output
+
+
+class TestStaleFlag:
+    @patch("streaming.streaming_checker.notify_stale_flag")
+    @patch("streaming.streaming_checker.get_last_played_map", return_value={})
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker.fetch_series", return_value=MOCK_SERIES)
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_stale_flag_never_played_on_streaming(
+        self, mock_movies, mock_series, mock_kl, mock_play, mock_notify,
+        runner, env_config, tmp_path,
+    ):
+        """Items on streaming + never played → flagged."""
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(
+            db, tmdb_id=550, media_type="movie", provider_id=8,
+            provider_name="Netflix", title="Fight Club", year=1999,
+            arr_id=1, library="movies", size_bytes=5_000_000_000,
+            path="/media/movies/Fight Club (1999)",
+        )
+        result = runner.invoke(cli, ["stale-flag", "--no-play-days", "90", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Flagged: 1" in result.output
+
+    @patch("streaming.streaming_checker.notify_stale_flag")
+    @patch("streaming.streaming_checker.get_last_played_map")
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker.fetch_series", return_value=MOCK_SERIES)
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_stale_flag_recently_played_not_flagged(
+        self, mock_movies, mock_series, mock_kl, mock_play, mock_notify,
+        runner, env_config, tmp_path,
+    ):
+        """Items played recently → NOT flagged."""
+        from datetime import datetime, timezone
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(
+            db, tmdb_id=550, media_type="movie", provider_id=8,
+            provider_name="Netflix", title="Fight Club", year=1999,
+            arr_id=1, library="movies", size_bytes=5_000_000_000,
+            path="/media/movies/Fight Club (1999)",
+        )
+        mock_play.return_value = {
+            "/media/movies/Fight Club (1999)": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        result = runner.invoke(cli, ["stale-flag", "--no-play-days", "90", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Flagged: 0" in result.output
+
+    @patch("streaming.streaming_checker.notify_stale_flag")
+    @patch("streaming.streaming_checker.get_last_played_map", return_value={})
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker.fetch_series", return_value=MOCK_SERIES)
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_stale_flag_not_on_streaming_not_flagged(
+        self, mock_movies, mock_series, mock_kl, mock_play, mock_notify,
+        runner, env_config, tmp_path,
+    ):
+        """Items NOT on streaming → NOT flagged even if stale."""
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db
+        init_db(db)
+        result = runner.invoke(cli, ["stale-flag", "--no-play-days", "90", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Flagged: 0" in result.output
+
+    @patch("streaming.streaming_checker.notify_stale_flag")
+    @patch("streaming.streaming_checker.get_last_played_map")
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker.fetch_series", return_value=MOCK_SERIES)
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_stale_flag_unflag_watched_item(
+        self, mock_movies, mock_series, mock_kl, mock_play, mock_notify,
+        runner, env_config, tmp_path,
+    ):
+        """Previously flagged item that was watched → unflagged."""
+        from datetime import datetime, timezone
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item, flag_stale_item
+        init_db(db)
+        upsert_streaming_item(
+            db, tmdb_id=550, media_type="movie", provider_id=8,
+            provider_name="Netflix", title="Fight Club", year=1999,
+            arr_id=1, library="movies", size_bytes=5_000_000_000,
+            path="/media/movies/Fight Club (1999)",
+        )
+        flag_stale_item(db, tmdb_id=550, media_type="movie")
+        mock_play.return_value = {
+            "/media/movies/Fight Club (1999)": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        result = runner.invoke(cli, ["stale-flag", "--no-play-days", "90", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Unflagged: 1" in result.output
+
+
+class TestStaleDelete:
+    @patch("streaming.streaming_checker.refresh_library")
+    @patch("streaming.streaming_checker.notify_deletion")
+    @patch("streaming.streaming_checker.is_playing", return_value=False)
+    @patch("streaming.streaming_checker.delete_item")
+    @patch("streaming.streaming_checker.get_item")
+    @patch("streaming.streaming_checker.get_last_played_map", return_value={})
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_stale_delete_after_grace_period(
+        self, mock_movies, mock_series, mock_kl, mock_play, mock_get_item,
+        mock_delete, mock_playing, mock_notify, mock_refresh,
+        runner, env_config, tmp_path,
+    ):
+        """Items flagged >15 days ago + still stale → deleted."""
+        from datetime import datetime, timezone, timedelta
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item
+        init_db(db)
+        upsert_streaming_item(
+            db, tmdb_id=550, media_type="movie", provider_id=8,
+            provider_name="Netflix", title="Fight Club", year=1999,
+            arr_id=1, library="movies", size_bytes=5_000_000_000,
+            path="/media/movies/Fight Club (1999)",
+        )
+        import sqlite3
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE streaming_status SET stale_flagged_at = ?", (old_ts,))
+        conn.commit()
+        conn.close()
+        mock_get_item.return_value = {"id": 1, "tags": [], "title": "Fight Club"}
+        result = runner.invoke(cli, ["stale-delete", "--grace-days", "15", "--yes", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        mock_delete.assert_called_once()
+
+    @patch("streaming.streaming_checker.notify_deletion")
+    @patch("streaming.streaming_checker.get_last_played_map", return_value={})
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_stale_delete_within_grace_period_skipped(
+        self, mock_movies, mock_series, mock_kl, mock_play, mock_notify,
+        runner, env_config, tmp_path,
+    ):
+        """Items flagged <15 days ago → NOT deleted."""
+        db = str(tmp_path / "test.db")
+        from streaming.db import init_db, upsert_streaming_item, flag_stale_item
+        init_db(db)
+        upsert_streaming_item(
+            db, tmdb_id=550, media_type="movie", provider_id=8,
+            provider_name="Netflix", title="Fight Club", year=1999,
+            arr_id=1, library="movies", size_bytes=5_000_000_000,
+            path="/media/movies/Fight Club (1999)",
+        )
+        flag_stale_item(db, tmdb_id=550, media_type="movie")
+        result = runner.invoke(cli, ["stale-delete", "--grace-days", "15", "--yes", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Deleted: 0" in result.output
