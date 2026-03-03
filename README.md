@@ -32,9 +32,9 @@
 [![TMDB](https://img.shields.io/badge/TMDB-✓-01D277?style=flat-square&logo=themoviedatabase&logoColor=white)](https://www.themoviedatabase.org)
 [![Transmission](https://img.shields.io/badge/Transmission-✓-C00?style=flat-square)](https://transmissionbt.com)
 
-[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-14%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/tests-174%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--03--02-informational?style=flat-square&logo=calendar&logoColor=white)]()
+[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-16%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
+[![Tests](https://img.shields.io/badge/tests-189%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
+[![Updated](https://img.shields.io/badge/last%20updated-2026--03--03-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -161,7 +161,7 @@ graph TB
 |--------|----------|-------|-----------|---------------|
 | 🎬 Subtitle Manager | Bash | — | 5 min / 10 min / daily | ✅ Discord |
 | 🔄 Codec Manager | Bash | — | 15 min / 3 AM daily | ✅ Discord |
-| 📺 Streaming Checker | Python | 134 ✅ | Weekly / Monthly | ✅ Discord |
+| 📺 Streaming Checker | Python | 149 ✅ | Weekly / Monthly | ✅ Discord |
 | 🌐 DeepL Translator | Python | 40 ✅ | 30 min | ✅ Discord |
 | 👻 Zombie Reaper | Bash | — | 2 min | ✅ Discord |
 | 🧹 Arr Cleanup | Bash | — | 30 min | — |
@@ -172,14 +172,14 @@ graph TB
 
 | Metric | Value |
 |--------|-------|
-| 📜 Total cron jobs | 14 |
-| 🧪 Total tests | 174 passing |
+| 📜 Total cron jobs | 16 |
+| 🧪 Total tests | 189 passing |
 | 🌐 DeepL quota | 500K chars/month (free tier) |
 | 💾 State databases | 4 (codec, streaming, translation, bazarr) |
 | 🔌 External APIs | 6 (Sonarr, Radarr, Bazarr, Emby, TMDB, DeepL) |
 | 📡 Discord webhooks | All systems |
 | 🎞️ Target codec | H.264 CRF19 + AAC 192k stereo |
-| ⏭️ Skips | UHD / 4K / HDR / streaming candidates |
+| ⏭️ Skips | UHD / 4K / HDR / streaming candidates / stale candidates |
 
 </details>
 
@@ -297,6 +297,7 @@ graph LR
 |-----------|--------|
 | UHD / 4K / HDR | Quality preservation |
 | Streaming candidates | No point converting content we might delete |
+| Stale candidates | Flagged 90d+ unwatched + on streaming (tier 1.5) |
 | Already H.264 + AAC | Nothing to do |
 | Currently being converted | Concurrency guard |
 
@@ -329,6 +330,9 @@ streaming scan              # Refresh availability from APIs
 streaming report            # Show what's available on streaming
 streaming confirm-delete    # Mark items for deletion
 streaming check-seasons     # Per-season streaming breakdown
+streaming stale-flag        # Tier 1.5: flag 90d+ unwatched items on streaming
+streaming stale-delete      # Tier 1.5: delete flagged items after 15d grace
+streaming stale-cleanup     # Tier 2: yearly stale cleanup
 streaming summary           # Per-provider and per-library stats
 streaming providers         # List known providers
 ```
@@ -353,10 +357,12 @@ flowchart TD
 ### 🧪 Test Coverage
 
 ```
-134 tests passing
+149 tests passing
 ├── 96  streaming core tests
 ├── 33  keep-local filtering tests
-└──  5  miscellaneous utility tests
+├──  8  tier 1.5 stale flag/delete tests
+├──  2  stale Discord notification tests
+└── 10  miscellaneous utility tests
 ```
 
 ---
@@ -492,7 +498,9 @@ gantt
 | `*/30 * * * *` | 🌐 DeepL translation | Translation | `--since 60` min |
 | `*/30 * * * *` | 🧹 Arr import-blocked cleanup | Cleanup | — |
 | `0 5 * * 0` | 📺 Streaming availability scan | Streaming | Weekly, Sunday 5 AM |
-| `0 0 1 * *` | 📺 Streaming cleanup (never-played) | Streaming | Monthly, 1st |
+| `30 5 * * 0` | 📺 Tier 1.5: stale flag (90d unwatched) | Streaming | Weekly, Sunday 5:30 AM |
+| `30 6 * * 0` | 📺 Tier 1.5: stale delete (15d grace) | Streaming | Weekly, Sunday 6:30 AM |
+| `0 7 1 * *` | 📺 Tier 2: stale cleanup (365d, >3GB) | Streaming | Monthly, 1st 7 AM |
 | `2,32 * * * *` | 👻 Emby zombie reaper | Emby | Staggered |
 | `3 5 * * 2` | 👻 Emby weekly restart | Emby | Tuesday 05:03 UTC |
 | `35 3 * * 2` | 📊 Emby last played report | Reports | Tuesday 03:35 UTC |

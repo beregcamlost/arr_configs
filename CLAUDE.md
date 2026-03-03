@@ -55,13 +55,14 @@ Discord notifications: `DISCORD_WEBHOOK_AUDIT_DONE` (audit complete with progres
 
 Python CLI (`streaming_checker.py`) cross-referencing library against TMDB streaming providers (Netflix, Disney+). State DB at streaming state path.
 
-Subcommands: `scan`, `report`, `confirm-delete`, `check-seasons`, `stale-cleanup`, `summary`, `providers`.
+Subcommands: `scan`, `report`, `confirm-delete`, `check-seasons`, `stale-flag`, `stale-delete`, `stale-cleanup`, `summary`, `providers`.
 
-**Two-tier cleanup (cron):**
-- **Tier 1 (weekly Sunday 6 AM):** `check-seasons` + `confirm-delete --yes` — deletes all items available on streaming (no play-day filter). `check-seasons` auto-tags `keep-local` for series with seasons not on the provider.
+**Three-tier cleanup (cron):**
+- **Tier 1 (weekly Sunday 6 AM):** `check-seasons` + `confirm-delete --yes` — deletes all items available on streaming (no play-day filter). `check-seasons` auto-tags `keep-local` for series with seasons not on the provider. **Currently disabled.**
+- **Tier 1.5 (weekly Sunday 5:30+6:30 AM):** `stale-flag --no-play-days 90` flags items unwatched 90+ days that are on streaming. `stale-delete --grace-days 15 --yes` deletes items flagged 15+ days ago that are still unwatched and still on streaming. Also adds `stale_candidate` skip reason to codec manager (skips conversion of flagged items). Safety: aborts if keep-local API check fails.
 - **Tier 2 (monthly 1st 7 AM):** `stale-cleanup --yes --no-play-days 365 --min-size-gb 3.0` — scans entire library, auto-deletes >3 GB items not played in 1 year, Discord reports the rest. Excludes keep-local and active streaming matches.
 
-Both tiers exclude keep-local tagged items, dual-audio items (jpn+spa or eng+spa), and verify against Emby active playback before deleting.
+All tiers exclude keep-local tagged items, dual-audio items (jpn+spa or eng+spa), and verify against Emby active playback before deleting.
 
 **Dual-audio auto-protect rule:** Any item with dual audio tracks (Japanese+Spanish or English+Spanish) is automatically tagged `keep-local` via `check-audio` subcommand. These are hard to re-acquire and must never be auto-deleted.
 
