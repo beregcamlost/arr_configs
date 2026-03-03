@@ -13,6 +13,7 @@ from streaming.discord import (
     format_size,
     notify_deletion,
     notify_scan_results,
+    notify_stale_flag,
     send_embed,
 )
 
@@ -128,3 +129,27 @@ class TestNotifyDeletion:
     def test_empty_deletion_skips(self, mock_send):
         notify_deletion("https://hook", [], 0)
         mock_send.assert_not_called()
+
+
+class TestNotifyStaleFlagging:
+    @patch("streaming.discord.requests.post")
+    def test_notify_stale_flag(self, mock_post):
+        mock_post.return_value.status_code = 204
+        flagged = [
+            {"title": "Fight Club", "year": 1999, "size_bytes": 5_000_000_000, "media_type": "movie"},
+            {"title": "Breaking Bad", "year": 2008, "size_bytes": 80_000_000_000, "media_type": "tv"},
+        ]
+        unflagged = [
+            {"title": "Toy Story", "year": 1995, "size_bytes": 2_000_000_000, "media_type": "movie"},
+        ]
+        notify_stale_flag("https://discord.com/test", flagged, unflagged)
+        mock_post.assert_called_once()
+        payload = mock_post.call_args[1]["json"]
+        embed = payload["embeds"][0]
+        assert "Stale" in embed["title"]
+        assert "2" in embed["description"]  # 2 newly flagged
+
+    @patch("streaming.discord.requests.post")
+    def test_notify_stale_flag_not_sent_if_empty(self, mock_post):
+        notify_stale_flag("https://discord.com/test", [], [])
+        mock_post.assert_not_called()

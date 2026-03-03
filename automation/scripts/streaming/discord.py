@@ -257,6 +257,37 @@ def _chunk_item_lines(lines, field_label):
     return fields
 
 
+def notify_stale_flag(webhook_url, flagged_items, unflagged_items):
+    """Notify about newly stale-flagged and unflagged items."""
+    if not flagged_items and not unflagged_items:
+        return
+    total_size = sum(i.get("size_bytes", 0) for i in flagged_items)
+    desc_parts = []
+    if flagged_items:
+        desc_parts.append(f"⚠️ Newly flagged: **{len(flagged_items)}** ({format_size(total_size)})")
+    if unflagged_items:
+        desc_parts.append(f"✅ Unflagged (watched): **{len(unflagged_items)}**")
+    fields = []
+    if flagged_items:
+        lines = [f"`{i['title']} ({i.get('year', '?')})`" for i in flagged_items[:15]]
+        if len(flagged_items) > 15:
+            lines.append(f"…and {len(flagged_items) - 15} more")
+        fields.append({"name": "⚠️ Flagged for Removal (90d stale + streaming)", "value": "\n".join(lines), "inline": False})
+    if unflagged_items:
+        lines = [f"`{i['title']} ({i.get('year', '?')})`" for i in unflagged_items[:10]]
+        if len(unflagged_items) > 10:
+            lines.append(f"…and {len(unflagged_items) - 10} more")
+        fields.append({"name": "✅ Unflagged (recently watched)", "value": "\n".join(lines), "inline": False})
+    send_embed(
+        webhook_url,
+        title="⏳ Stale Content Flagging — Tier 1.5",
+        description="\n".join(desc_parts),
+        color=ORANGE if flagged_items else GREEN,
+        fields=fields,
+        footer="Grace period: 15 days before deletion",
+    )
+
+
 def notify_stale_cleanup(webhook_url, deleted_items, kept_items,
                          freed_bytes, no_play_days, min_size_gb):
     """Send stale library cleanup notification to Discord.
