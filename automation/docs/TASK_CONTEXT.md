@@ -51,7 +51,7 @@ Canonical script source remains under `/config/berenstuff/automation/scripts/`.
 
 ### Discord for subtitle hooks
 Both Sonarr/Radarr hook scripts notify to webhook:
-- `https://discord.com/api/webhooks/1471677059360227478/REDACTED_WEBHOOK_TOKEN`
+- `$DISCORD_WEBHOOK_URL` (from .env)
 
 ## Codec Manager Summary
 
@@ -83,7 +83,7 @@ Both Sonarr/Radarr hook scripts notify to webhook:
 
 ### Discord for audit completion
 `library_codec_manager.sh` sends audit completion summary to:
-- `https://discord.com/api/webhooks/1471699428581576747/REDACTED_WEBHOOK_TOKEN`
+- `$DISCORD_WEBHOOK_AUDIT_DONE` (from .env)
 
 ## Existing documentation
 - `/config/berenstuff/automation/docs/enesfr-profile-extraction-runbook.md`
