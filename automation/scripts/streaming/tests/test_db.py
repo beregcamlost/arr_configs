@@ -3,10 +3,13 @@
 import pytest
 
 from streaming.db import (
+    flag_stale_item,
     get_active_matches,
     get_active_matches_filtered,
     get_left_streaming,
     get_scan_history,
+    get_stale_candidate_paths,
+    get_stale_flagged_items,
     get_streaming_item,
     get_summary_stats,
     init_db,
@@ -14,6 +17,7 @@ from streaming.db import (
     mark_left_streaming,
     record_scan,
     touch_keep_local_items,
+    unflag_stale_item,
     update_streaming_seasons,
     upsert_streaming_item,
 )
@@ -48,6 +52,64 @@ class TestInitDb:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(streaming_status)").fetchall()]
         conn.close()
         assert "stale_flagged_at" in cols
+
+
+class TestStaleFlagging:
+    def _insert_item(self, db, tmdb_id=550, provider_id=8, path="/media/movies/Fight Club (1999)"):
+        upsert_streaming_item(
+            db, tmdb_id=tmdb_id, media_type="movie", provider_id=provider_id,
+            provider_name="Netflix", title="Fight Club", year=1999,
+            arr_id=42, library="movies", size_bytes=5_000_000_000, path=path,
+        )
+
+    def test_flag_stale_item(self, tmp_db):
+        self._insert_item(tmp_db)
+        count = flag_stale_item(tmp_db, tmdb_id=550, media_type="movie")
+        assert count == 1
+        item = get_streaming_item(tmp_db, 550, "movie", 8)
+        assert item["stale_flagged_at"] is not None
+
+    def test_flag_stale_item_no_overwrite(self, tmp_db):
+        """Flagging again should NOT overwrite the original timestamp."""
+        self._insert_item(tmp_db)
+        flag_stale_item(tmp_db, tmdb_id=550, media_type="movie")
+        item1 = get_streaming_item(tmp_db, 550, "movie", 8)
+        ts1 = item1["stale_flagged_at"]
+        import time; time.sleep(0.05)
+        flag_stale_item(tmp_db, tmdb_id=550, media_type="movie")
+        item2 = get_streaming_item(tmp_db, 550, "movie", 8)
+        assert item2["stale_flagged_at"] == ts1
+
+    def test_unflag_stale_item(self, tmp_db):
+        self._insert_item(tmp_db)
+        flag_stale_item(tmp_db, tmdb_id=550, media_type="movie")
+        unflag_stale_item(tmp_db, tmdb_id=550, media_type="movie")
+        item = get_streaming_item(tmp_db, 550, "movie", 8)
+        assert item["stale_flagged_at"] is None
+
+    def test_get_stale_flagged_items(self, tmp_db):
+        self._insert_item(tmp_db, tmdb_id=550, path="/media/movies/Fight Club (1999)")
+        self._insert_item(tmp_db, tmdb_id=862, path="/media/movies/Toy Story (1995)")
+        flag_stale_item(tmp_db, tmdb_id=550, media_type="movie")
+        items = get_stale_flagged_items(tmp_db)
+        assert len(items) == 1
+        assert items[0]["tmdb_id"] == 550
+
+    def test_get_stale_flagged_items_excludes_deleted(self, tmp_db):
+        """Deleted items should not appear in stale flagged list."""
+        self._insert_item(tmp_db)
+        flag_stale_item(tmp_db, tmdb_id=550, media_type="movie")
+        mark_deleted(tmp_db, tmdb_id=550, media_type="movie")
+        items = get_stale_flagged_items(tmp_db)
+        assert len(items) == 0
+
+    def test_get_stale_candidate_paths(self, tmp_db):
+        self._insert_item(tmp_db, tmdb_id=550, path="/media/movies/Fight Club (1999)")
+        self._insert_item(tmp_db, tmdb_id=862, path="/media/movies/Toy Story (1995)")
+        flag_stale_item(tmp_db, tmdb_id=550, media_type="movie")
+        paths = get_stale_candidate_paths(tmp_db)
+        assert "/media/movies/Fight Club (1999)" in paths
+        assert "/media/movies/Toy Story (1995)" not in paths
 
 
 class TestUpsertAndGet:

@@ -227,17 +227,82 @@ def update_streaming_seasons(db_path, tmdb_id, provider_id, streaming_seasons, s
     conn.close()
 
 
-def mark_deleted(db_path, tmdb_id, media_type, provider_id):
-    """Mark an item as deleted."""
+def mark_deleted(db_path, tmdb_id, media_type, provider_id=None):
+    """Mark an item as deleted.
+
+    If provider_id is None, marks all rows for the given tmdb_id+media_type.
+    """
     now = _now_iso()
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("""
-        UPDATE streaming_status SET deleted_at=?
-        WHERE tmdb_id=? AND media_type=? AND provider_id=?
-    """, (now, tmdb_id, media_type, provider_id))
+    if provider_id is None:
+        conn.execute("""
+            UPDATE streaming_status SET deleted_at=?
+            WHERE tmdb_id=? AND media_type=?
+        """, (now, tmdb_id, media_type))
+    else:
+        conn.execute("""
+            UPDATE streaming_status SET deleted_at=?
+            WHERE tmdb_id=? AND media_type=? AND provider_id=?
+        """, (now, tmdb_id, media_type, provider_id))
     conn.commit()
     conn.close()
+
+
+def flag_stale_item(db_path, tmdb_id, media_type):
+    """Flag an item as stale. Does not overwrite existing flag timestamp."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA busy_timeout=30000")
+    cursor = conn.execute(
+        "UPDATE streaming_status SET stale_flagged_at = ? "
+        "WHERE tmdb_id = ? AND media_type = ? AND stale_flagged_at IS NULL "
+        "AND deleted_at IS NULL",
+        (_now_iso(), tmdb_id, media_type),
+    )
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
+
+def unflag_stale_item(db_path, tmdb_id, media_type):
+    """Clear stale flag (item was watched or no longer qualifies)."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute(
+        "UPDATE streaming_status SET stale_flagged_at = NULL "
+        "WHERE tmdb_id = ? AND media_type = ?",
+        (tmdb_id, media_type),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_stale_flagged_items(db_path):
+    """Get all items currently flagged as stale (not deleted)."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    rows = conn.execute(
+        "SELECT * FROM streaming_status "
+        "WHERE stale_flagged_at IS NOT NULL AND deleted_at IS NULL "
+        "ORDER BY stale_flagged_at ASC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_stale_candidate_paths(db_path):
+    """Get dir-level paths of all stale-flagged items (for codec manager)."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA busy_timeout=30000")
+    rows = conn.execute(
+        "SELECT DISTINCT path FROM streaming_status "
+        "WHERE stale_flagged_at IS NOT NULL AND deleted_at IS NULL "
+        "AND path IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 
 def record_scan(db_path, country, movies_checked, series_checked,
