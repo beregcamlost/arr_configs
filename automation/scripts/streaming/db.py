@@ -56,6 +56,10 @@ def init_db(db_path):
         conn.execute("ALTER TABLE streaming_status ADD COLUMN streaming_seasons TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+    try:
+        conn.execute("ALTER TABLE streaming_status ADD COLUMN stale_flagged_at TEXT")
+    except Exception:
+        pass
     conn.close()
 
 

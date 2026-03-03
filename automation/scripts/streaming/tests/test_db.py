@@ -42,6 +42,13 @@ class TestInitDb:
         assert "season_count" in cols
         assert "streaming_seasons" in cols
 
+    def test_has_stale_flagged_at_column(self, tmp_db):
+        import sqlite3
+        conn = sqlite3.connect(tmp_db)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(streaming_status)").fetchall()]
+        conn.close()
+        assert "stale_flagged_at" in cols
+
 
 class TestUpsertAndGet:
     def test_insert_new_item(self, tmp_db):
