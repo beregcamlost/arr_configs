@@ -584,6 +584,34 @@ is_streaming_candidate_inline() {
   [[ -n "${_STREAMING_PATHS[$match_dir]:-}" ]]
 }
 
+# --- Stale candidate exclusion (tier 1.5) ---
+declare -A _STALE_PATHS=()
+
+load_stale_candidates() {
+  _STALE_PATHS=()
+  [[ -f "$STREAMING_STATE_DB" ]] || return 0
+  while IFS= read -r spath; do
+    [[ -n "$spath" ]] && _STALE_PATHS["$spath"]=1
+  done < <(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
+    "SELECT DISTINCT path FROM streaming_status WHERE stale_flagged_at IS NOT NULL AND deleted_at IS NULL AND path IS NOT NULL;" 2>/dev/null)
+}
+
+is_stale_candidate_inline() {
+  local filepath="$1"
+  [[ ${#_STALE_PATHS[@]} -eq 0 ]] && return 1
+  local match_dir
+  if [[ "$filepath" == *"/tv/"* || "$filepath" == *"/tvanimated/"* ]]; then
+    if [[ "$filepath" == *"/Season "* ]]; then
+      match_dir="${filepath%%/Season [0-9]*}"
+    else
+      match_dir="$(dirname "$filepath")"
+    fi
+  else
+    match_dir="$(dirname "$filepath")"
+  fi
+  [[ -n "${_STALE_PATHS[$match_dir]:-}" ]]
+}
+
 # SQLite wrapper — ensures busy_timeout (30s) on every connection.
 # Accepts sqlite3 flags before the query (e.g., db -separator $'\t' "SQL").
 db() {
@@ -1116,6 +1144,7 @@ audit_cmd() {
 plan_cmd() {
   log "info" "Building conversion plan"
   load_streaming_candidates
+  load_stale_candidates
 
   db "DELETE FROM conversion_plan;"
 
@@ -1159,6 +1188,8 @@ ORDER BY m.path${where_limit};
       skip_reason="uhd_skipped"
     elif is_streaming_candidate_inline "$path"; then
       skip_reason="streaming_candidate"
+    elif is_stale_candidate_inline "$path"; then
+      skip_reason="stale_candidate"
     else
       if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
         skip_reason="already_compliant"
@@ -1715,6 +1746,7 @@ enqueue_import_cmd() {
     return 0
   fi
   load_streaming_candidates
+  load_stale_candidates
 
   local path="$IMPORT_FILE"
   local media_type="$IMPORT_MEDIA_TYPE"
@@ -1783,6 +1815,10 @@ enqueue_import_cmd() {
     skip_reason="streaming_candidate"
     priority=99
     log "info" "enqueue-import: streaming candidate, skipping: $path"
+  elif is_stale_candidate_inline "$path"; then
+    skip_reason="stale_candidate"
+    priority=99
+    log "info" "enqueue-import: stale candidate, skipping: $path"
   elif [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
     skip_reason="already_compliant"
   else
