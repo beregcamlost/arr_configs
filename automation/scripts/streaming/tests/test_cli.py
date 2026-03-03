@@ -381,7 +381,7 @@ class TestReportEnhanced:
 class TestStaleFlag:
     @patch("streaming.streaming_checker.notify_stale_flag")
     @patch("streaming.streaming_checker.get_last_played_map", return_value={})
-    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value={(999, "movie")})
     @patch("streaming.streaming_checker.fetch_series", return_value=MOCK_SERIES)
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_stale_flag_never_played_on_streaming(
@@ -404,7 +404,7 @@ class TestStaleFlag:
 
     @patch("streaming.streaming_checker.notify_stale_flag")
     @patch("streaming.streaming_checker.get_last_played_map")
-    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value={(999, "movie")})
     @patch("streaming.streaming_checker.fetch_series", return_value=MOCK_SERIES)
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_stale_flag_recently_played_not_flagged(
@@ -431,7 +431,7 @@ class TestStaleFlag:
 
     @patch("streaming.streaming_checker.notify_stale_flag")
     @patch("streaming.streaming_checker.get_last_played_map", return_value={})
-    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value={(999, "movie")})
     @patch("streaming.streaming_checker.fetch_series", return_value=MOCK_SERIES)
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_stale_flag_not_on_streaming_not_flagged(
@@ -448,7 +448,7 @@ class TestStaleFlag:
 
     @patch("streaming.streaming_checker.notify_stale_flag")
     @patch("streaming.streaming_checker.get_last_played_map")
-    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value={(999, "movie")})
     @patch("streaming.streaming_checker.fetch_series", return_value=MOCK_SERIES)
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_stale_flag_unflag_watched_item(
@@ -482,7 +482,7 @@ class TestStaleDelete:
     @patch("streaming.streaming_checker.delete_item")
     @patch("streaming.streaming_checker.get_item")
     @patch("streaming.streaming_checker.get_last_played_map", return_value={})
-    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value={(999, "movie")})
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_stale_delete_after_grace_period(
@@ -514,7 +514,7 @@ class TestStaleDelete:
 
     @patch("streaming.streaming_checker.notify_deletion")
     @patch("streaming.streaming_checker.get_last_played_map", return_value={})
-    @patch("streaming.streaming_checker._get_keep_local_set", return_value=set())
+    @patch("streaming.streaming_checker._get_keep_local_set", return_value={(999, "movie")})
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_stale_delete_within_grace_period_skipped(

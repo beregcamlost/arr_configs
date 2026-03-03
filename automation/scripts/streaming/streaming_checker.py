@@ -1010,6 +1010,12 @@ def stale_flag_cmd(no_play_days, dry_run, db_path):
     keep_local_set = _get_keep_local_set(cfg)
     active = get_active_matches_filtered(cfg.db_path)
 
+    # Safety: abort if keep-local check failed (empty set + active items = API unreachable)
+    if not keep_local_set and active:
+        click.echo("Error: keep-local set is empty but streaming items exist. "
+                    "Sonarr/Radarr may be unreachable. Aborting to avoid flagging protected items.")
+        raise SystemExit(1)
+
     seen = set()
     streaming_items = []
     for item in active:
@@ -1083,6 +1089,12 @@ def stale_delete_cmd(grace_days, yes, dry_run, db_path):
     grace_cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
     play_map = get_last_played_map(cfg.emby_url, cfg.emby_api_key)
     keep_local_set = _get_keep_local_set(cfg)
+
+    # Safety: abort if keep-local check failed
+    if not keep_local_set and flagged:
+        click.echo("Error: keep-local set is empty but flagged items exist. "
+                    "Sonarr/Radarr may be unreachable. Aborting to protect keep-local items.")
+        raise SystemExit(1)
 
     seen = {}
     for item in flagged:
