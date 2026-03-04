@@ -58,25 +58,43 @@ log = logging.getLogger("streaming_checker")
 TAG_LABEL = "streaming-available"
 
 
-def _get_keep_local_set(cfg):
-    """Build set of (arr_id, media_type) for keep-local tagged items."""
-    keep_local_set = set()
+def _parse_dt(s: str) -> datetime:
+    """Parse an ISO8601 datetime string, handling Z suffix."""
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def _get_keep_local_tag_ids(cfg):
+    """Fetch keep-local tag IDs from Radarr and Sonarr."""
+    kl_radarr = kl_sonarr = None
     try:
         kl_radarr = get_tag_id(cfg.radarr_url, cfg.radarr_key, "keep-local")
+    except Exception:
+        log.debug("Could not check Radarr keep-local tags")
+    try:
+        kl_sonarr = get_tag_id(cfg.sonarr_url, cfg.sonarr_key, "keep-local")
+    except Exception:
+        log.debug("Could not check Sonarr keep-local tags")
+    return kl_radarr, kl_sonarr
+
+
+def _get_keep_local_set(cfg):
+    """Build set of (arr_id, media_type) for keep-local tagged items."""
+    kl_radarr, kl_sonarr = _get_keep_local_tag_ids(cfg)
+    keep_local_set = set()
+    try:
         if kl_radarr:
             for m in fetch_movies(cfg.radarr_url, cfg.radarr_key):
                 if kl_radarr in m.get("tags", []):
                     keep_local_set.add((m["arr_id"], "movie"))
     except Exception:
-        log.debug("Could not check Radarr keep-local tags")
+        log.debug("Could not fetch Radarr movies for keep-local check")
     try:
-        kl_sonarr = get_tag_id(cfg.sonarr_url, cfg.sonarr_key, "keep-local")
         if kl_sonarr:
             for s in fetch_series(cfg.sonarr_url, cfg.sonarr_key):
                 if kl_sonarr in s.get("tags", []):
                     keep_local_set.add((s["arr_id"], "tv"))
     except Exception:
-        log.debug("Could not check Sonarr keep-local tags")
+        log.debug("Could not fetch Sonarr series for keep-local check")
     return keep_local_set
 
 
@@ -533,7 +551,7 @@ def report(json_out, provider, library, min_size, sort_by, since_days, no_play_d
             item["_last_played"] = last_played
             if last_played:
                 try:
-                    played_dt = datetime.fromisoformat(last_played.replace("Z", "+00:00"))
+                    played_dt = _parse_dt(last_played)
                     days_ago = (cutoff - played_dt).days
                     item["_days_ago"] = days_ago
                     if days_ago >= no_play_days:
@@ -654,7 +672,7 @@ def confirm_delete(yes, provider, library, min_size, tmdb_ids, no_play_days, dry
                 last_played = play_map.get(path)
                 if last_played:
                     try:
-                        played_dt = datetime.fromisoformat(last_played.replace("Z", "+00:00"))
+                        played_dt = _parse_dt(last_played)
                         days_ago = (cutoff - played_dt).days
                         if days_ago >= no_play_days:
                             filtered.append(item)
@@ -884,7 +902,7 @@ def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path):
         last_played = play_map.get(path)
         if last_played:
             try:
-                played_dt = datetime.fromisoformat(last_played.replace("Z", "+00:00"))
+                played_dt = _parse_dt(last_played)
                 days_ago = (cutoff - played_dt).days
                 if days_ago < no_play_days:
                     continue  # played recently enough
@@ -1035,7 +1053,7 @@ def stale_flag_cmd(no_play_days, dry_run, db_path):
         last_play = play_map.get(path)
 
         if last_play:
-            play_dt = datetime.fromisoformat(last_play.replace("Z", "+00:00"))
+            play_dt = _parse_dt(last_play)
             is_stale = play_dt < cutoff
         else:
             is_stale = True
@@ -1070,9 +1088,8 @@ def stale_flag_cmd(no_play_days, dry_run, db_path):
 @cli.command("stale-delete")
 @click.option("--grace-days", default=15, type=int, help="Days after flagging before deletion")
 @click.option("--yes", is_flag=True, help="Actually delete (otherwise dry-run)")
-@click.option("--dry-run", is_flag=True, help="Show what would be deleted")
 @click.option("--db-path", default=None, help="Override DB path")
-def stale_delete_cmd(grace_days, yes, dry_run, db_path):
+def stale_delete_cmd(grace_days, yes, db_path):
     """Tier 1.5: Delete items flagged stale for grace-days+ that are still unwatched."""
     cfg = load_config(db_path=db_path)
     init_db(cfg.db_path)
@@ -1099,7 +1116,7 @@ def stale_delete_cmd(grace_days, yes, dry_run, db_path):
     seen = {}
     for item in flagged:
         key = (item["arr_id"], item["media_type"])
-        flag_dt = datetime.fromisoformat(item["stale_flagged_at"].replace("Z", "+00:00"))
+        flag_dt = _parse_dt(item["stale_flagged_at"])
         if flag_dt >= grace_cutoff:
             continue
         if key in keep_local_set:
@@ -1109,7 +1126,7 @@ def stale_delete_cmd(grace_days, yes, dry_run, db_path):
         path = item.get("path", "")
         last_play = play_map.get(path)
         if last_play:
-            play_dt = datetime.fromisoformat(last_play.replace("Z", "+00:00"))
+            play_dt = _parse_dt(last_play)
             if play_dt > flag_dt:
                 continue
         if key not in seen:
@@ -1120,20 +1137,11 @@ def stale_delete_cmd(grace_days, yes, dry_run, db_path):
     for item in to_delete:
         click.echo(f"  {item['title']} ({item.get('year', '?')}) [{item['media_type']}]")
 
-    if dry_run or not yes:
-        click.echo(f"Deleted: 0 (dry-run)")
+    if not yes:
+        click.echo("Deleted: 0 (dry-run)")
         return
 
-    kl_radarr = None
-    kl_sonarr = None
-    try:
-        kl_radarr = get_tag_id(cfg.radarr_url, cfg.radarr_key, "keep-local")
-    except Exception:
-        pass
-    try:
-        kl_sonarr = get_tag_id(cfg.sonarr_url, cfg.sonarr_key, "keep-local")
-    except Exception:
-        pass
+    kl_radarr, kl_sonarr = _get_keep_local_tag_ids(cfg)
 
     deleted_items = []
     for item in to_delete:

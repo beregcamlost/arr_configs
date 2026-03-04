@@ -555,62 +555,63 @@ sql_quote() {
 
 STREAMING_STATE_DB="/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
 
+# --- Shared helpers for path-set loading and lookup ---
+
+# Load paths from streaming DB into a nameref associative array.
+_load_candidate_paths() {
+  local -n _arr="$1"
+  local sql="$2"
+  _arr=()
+  [[ -f "$STREAMING_STATE_DB" ]] || return 0
+  while IFS= read -r spath; do
+    [[ -n "$spath" ]] && _arr["$spath"]=1
+  done < <(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" "$sql" 2>/dev/null)
+}
+
+# Resolve a media file path to its series/movie directory (pure bash, no subprocess).
+_resolve_match_dir() {
+  local filepath="$1"
+  if [[ "$filepath" == *"/tv/"* || "$filepath" == *"/tvanimated/"* ]]; then
+    if [[ "$filepath" == *"/Season "* ]]; then
+      printf '%s' "${filepath%%/Season [0-9]*}"
+    else
+      printf '%s' "${filepath%/*}"
+    fi
+  else
+    printf '%s' "${filepath%/*}"
+  fi
+}
+
+# Check if a filepath matches any path in a nameref associative array.
+_check_path_in_set() {
+  local -n _ref_array="$1"
+  local filepath="$2"
+  [[ ${#_ref_array[@]} -eq 0 ]] && return 1
+  local match_dir
+  match_dir="$(_resolve_match_dir "$filepath")"
+  [[ -n "${_ref_array[$match_dir]:-}" ]]
+}
+
 # Pre-loaded streaming candidate paths (populated by load_streaming_candidates)
 declare -A _STREAMING_PATHS=()
 
 load_streaming_candidates() {
-  _STREAMING_PATHS=()
-  [[ -f "$STREAMING_STATE_DB" ]] || return 0
-  while IFS= read -r spath; do
-    [[ -n "$spath" ]] && _STREAMING_PATHS["$spath"]=1
-  done < <(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
-    "SELECT path FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL;" 2>/dev/null)
+  _load_candidate_paths _STREAMING_PATHS \
+    "SELECT path FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL;"
 }
 
 # Pure bash lookup — safe inside pipelines (no subprocess spawning)
-is_streaming_candidate_inline() {
-  local filepath="$1"
-  [[ ${#_STREAMING_PATHS[@]} -eq 0 ]] && return 1
-  local match_dir
-  if [[ "$filepath" == *"/tv/"* || "$filepath" == *"/tvanimated/"* ]]; then
-    if [[ "$filepath" == *"/Season "* ]]; then
-      match_dir="${filepath%%/Season [0-9]*}"
-    else
-      match_dir="$(dirname "$filepath")"
-    fi
-  else
-    match_dir="$(dirname "$filepath")"
-  fi
-  [[ -n "${_STREAMING_PATHS[$match_dir]:-}" ]]
-}
+is_streaming_candidate_inline() { _check_path_in_set _STREAMING_PATHS "$1"; }
 
 # --- Stale candidate exclusion (tier 1.5) ---
 declare -A _STALE_PATHS=()
 
 load_stale_candidates() {
-  _STALE_PATHS=()
-  [[ -f "$STREAMING_STATE_DB" ]] || return 0
-  while IFS= read -r spath; do
-    [[ -n "$spath" ]] && _STALE_PATHS["$spath"]=1
-  done < <(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
-    "SELECT DISTINCT path FROM streaming_status WHERE stale_flagged_at IS NOT NULL AND deleted_at IS NULL AND path IS NOT NULL;" 2>/dev/null)
+  _load_candidate_paths _STALE_PATHS \
+    "SELECT DISTINCT path FROM streaming_status WHERE stale_flagged_at IS NOT NULL AND deleted_at IS NULL AND path IS NOT NULL;"
 }
 
-is_stale_candidate_inline() {
-  local filepath="$1"
-  [[ ${#_STALE_PATHS[@]} -eq 0 ]] && return 1
-  local match_dir
-  if [[ "$filepath" == *"/tv/"* || "$filepath" == *"/tvanimated/"* ]]; then
-    if [[ "$filepath" == *"/Season "* ]]; then
-      match_dir="${filepath%%/Season [0-9]*}"
-    else
-      match_dir="$(dirname "$filepath")"
-    fi
-  else
-    match_dir="$(dirname "$filepath")"
-  fi
-  [[ -n "${_STALE_PATHS[$match_dir]:-}" ]]
-}
+is_stale_candidate_inline() { _check_path_in_set _STALE_PATHS "$1"; }
 
 # SQLite wrapper — ensures busy_timeout (30s) on every connection.
 # Accepts sqlite3 flags before the query (e.g., db -separator $'\t' "SQL").

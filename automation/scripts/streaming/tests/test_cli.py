@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+from streaming.db import init_db, upsert_streaming_item
 from streaming.streaming_checker import cli
 
 
@@ -34,6 +35,42 @@ MOCK_SERIES = [
         "season_count": 5, "season_numbers": [1, 2, 3, 4, 5],
     },
 ]
+
+
+def _make_db(tmp_path):
+    """Create and init a temp DB, return path string."""
+    db = str(tmp_path / "test.db")
+    init_db(db)
+    return db
+
+
+def _seed_fight_club(db, **overrides):
+    """Insert Fight Club into DB. Returns db path for chaining."""
+    kw = dict(tmdb_id=550, media_type="movie", provider_id=8,
+              provider_name="Netflix", title="Fight Club", year=1999,
+              arr_id=1, library="movies", size_bytes=5_000_000_000,
+              path="/media/movies/Fight Club (1999)")
+    kw.update(overrides)
+    upsert_streaming_item(db, **kw)
+    return db
+
+
+def _seed_toy_story(db, **overrides):
+    """Insert Toy Story into DB. Returns db path for chaining."""
+    kw = dict(tmdb_id=862, media_type="movie", provider_id=337,
+              provider_name="Disney Plus", title="Toy Story", year=1995,
+              arr_id=2, library="moviesanimated", size_bytes=2_000_000_000,
+              path="/media/moviesanimated/Toy Story (1995)")
+    kw.update(overrides)
+    upsert_streaming_item(db, **kw)
+    return db
+
+
+def _seed_both_movies(db, **toy_story_overrides):
+    """Insert Fight Club + Toy Story into DB."""
+    _seed_fight_club(db)
+    _seed_toy_story(db, **toy_story_overrides)
+    return db
 
 
 class TestScan:
@@ -97,29 +134,22 @@ class TestScan:
 
 class TestReport:
     def test_report_empty(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db
-        init_db(db)
+        db = _make_db(tmp_path)
         result = runner.invoke(cli, ["report", "--db-path", db])
         assert result.exit_code == 0
         assert "No streaming matches" in result.output
 
     def test_report_with_data(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              library="movies", size_bytes=5_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
         result = runner.invoke(cli, ["report", "--db-path", db])
         assert result.exit_code == 0
         assert "Fight Club" in result.output
         assert "Netflix" in result.output
 
     def test_report_json(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999)
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
         result = runner.invoke(cli, ["report", "--json", "--db-path", db])
         assert result.exit_code == 0
         data = __import__("json").loads(result.output)
@@ -132,11 +162,8 @@ class TestConfirmDelete:
     @patch("streaming.streaming_checker.delete_item")
     def test_confirm_delete_dry_run(self, mock_delete, mock_get_item, mock_tag,
                                      runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              arr_id=1, library="movies", size_bytes=5_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
 
         result = runner.invoke(cli, ["confirm-delete", "--yes", "--dry-run", "--db-path", db])
         assert result.exit_code == 0
@@ -144,9 +171,7 @@ class TestConfirmDelete:
         mock_delete.assert_not_called()
 
     def test_confirm_delete_requires_yes(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db
-        init_db(db)
+        db = _make_db(tmp_path)
         result = runner.invoke(cli, ["confirm-delete", "--db-path", db])
         assert result.exit_code != 0
 
@@ -155,13 +180,8 @@ class TestConfirmDelete:
     @patch("streaming.streaming_checker.delete_item")
     def test_confirm_delete_tmdb_ids_filter(self, mock_delete, mock_get_item, mock_tag,
                                              runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              arr_id=1, library="movies", size_bytes=5_000_000_000)
-        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
-                              arr_id=2, library="moviesanimated", size_bytes=2_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_both_movies(db)
         result = runner.invoke(cli, [
             "confirm-delete", "--yes", "--dry-run", "--tmdb-ids", "550", "--db-path", db
         ])
@@ -174,13 +194,8 @@ class TestConfirmDelete:
     @patch("streaming.streaming_checker.delete_item")
     def test_confirm_delete_library_filter(self, mock_delete, mock_get_item, mock_tag,
                                             runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              arr_id=1, library="movies", size_bytes=5_000_000_000)
-        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
-                              arr_id=2, library="moviesanimated", size_bytes=2_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_both_movies(db)
         result = runner.invoke(cli, [
             "confirm-delete", "--yes", "--dry-run", "--library", "moviesanimated", "--db-path", db
         ])
@@ -191,52 +206,32 @@ class TestConfirmDelete:
 
 class TestReportFilters:
     def test_report_provider_filter(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              library="movies", size_bytes=5_000_000_000)
-        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
-                              library="moviesanimated", size_bytes=2_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_both_movies(db)
         result = runner.invoke(cli, ["report", "--provider", "Netflix", "--db-path", db])
         assert result.exit_code == 0
         assert "Fight Club" in result.output
         assert "Toy Story" not in result.output
 
     def test_report_library_filter(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              library="movies", size_bytes=5_000_000_000)
-        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
-                              library="moviesanimated", size_bytes=2_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_both_movies(db)
         result = runner.invoke(cli, ["report", "--library", "movies", "--db-path", db])
         assert result.exit_code == 0
         assert "Fight Club" in result.output
         assert "Toy Story" not in result.output
 
     def test_report_min_size_filter(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              library="movies", size_bytes=5_000_000_000)
-        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
-                              library="moviesanimated", size_bytes=2_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_both_movies(db)
         result = runner.invoke(cli, ["report", "--min-size", "4", "--db-path", db])
         assert result.exit_code == 0
         assert "Fight Club" in result.output
         assert "Toy Story" not in result.output
 
     def test_report_sort_by_size(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              library="movies", size_bytes=5_000_000_000)
-        upsert_streaming_item(db, 862, "movie", 8, "Netflix", "Toy Story", 1995,
-                              library="moviesanimated", size_bytes=2_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_both_movies(db, provider_id=8, provider_name="Netflix")
         result = runner.invoke(cli, ["report", "--sort-by", "size", "--db-path", db])
         assert result.exit_code == 0
         # Fight Club (5 GB) should appear before Toy Story (2 GB) in the output
@@ -247,21 +242,15 @@ class TestReportFilters:
 
 class TestSummary:
     def test_summary_empty(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db
-        init_db(db)
+        db = _make_db(tmp_path)
         result = runner.invoke(cli, ["summary", "--db-path", db])
         assert result.exit_code == 0
         assert "No active streaming matches" in result.output
 
     def test_summary_with_data(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item, record_scan
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              library="movies", size_bytes=5_000_000_000)
-        upsert_streaming_item(db, 862, "movie", 337, "Disney Plus", "Toy Story", 1995,
-                              library="moviesanimated", size_bytes=2_000_000_000)
+        from streaming.db import record_scan
+        db = _make_db(tmp_path)
+        _seed_both_movies(db)
         record_scan(db, "CL", 100, 50, 2, 2, 0, 10.5)
         result = runner.invoke(cli, ["summary", "--db-path", db])
         assert result.exit_code == 0
@@ -270,11 +259,8 @@ class TestSummary:
         assert "Disney Plus" in result.output
 
     def test_summary_json(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              library="movies", size_bytes=5_000_000_000)
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
         result = runner.invoke(cli, ["summary", "--json", "--db-path", db])
         assert result.exit_code == 0
         import json
@@ -284,16 +270,14 @@ class TestSummary:
 
 class TestCheckSeasons:
     def test_missing_rapidapi_key(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
+        db = str(tmp_path / "test.db")  # no init needed — fails before DB access
         result = runner.invoke(cli, ["check-seasons", "--db-path", db])
         assert result.exit_code != 0
         assert "RAPIDAPI_KEY" in result.output
 
     def test_no_tv_matches(self, runner, env_config, monkeypatch, tmp_path):
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db
-        init_db(db)
+        db = _make_db(tmp_path)
         result = runner.invoke(cli, ["check-seasons", "--db-path", db])
         assert result.exit_code == 0
         assert "No active TV matches" in result.output
@@ -306,9 +290,7 @@ class TestCheckSeasons:
                                             mock_add_tag, runner, env_config,
                                             monkeypatch, tmp_path):
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
+        db = _make_db(tmp_path)
         upsert_streaming_item(db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008,
                               arr_id=10, library="tv", size_bytes=80_000_000_000)
 
@@ -328,9 +310,7 @@ class TestCheckSeasons:
     def test_check_seasons_dry_run(self, mock_fetch, mock_avail,
                                     runner, env_config, monkeypatch, tmp_path):
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
+        db = _make_db(tmp_path)
         upsert_streaming_item(db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008,
                               arr_id=10, library="tv", size_bytes=80_000_000_000)
 
@@ -344,9 +324,7 @@ class TestCheckSeasons:
 
 class TestReportEnhanced:
     def test_report_with_season_data(self, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
+        db = _make_db(tmp_path)
         upsert_streaming_item(db, 1396, "tv", 8, "Netflix", "Breaking Bad", 2008,
                               library="tv", size_bytes=80_000_000_000,
                               season_count=5, streaming_seasons="[1, 2, 3]")
@@ -356,15 +334,10 @@ class TestReportEnhanced:
 
     @patch("streaming.streaming_checker.get_last_played_map")
     def test_report_no_play_days(self, mock_play_map, runner, env_config, tmp_path):
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(db, 550, "movie", 8, "Netflix", "Fight Club", 1999,
-                              library="movies", size_bytes=5_000_000_000,
-                              path="/media/movies/Fight Club (1999)")
-        upsert_streaming_item(db, 862, "movie", 8, "Netflix", "Toy Story", 1995,
-                              library="movies", size_bytes=2_000_000_000,
-                              path="/media/movies/Toy Story (1995)")
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
+        _seed_toy_story(db, provider_id=8, provider_name="Netflix",
+                        library="movies", path="/media/movies/Toy Story (1995)")
 
         # Fight Club played recently, Toy Story never played
         mock_play_map.return_value = {
@@ -389,15 +362,8 @@ class TestStaleFlag:
         runner, env_config, tmp_path,
     ):
         """Items on streaming + never played → flagged."""
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(
-            db, tmdb_id=550, media_type="movie", provider_id=8,
-            provider_name="Netflix", title="Fight Club", year=1999,
-            arr_id=1, library="movies", size_bytes=5_000_000_000,
-            path="/media/movies/Fight Club (1999)",
-        )
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
         result = runner.invoke(cli, ["stale-flag", "--no-play-days", "90", "--db-path", db])
         assert result.exit_code == 0, result.output
         assert "Flagged: 1" in result.output
@@ -413,15 +379,8 @@ class TestStaleFlag:
     ):
         """Items played recently → NOT flagged."""
         from datetime import datetime, timezone
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(
-            db, tmdb_id=550, media_type="movie", provider_id=8,
-            provider_name="Netflix", title="Fight Club", year=1999,
-            arr_id=1, library="movies", size_bytes=5_000_000_000,
-            path="/media/movies/Fight Club (1999)",
-        )
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
         mock_play.return_value = {
             "/media/movies/Fight Club (1999)": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
@@ -439,9 +398,7 @@ class TestStaleFlag:
         runner, env_config, tmp_path,
     ):
         """Items NOT on streaming → NOT flagged even if stale."""
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db
-        init_db(db)
+        db = _make_db(tmp_path)
         result = runner.invoke(cli, ["stale-flag", "--no-play-days", "90", "--db-path", db])
         assert result.exit_code == 0, result.output
         assert "Flagged: 0" in result.output
@@ -457,15 +414,9 @@ class TestStaleFlag:
     ):
         """Previously flagged item that was watched → unflagged."""
         from datetime import datetime, timezone
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item, flag_stale_item
-        init_db(db)
-        upsert_streaming_item(
-            db, tmdb_id=550, media_type="movie", provider_id=8,
-            provider_name="Netflix", title="Fight Club", year=1999,
-            arr_id=1, library="movies", size_bytes=5_000_000_000,
-            path="/media/movies/Fight Club (1999)",
-        )
+        from streaming.db import flag_stale_item
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
         flag_stale_item(db, tmdb_id=550, media_type="movie")
         mock_play.return_value = {
             "/media/movies/Fight Club (1999)": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -492,15 +443,8 @@ class TestStaleDelete:
     ):
         """Items flagged >15 days ago + still stale → deleted."""
         from datetime import datetime, timezone, timedelta
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item
-        init_db(db)
-        upsert_streaming_item(
-            db, tmdb_id=550, media_type="movie", provider_id=8,
-            provider_name="Netflix", title="Fight Club", year=1999,
-            arr_id=1, library="movies", size_bytes=5_000_000_000,
-            path="/media/movies/Fight Club (1999)",
-        )
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
         import sqlite3
         old_ts = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
         conn = sqlite3.connect(db)
@@ -522,15 +466,9 @@ class TestStaleDelete:
         runner, env_config, tmp_path,
     ):
         """Items flagged <15 days ago → NOT deleted."""
-        db = str(tmp_path / "test.db")
-        from streaming.db import init_db, upsert_streaming_item, flag_stale_item
-        init_db(db)
-        upsert_streaming_item(
-            db, tmdb_id=550, media_type="movie", provider_id=8,
-            provider_name="Netflix", title="Fight Club", year=1999,
-            arr_id=1, library="movies", size_bytes=5_000_000_000,
-            path="/media/movies/Fight Club (1999)",
-        )
+        from streaming.db import flag_stale_item
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
         flag_stale_item(db, tmdb_id=550, media_type="movie")
         result = runner.invoke(cli, ["stale-delete", "--grace-days", "15", "--yes", "--db-path", db])
         assert result.exit_code == 0, result.output
