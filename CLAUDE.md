@@ -22,6 +22,9 @@ bash -n automation/scripts/subtitles/sonarr_profile_extract_on_import.sh
 /config/berenstuff/scripts/library_codec_manager.sh plan --log-level info
 /config/berenstuff/scripts/library_codec_manager.sh convert --dry-run --batch-size 20 --log-level info
 
+# Streaming checker tests (149 tests)
+PYTHONPATH=automation/scripts python3 -m pytest automation/scripts/streaming/tests/ -x -q
+
 # Check logs after runs
 # Codec manager: /APPBOX_DATA/storage/.transcode-state/manager.log
 # Sonarr hook:   /config/berenstuff/automation/logs/sonarr_profile_extract_on_import.log
@@ -64,6 +67,12 @@ Subcommands: `scan`, `report`, `confirm-delete`, `check-seasons`, `stale-flag`, 
 
 All tiers exclude keep-local tagged items, dual-audio items (jpn+spa or eng+spa), and verify against Emby active playback before deleting.
 
+**Key internal helpers:**
+- `_parse_dt(s)` — ISO8601 datetime parsing with Z-suffix handling
+- `_get_keep_local_tag_ids(cfg)` — returns `(kl_radarr, kl_sonarr)` tag IDs, reuse instead of calling `get_tag_id` directly
+- `_get_keep_local_set(cfg)` — returns `set((arr_id, media_type))`, fail-open (logs + continues)
+- Test helpers in `tests/test_cli.py`: `_make_db()`, `_seed_fight_club()`, `_seed_toy_story()`, `_seed_both_movies(**overrides)`
+
 **Dual-audio auto-protect rule:** Any item with dual audio tracks (Japanese+Spanish or English+Spanish) is automatically tagged `keep-local` via `check-audio` subcommand. These are hard to re-acquire and must never be auto-deleted.
 
 ### Supporting scripts
@@ -95,6 +104,8 @@ After editing any canonical script in `automation/scripts/`, always sync the com
   - When iterating over old code, fix any DRY violations you encounter (extract helpers, remove duplication)
   - Library path patterns (`/tv/`, `/movies/`, etc.) must use `is_tv_path()`/`is_movie_path()` helpers, never inline globs
   - Language code mappings use `expand_lang_codes()`, `lang_in_set()`, `lang_to_iso639_2()` from the shared lib
+  - Codec manager skip-category helpers use bash namerefs: `_load_candidate_paths()`, `_check_path_in_set()`, `_resolve_match_dir()` — add new skip reasons by declaring a new array + calling shared helpers, not duplicating logic
+  - Prefer `${filepath%/*}` over `$(dirname "$filepath")` in hot loops (pure bash, no subprocess)
 
 ## Discord Notification Standard
 
