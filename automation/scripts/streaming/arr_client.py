@@ -164,6 +164,75 @@ def remove_tag_from_item(base_url, api_key, app, arr_id, tag_id):
     resp.raise_for_status()
 
 
+def lookup_movie(radarr_url, api_key, tmdb_id):
+    """Lookup a movie by TMDB ID in Radarr. Returns full metadata dict or None."""
+    url = f"{radarr_url}/api/v3/movie/lookup/tmdb"
+    resp = requests.get(url, headers=_headers(api_key), params={"tmdbId": tmdb_id}, timeout=15)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json()
+
+
+def add_movie(radarr_url, api_key, tmdb_id, quality_profile_id, root_folder_path,
+              tags=None, monitored=True, search=True):
+    """Add a movie to Radarr by TMDB ID.
+
+    Returns the added movie dict, or None if lookup failed.
+    """
+    movie = lookup_movie(radarr_url, api_key, tmdb_id)
+    if not movie:
+        log.warning("TMDB movie %s not found in Radarr lookup", tmdb_id)
+        return None
+    movie["qualityProfileId"] = quality_profile_id
+    movie["rootFolderPath"] = root_folder_path
+    movie["monitored"] = monitored
+    movie["minimumAvailability"] = "released"
+    movie["tags"] = tags or []
+    movie["addOptions"] = {"searchForMovie": search}
+    url = f"{radarr_url}/api/v3/movie"
+    resp = requests.post(url, headers=_headers(api_key), json=movie, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def lookup_series(sonarr_url, api_key, tmdb_id):
+    """Lookup a series by TMDB ID in Sonarr. Returns full metadata dict or None."""
+    url = f"{sonarr_url}/api/v3/series/lookup"
+    resp = requests.get(url, headers=_headers(api_key),
+                        params={"term": f"tmdb:{tmdb_id}"}, timeout=15)
+    resp.raise_for_status()
+    # Sonarr lookup returns 200 with empty list when not found
+    results = resp.json()
+    if not results:
+        return None
+    return results[0]
+
+
+def add_series(sonarr_url, api_key, tmdb_id, quality_profile_id, root_folder_path,
+               tags=None, monitored=True, search=True):
+    """Add a series to Sonarr by TMDB ID.
+
+    Returns the added series dict, or None if lookup failed.
+    """
+    series = lookup_series(sonarr_url, api_key, tmdb_id)
+    if not series:
+        log.warning("TMDB series %s not found in Sonarr lookup", tmdb_id)
+        return None
+    series["qualityProfileId"] = quality_profile_id
+    series["rootFolderPath"] = root_folder_path
+    series["monitored"] = monitored
+    series["tags"] = tags or []
+    series["addOptions"] = {"searchForMissingEpisodes": search}
+    # Monitor all seasons
+    for s in series.get("seasons", []):
+        s["monitored"] = True
+    url = f"{sonarr_url}/api/v3/series"
+    resp = requests.post(url, headers=_headers(api_key), json=series, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def delete_item(base_url, api_key, app, arr_id, delete_files=True):
     """Delete an item from Radarr/Sonarr.
 

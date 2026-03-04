@@ -22,7 +22,7 @@ bash -n automation/scripts/subtitles/sonarr_profile_extract_on_import.sh
 /config/berenstuff/scripts/library_codec_manager.sh plan --log-level info
 /config/berenstuff/scripts/library_codec_manager.sh convert --dry-run --batch-size 20 --log-level info
 
-# Streaming checker tests (149 tests)
+# Streaming checker tests (169 tests)
 PYTHONPATH=automation/scripts python3 -m pytest automation/scripts/streaming/tests/ -x -q
 
 # Check logs after runs
@@ -74,6 +74,16 @@ All tiers exclude keep-local tagged items, dual-audio items (jpn+spa or eng+spa)
 - Test helpers in `tests/test_cli.py`: `_make_db()`, `_seed_fight_club()`, `_seed_toy_story()`, `_seed_both_movies(**overrides)`
 
 **Dual-audio auto-protect rule:** Any item with dual audio tracks (Japanese+Spanish or English+Spanish) is automatically tagged `keep-local` via `check-audio` subcommand. These are hard to re-acquire and must never be auto-deleted.
+
+### Trending auto-add (`automation/scripts/streaming/trending_add.py`)
+
+Python CLI that fetches trending movies (30) and series (10) from Apple TV+, Paramount+, HBO Max via Movie of the Night API (RapidAPI) and adds new items to Radarr/Sonarr.
+
+Subcommands: `sync`, `preview`, `cache-status`.
+
+Features: auto-detects animated content (genre-based routing to `moviesanimated`/`tvanimated`), `trending-add` tag on all items, JSON file cache (7-day TTL at `/APPBOX_DATA/storage/.trending-cache/`), cross-service dedup, Discord notification.
+
+Cron: weekly Sunday 8 AM (`0 8 * * 0`).
 
 ### Supporting scripts
 

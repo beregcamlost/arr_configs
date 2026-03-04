@@ -188,23 +188,7 @@ def notify_deletion(webhook_url, deleted_items, total_freed_bytes):
     for it in deleted_items:
         size = format_size(it.get("size_bytes", 0) or 0)
         all_lines.append(f"• `{it['title']}` ({it.get('year', '?')}) {size}")
-
-    chunk = []
-    chunk_len = 0
-    chunk_idx = 0
-    for line in all_lines:
-        line_len = len(line) + 1  # +1 for newline
-        if chunk and chunk_len + line_len > 1000:
-            label = "Deleted Items" if chunk_idx == 0 else "⠀"  # invisible braille char for continuation
-            fields.append({"name": label, "value": "\n".join(chunk), "inline": False})
-            chunk = []
-            chunk_len = 0
-            chunk_idx += 1
-        chunk.append(line)
-        chunk_len += line_len
-    if chunk:
-        label = "Deleted Items" if chunk_idx == 0 else "⠀"
-        fields.append({"name": label, "value": "\n".join(chunk), "inline": False})
+    fields.extend(_chunk_item_lines(all_lines, "Deleted Items"))
 
     # Stats row
     fields.append({
