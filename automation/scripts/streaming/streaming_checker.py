@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 import click
 
 from streaming.arr_client import (
+    _detect_library,
     add_tag_to_item,
     delete_item,
     ensure_tag,
@@ -45,13 +46,14 @@ from streaming.db import (
 from streaming.discord import (
     format_size,
     notify_deletion,
+    notify_import_streaming,
     notify_scan_results,
     notify_stale_cleanup,
     notify_stale_flag,
 )
 from streaming.emby_client import get_last_played_map, is_playing, refresh_library
-from streaming.streaming_api_client import get_season_availability
-from streaming.tmdb_client import batch_check
+from streaming.streaming_api_client import get_season_availability, get_streaming_providers, SERVICE_TO_PROVIDER
+from streaming.tmdb_client import batch_check, check_streaming
 
 log = logging.getLogger("streaming_checker")
 
@@ -1201,6 +1203,100 @@ def providers(country):
         priority = p.get("display_priority", "?")
         marker = " <--" if pid in PROVIDER_MAP.values() else ""
         click.echo(f"{pid:>6}  {name:<40}  {priority:>8}{marker}")
+
+
+@cli.command("check-import")
+@click.option("--file", "file_path", required=True, help="Imported file path")
+@click.option("--media-type", required=True, type=click.Choice(["movie", "series"]),
+              help="movie or series")
+@click.option("--arr-id", required=True, type=int, help="Radarr movie ID or Sonarr series ID")
+@click.option("--db-path", default=None, help="Override DB path")
+@click.option("--verbose", is_flag=True)
+def check_import_cmd(file_path, media_type, arr_id, db_path, verbose):
+    """Check if an imported item is on streaming and tag it."""
+    _setup_logging(verbose)
+    cfg = load_config(db_path=db_path)
+    db = cfg.db_path
+    init_db(db)
+
+    # Determine arr type and fetch item
+    if media_type == "movie":
+        app = "movie"
+        base_url = cfg.radarr_url
+        api_key = cfg.radarr_key
+    else:
+        app = "series"
+        base_url = cfg.sonarr_url
+        api_key = cfg.sonarr_key
+
+    item = get_item(base_url, api_key, app, arr_id)
+    if not item:
+        click.echo(f"Item not found: {app}/{arr_id}")
+        return
+
+    # Extract metadata
+    tmdb_id = item.get("tmdbId", 0)
+    title = item.get("title", "Unknown")
+    year = item.get("year", 0)
+    path = item.get("path", "")
+    if media_type == "movie":
+        size_bytes = item.get("movieFile", {}).get("size", 0) if item.get("movieFile") else 0
+    else:
+        size_bytes = item.get("statistics", {}).get("sizeOnDisk", 0)
+    tmdb_media = "movie" if media_type == "movie" else "tv"
+
+    if not tmdb_id:
+        click.echo(f"No TMDB ID for {title} — skipping")
+        return
+
+    # Check if already tagged
+    tag_id = get_tag_id(base_url, api_key, TAG_LABEL)
+    if tag_id and tag_id in item.get("tags", []):
+        click.echo(f"Already tagged streaming-available: {title}")
+        return
+
+    library = _detect_library(path, media_type)
+
+    # Primary: Movie of the Night API
+    providers = []
+    if cfg.rapidapi_key:
+        motn_results = get_streaming_providers(cfg.rapidapi_key, tmdb_id, tmdb_media, country=cfg.country)
+        for p in motn_results:
+            provider_id = SERVICE_TO_PROVIDER.get(p["service_id"])
+            if provider_id and provider_id in cfg.provider_ids:
+                providers.append({"provider_id": provider_id, "provider_name": p["service_name"]})
+
+    # Fallback: TMDB Watch Providers
+    if not providers and cfg.tmdb_api_key:
+        providers = check_streaming(cfg.tmdb_api_key, tmdb_id, tmdb_media, cfg.provider_ids, cfg.country)
+
+    if not providers:
+        click.echo(f"Not on streaming: {title} ({year})")
+        return
+
+    # Tag the item
+    sa_tag_id = ensure_tag(base_url, api_key, TAG_LABEL)
+    add_tag_to_item(base_url, api_key, app, arr_id, sa_tag_id)
+
+    # Upsert each provider match into DB
+    for p in providers:
+        upsert_streaming_item(
+            db, tmdb_id=tmdb_id, media_type=tmdb_media,
+            provider_id=p["provider_id"], provider_name=p["provider_name"],
+            title=title, year=year, arr_id=arr_id,
+            library=library, size_bytes=size_bytes, path=path,
+        )
+
+    provider_names = [p["provider_name"] for p in providers]
+    click.echo(f"Tagged streaming-available: {title} ({year}) — {', '.join(provider_names)}")
+
+    # Discord notification
+    if cfg.discord_webhook_url:
+        notify_import_streaming(
+            cfg.discord_webhook_url,
+            title=title, year=year, media_type=tmdb_media,
+            providers=provider_names,
+        )
 
 
 if __name__ == "__main__":

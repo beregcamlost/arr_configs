@@ -473,3 +473,175 @@ class TestStaleDelete:
         result = runner.invoke(cli, ["stale-delete", "--grace-days", "15", "--yes", "--db-path", db])
         assert result.exit_code == 0, result.output
         assert "Deleted: 0" in result.output
+
+
+class TestCheckImport:
+    """Tests for the check-import subcommand."""
+
+    MOCK_RADARR_ITEM = {
+        "id": 1, "tmdbId": 550, "title": "Fight Club", "year": 1999,
+        "path": "/media/movies/Fight Club (1999)",
+        "movieFile": {"size": 5_000_000_000},
+        "tags": [],
+    }
+
+    MOCK_SONARR_ITEM = {
+        "id": 10, "tvdbId": 81189, "tmdbId": 1396, "title": "Breaking Bad", "year": 2008,
+        "path": "/media/tv/Breaking Bad",
+        "statistics": {"sizeOnDisk": 80_000_000_000},
+        "tags": [],
+    }
+
+    @patch("streaming.streaming_checker.notify_import_streaming")
+    @patch("streaming.streaming_checker.add_tag_to_item")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.get_tag_id", return_value=None)
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.get_item")
+    def test_movie_on_streaming_tags_and_upserts(
+        self, mock_get_item, mock_motn, mock_get_tag, mock_ensure, mock_add_tag,
+        mock_notify, runner, env_config, tmp_path, monkeypatch
+    ):
+        """Movie found on streaming gets tagged + upserted into DB."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-rapid-key")
+        db = _make_db(tmp_path)
+        mock_get_item.return_value = self.MOCK_RADARR_ITEM
+        mock_motn.return_value = [
+            {"service_id": "netflix", "service_name": "Netflix"},
+        ]
+
+        result = runner.invoke(cli, [
+            "check-import", "--file", "/media/movies/Fight Club (1999)/file.mkv",
+            "--media-type", "movie", "--arr-id", "1", "--db-path", db,
+        ])
+        assert result.exit_code == 0, result.output
+        assert "Netflix" in result.output
+        mock_add_tag.assert_called_once()
+        mock_notify.assert_called_once()
+
+    @patch("streaming.streaming_checker.add_tag_to_item")
+    @patch("streaming.streaming_checker.get_tag_id", return_value=None)
+    @patch("streaming.streaming_checker.get_streaming_providers", return_value=[])
+    @patch("streaming.streaming_checker.check_streaming")
+    @patch("streaming.streaming_checker.get_item")
+    def test_movie_not_on_streaming_no_tag(
+        self, mock_get_item, mock_tmdb, mock_motn, mock_get_tag, mock_add_tag,
+        runner, env_config, tmp_path
+    ):
+        """Movie not on any streaming — no tag added."""
+        db = _make_db(tmp_path)
+        mock_get_item.return_value = self.MOCK_RADARR_ITEM
+        mock_tmdb.return_value = []
+
+        result = runner.invoke(cli, [
+            "check-import", "--file", "/media/movies/Fight Club (1999)/file.mkv",
+            "--media-type", "movie", "--arr-id", "1", "--db-path", db,
+        ])
+        assert result.exit_code == 0, result.output
+        mock_add_tag.assert_not_called()
+
+    @patch("streaming.streaming_checker.add_tag_to_item")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.get_tag_id", return_value=None)
+    @patch("streaming.streaming_checker.get_streaming_providers", return_value=[])
+    @patch("streaming.streaming_checker.check_streaming")
+    @patch("streaming.streaming_checker.get_item")
+    def test_tmdb_fallback_when_motn_empty(
+        self, mock_get_item, mock_tmdb, mock_motn, mock_get_tag, mock_ensure, mock_add_tag,
+        runner, env_config, tmp_path
+    ):
+        """Falls back to TMDB when MoTN returns empty."""
+        db = _make_db(tmp_path)
+        mock_get_item.return_value = self.MOCK_RADARR_ITEM
+        mock_tmdb.return_value = [{"provider_id": 8, "provider_name": "Netflix"}]
+
+        result = runner.invoke(cli, [
+            "check-import", "--file", "/media/movies/Fight Club (1999)/file.mkv",
+            "--media-type", "movie", "--arr-id", "1", "--db-path", db,
+        ])
+        assert result.exit_code == 0, result.output
+        mock_tmdb.assert_called_once()
+        mock_add_tag.assert_called_once()
+
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.get_item")
+    def test_already_tagged_skips_api(
+        self, mock_get_item, mock_motn, runner, env_config, tmp_path
+    ):
+        """Item already tagged streaming-available skips all API calls."""
+        db = _make_db(tmp_path)
+        item = dict(self.MOCK_RADARR_ITEM)
+        item["tags"] = [1]  # tag_id 1 = streaming-available
+        mock_get_item.return_value = item
+
+        with patch("streaming.streaming_checker.get_tag_id", return_value=1):
+            result = runner.invoke(cli, [
+                "check-import", "--file", "/media/movies/Fight Club (1999)/file.mkv",
+                "--media-type", "movie", "--arr-id", "1", "--db-path", db,
+            ])
+        assert result.exit_code == 0, result.output
+        mock_motn.assert_not_called()
+        assert "already tagged" in result.output.lower()
+
+    @patch("streaming.streaming_checker.get_item", return_value=None)
+    def test_item_not_found_exits_gracefully(
+        self, mock_get_item, runner, env_config, tmp_path
+    ):
+        """arr_id not found in Sonarr/Radarr — exits 0 with warning."""
+        db = _make_db(tmp_path)
+        result = runner.invoke(cli, [
+            "check-import", "--file", "/test/file.mkv",
+            "--media-type", "movie", "--arr-id", "999", "--db-path", db,
+        ])
+        assert result.exit_code == 0, result.output
+        assert "not found" in result.output.lower()
+
+    @patch("streaming.streaming_checker.notify_import_streaming")
+    @patch("streaming.streaming_checker.add_tag_to_item")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.get_tag_id", return_value=None)
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.get_item")
+    def test_series_on_streaming(
+        self, mock_get_item, mock_motn, mock_get_tag, mock_ensure, mock_add_tag,
+        mock_notify, runner, env_config, tmp_path, monkeypatch
+    ):
+        """TV series found on streaming gets tagged."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-rapid-key")
+        db = _make_db(tmp_path)
+        mock_get_item.return_value = self.MOCK_SONARR_ITEM
+        mock_motn.return_value = [
+            {"service_id": "disney", "service_name": "Disney+"},
+        ]
+
+        result = runner.invoke(cli, [
+            "check-import", "--file", "/media/tv/Breaking Bad/Season 1/ep.mkv",
+            "--media-type", "series", "--arr-id", "10", "--db-path", db,
+        ])
+        assert result.exit_code == 0, result.output
+        mock_add_tag.assert_called_once()
+
+    @patch("streaming.streaming_checker.notify_import_streaming")
+    @patch("streaming.streaming_checker.add_tag_to_item")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.get_tag_id", return_value=None)
+    @patch("streaming.streaming_checker.get_streaming_providers", return_value=[])
+    @patch("streaming.streaming_checker.check_streaming")
+    @patch("streaming.streaming_checker.get_item")
+    def test_no_rapidapi_key_skips_motn(
+        self, mock_get_item, mock_tmdb, mock_motn, mock_get_tag, mock_ensure, mock_add_tag,
+        mock_notify, runner, env_config, tmp_path, monkeypatch
+    ):
+        """Without RAPIDAPI_KEY, skips MoTN and goes straight to TMDB."""
+        db = _make_db(tmp_path)
+        monkeypatch.delenv("RAPIDAPI_KEY", raising=False)
+        mock_get_item.return_value = self.MOCK_RADARR_ITEM
+        mock_tmdb.return_value = [{"provider_id": 8, "provider_name": "Netflix"}]
+
+        result = runner.invoke(cli, [
+            "check-import", "--file", "/media/movies/Fight Club (1999)/file.mkv",
+            "--media-type", "movie", "--arr-id", "1", "--db-path", db,
+        ])
+        assert result.exit_code == 0, result.output
+        mock_motn.assert_not_called()
+        mock_tmdb.assert_called_once()
