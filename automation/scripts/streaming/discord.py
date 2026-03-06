@@ -328,3 +328,23 @@ def notify_stale_cleanup(webhook_url, deleted_items, kept_items,
         fields,
         footer=f"Threshold: {no_play_days}d no play, >{min_size_gb} GB auto-delete",
     )
+
+
+def notify_import_streaming(webhook_url, title, year, media_type, providers):
+    """Send a brief Discord notification when an imported item is on streaming."""
+    if not webhook_url:
+        return
+    kind = "Movie" if media_type == "movie" else "Series"
+    provider_list = ", ".join(providers)
+    send_embed(
+        webhook_url,
+        title=f"\U0001f4e1 Streaming Detected \u2014 Import \u2014 {title}",
+        description=f"**{title}** ({year}) is available on streaming",
+        color=BLUE,
+        fields=[
+            {"name": "Title", "value": f"`{title} ({year})`", "inline": True},
+            {"name": "Type", "value": kind, "inline": True},
+            {"name": "Providers", "value": provider_list, "inline": True},
+        ],
+        footer=f"Event: Import \u00b7 check-import",
+    )

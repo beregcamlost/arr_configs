@@ -82,6 +82,62 @@ def get_season_availability(api_key, tmdb_id, country="cl"):
     return result
 
 
+# Mapping from MoTN service IDs to TMDB provider IDs (same as check-seasons)
+SERVICE_TO_PROVIDER = {
+    "netflix": 8, "disney": 337, "hbo": 384,
+    "prime": 119, "apple": 350, "paramount": 531,
+}
+
+
+def get_streaming_providers(api_key, tmdb_id, media_type, country="cl"):
+    """Check if a single item is available for streaming via Movie of the Night API.
+
+    Args:
+        api_key: RapidAPI key
+        tmdb_id: TMDB ID (integer)
+        media_type: 'movie' or 'tv'
+        country: ISO 3166-1 alpha-2 country code (lowercase)
+
+    Returns:
+        list of dicts with {service_id, service_name} for subscription-type providers.
+        Returns empty list on error (fail-open).
+    """
+    prefix = "movie" if media_type == "movie" else "tv"
+    url = f"{BASE_URL}/shows/{prefix}/{tmdb_id}"
+    headers = _rapidapi_headers(api_key)
+    params = {"country": country.lower()}
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        if resp.status_code == 429:
+            log.warning("RapidAPI rate limit hit (429) for TMDB %s", tmdb_id)
+            return []
+        if resp.status_code in (401, 403):
+            log.warning("RapidAPI auth error (%d) — check RAPIDAPI_KEY", resp.status_code)
+            return []
+        if resp.status_code == 404:
+            log.debug("TMDB %s (%s) not found in Streaming Availability API", tmdb_id, media_type)
+            return []
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        log.warning("Streaming Availability API error for TMDB %s: %s", tmdb_id, e)
+        return []
+
+    data = resp.json()
+    options = data.get("streamingOptions", {}).get(country.lower(), [])
+    seen = set()
+    result = []
+    for opt in options:
+        if opt.get("type") != "subscription":
+            continue
+        service = opt.get("service", {})
+        sid = service.get("id", "")
+        if sid and sid not in seen:
+            seen.add(sid)
+            result.append({"service_id": sid, "service_name": service.get("name", sid)})
+    return result
+
+
 def search_catalog(api_key, service, show_type, country="cl", limit=20):
     """Search streaming catalog for trending titles on a service.
 

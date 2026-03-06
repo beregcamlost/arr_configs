@@ -12,6 +12,7 @@ from streaming.discord import (
     YELLOW,
     format_size,
     notify_deletion,
+    notify_import_streaming,
     notify_scan_results,
     notify_stale_flag,
     send_embed,
@@ -152,4 +153,28 @@ class TestNotifyStaleFlagging:
     @patch("streaming.discord.requests.post")
     def test_notify_stale_flag_not_sent_if_empty(self, mock_post):
         notify_stale_flag("https://discord.com/test", [], [])
+        mock_post.assert_not_called()
+
+
+class TestNotifyImportStreaming:
+    @patch("streaming.discord.requests.post")
+    def test_sends_embed(self, mock_post):
+        mock_post.return_value.status_code = 204
+        notify_import_streaming(
+            "https://hook.example.com",
+            title="Fight Club",
+            year=1999,
+            media_type="movie",
+            providers=["Netflix", "Disney+"],
+        )
+        mock_post.assert_called_once()
+        payload = mock_post.call_args[1]["json"]
+        embed = payload["embeds"][0]
+        assert "Fight Club" in embed["title"]
+        assert embed["color"] == 3447003  # BLUE
+        assert any("Netflix" in f["value"] for f in embed["fields"])
+
+    @patch("streaming.discord.requests.post")
+    def test_skips_empty_webhook(self, mock_post):
+        notify_import_streaming("", title="X", year=2020, media_type="movie", providers=["Netflix"])
         mock_post.assert_not_called()

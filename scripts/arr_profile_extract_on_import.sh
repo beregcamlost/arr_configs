@@ -342,6 +342,21 @@ main() {
     >> /config/berenstuff/automation/logs/codec_enqueue_import.log 2>&1 </dev/null &
   disown
 
+  # Check streaming availability and tag (background, non-blocking)
+  local streaming_media_type
+  if [[ "$ARR_TYPE" == "sonarr" ]]; then
+    streaming_media_type="series"
+  else
+    streaming_media_type="movie"
+  fi
+  (
+    source /config/berenstuff/.env
+    PYTHONPATH=/config/berenstuff/automation/scripts \
+      python3 /config/berenstuff/automation/scripts/streaming/streaming_checker.py \
+      check-import --file "$MEDIA_PATH" --media-type "$streaming_media_type" --arr-id "$MEDIA_ID"
+  ) >> /config/berenstuff/automation/logs/streaming_check_import.log 2>&1 </dev/null &
+  disown
+
   if [[ "$WRITES" -gt 0 ]]; then
     notify_discord "SUCCESS" "**$WRITES** extracted · **$SKIPS** skipped · **$PRUNES** pruned"
   else
