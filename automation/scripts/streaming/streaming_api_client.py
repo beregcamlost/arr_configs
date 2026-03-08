@@ -138,8 +138,20 @@ def get_streaming_providers(api_key, tmdb_id, media_type, country="cl"):
     return result
 
 
+def _is_on_service(item_streaming_options, service, country):
+    """Check if an item's streamingOptions includes the given service."""
+    for opt in item_streaming_options.get(country, []):
+        if opt.get("service", {}).get("id") == service:
+            return True
+    return False
+
+
 def search_catalog(api_key, service, show_type, country="cl", limit=20):
     """Search streaming catalog for trending titles on a service.
+
+    The API's `services` parameter does NOT reliably filter by actual streaming
+    availability — it returns popularity-sorted results regardless. We over-fetch
+    and apply client-side filtering to only keep items actually on the service.
 
     Args:
         api_key: RapidAPI key
@@ -153,12 +165,15 @@ def search_catalog(api_key, service, show_type, country="cl", limit=20):
         Returns empty list on error (fail-open).
     """
     headers = _rapidapi_headers(api_key)
-    results = []
+    # Over-fetch to compensate for client-side filtering
+    fetch_limit = limit * 3
+    raw_results = []
     cursor = None
+    country_lower = country.lower()
 
-    while len(results) < limit:
+    while len(raw_results) < fetch_limit:
         params = {
-            "country": country.lower(),
+            "country": country_lower,
             "services": service,
             "show_type": show_type,
             "order_by": "popularity_1year",
@@ -183,10 +198,15 @@ def search_catalog(api_key, service, show_type, country="cl", limit=20):
 
         data = resp.json()
         for show in data.get("shows", []):
+            # Client-side filter: only keep items actually on this service
+            streaming_opts = show.get("streamingOptions", {})
+            if not _is_on_service(streaming_opts, service, country_lower):
+                continue
+
             # tmdbId format: "movie/12345" or "tv/12345"
             raw_tmdb = show.get("tmdbId", "")
             tmdb_id = int(raw_tmdb.split("/")[-1]) if "/" in raw_tmdb else 0
-            results.append({
+            raw_results.append({
                 "tmdb_id": tmdb_id,
                 "title": show.get("title", ""),
                 "year": show.get("releaseYear", 0),
@@ -195,13 +215,19 @@ def search_catalog(api_key, service, show_type, country="cl", limit=20):
                            for g in show.get("genres", [])],
                 "imdb_id": show.get("imdbId", ""),
             })
-            if len(results) >= limit:
+            if len(raw_results) >= limit:
                 break
 
+        if len(raw_results) >= limit:
+            break
         if not data.get("hasMore"):
             break
         cursor = data.get("nextCursor")
         if not cursor:
             break
 
-    return results[:limit]
+    filtered_count = len(raw_results)
+    if filtered_count < limit:
+        log.info("Service filter: %d items matched %s (requested %d)", filtered_count, service, limit)
+
+    return raw_results[:limit]

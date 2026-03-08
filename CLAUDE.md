@@ -81,7 +81,7 @@ Python CLI that fetches trending movies (30) and series (10) from Apple TV+, Par
 
 Subcommands: `sync`, `preview`, `cache-status`.
 
-Features: auto-detects animated content (genre-based routing to `moviesanimated`/`tvanimated`), `trending-add` tag on all items, JSON file cache (7-day TTL at `/APPBOX_DATA/storage/.trending-cache/`), cross-service dedup, Discord notification.
+Features: auto-detects animated content (genre-based routing to `moviesanimated`/`tvanimated`), `trending-add` tag on all items, JSON file cache (7-day TTL at `/APPBOX_DATA/storage/.trending-cache/`), cross-service dedup, Discord notification. Client-side service filtering in `search_catalog()` via `_is_on_service()` — the MoTN API `services` param does NOT filter by actual availability, so results are over-fetched 3x and filtered locally.
 
 Cron: weekly Sunday 8 AM (`0 8 * * 0`).
 

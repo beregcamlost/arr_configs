@@ -225,7 +225,8 @@ def test_search_catalog_parses_tmdb_id(mock_get):
             "shows": [
                 {"tmdbId": "movie/12345", "title": "Test Film",
                  "releaseYear": 2025, "showType": "movie",
-                 "genres": [{"name": "Action"}], "imdbId": "tt999"},
+                 "genres": [{"name": "Action"}], "imdbId": "tt999",
+                 "streamingOptions": {"cl": [{"service": {"id": "apple"}}]}},
             ],
             "hasMore": False,
         }),
@@ -255,7 +256,8 @@ def test_search_catalog_pagination(mock_get):
         json=MagicMock(return_value={
             "shows": [{"tmdbId": f"movie/{i}", "title": f"Film {i}",
                         "releaseYear": 2025, "showType": "movie",
-                        "genres": [], "imdbId": f"tt{i}"} for i in range(20)],
+                        "genres": [], "imdbId": f"tt{i}",
+                        "streamingOptions": {"cl": [{"service": {"id": "apple"}}]}} for i in range(20)],
             "hasMore": True,
             "nextCursor": "abc123",
         }),
@@ -266,7 +268,8 @@ def test_search_catalog_pagination(mock_get):
         json=MagicMock(return_value={
             "shows": [{"tmdbId": f"movie/{i}", "title": f"Film {i}",
                         "releaseYear": 2025, "showType": "movie",
-                        "genres": [], "imdbId": f"tt{i}"} for i in range(20, 35)],
+                        "genres": [], "imdbId": f"tt{i}",
+                        "streamingOptions": {"cl": [{"service": {"id": "apple"}}]}} for i in range(20, 35)],
             "hasMore": False,
         }),
     )
@@ -276,3 +279,34 @@ def test_search_catalog_pagination(mock_get):
     from streaming.streaming_api_client import search_catalog
     results = search_catalog("key", "apple", "movie", limit=30)
     assert len(results) == 30
+
+
+@patch("streaming.streaming_api_client.requests.get")
+def test_search_catalog_filters_by_service(mock_get):
+    """Items not actually on the requested service are filtered out."""
+    mock_get.return_value = MagicMock(
+        status_code=200,
+        json=MagicMock(return_value={
+            "shows": [
+                {"tmdbId": "movie/1", "title": "On Apple",
+                 "releaseYear": 2025, "showType": "movie",
+                 "genres": [], "imdbId": "tt1",
+                 "streamingOptions": {"cl": [{"service": {"id": "apple"}}]}},
+                {"tmdbId": "movie/2", "title": "On Netflix Only",
+                 "releaseYear": 2025, "showType": "movie",
+                 "genres": [], "imdbId": "tt2",
+                 "streamingOptions": {"cl": [{"service": {"id": "netflix"}}]}},
+                {"tmdbId": "movie/3", "title": "No Streaming",
+                 "releaseYear": 2025, "showType": "movie",
+                 "genres": [], "imdbId": "tt3",
+                 "streamingOptions": {}},
+            ],
+            "hasMore": False,
+        }),
+    )
+    mock_get.return_value.raise_for_status = MagicMock()
+
+    from streaming.streaming_api_client import search_catalog
+    results = search_catalog("key", "apple", "movie", limit=10)
+    assert len(results) == 1
+    assert results[0]["title"] == "On Apple"
