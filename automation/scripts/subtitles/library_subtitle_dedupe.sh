@@ -36,6 +36,8 @@ Options:
 EOF
 }
 
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --path-prefix)
@@ -640,3 +642,5 @@ if [[ "$DRY_RUN" -eq 0 && "$changed" -gt 0 && -n "${DISCORD_WEBHOOK_URL:-}" ]]; 
 fi
 
 log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed converted=$total_converted renamed=$total_renamed removed=$total_removed stripped=$total_stripped rescans=$rescan_count"
+
+fi

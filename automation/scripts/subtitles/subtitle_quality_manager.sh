@@ -75,71 +75,6 @@ Examples:
 EOF
 }
 
-COMMAND="${1:-}"
-[[ -z "$COMMAND" ]] && { usage; exit 1; }
-shift
-
-case "$COMMAND" in
-  audit|mux|strip|auto-maintain|enqueue) ;;
-  --help|-h) usage; exit 0 ;;
-  *) echo "Unknown command: $COMMAND" >&2; usage; exit 1 ;;
-esac
-
-ENQUEUE_FILES=()
-if [[ "$COMMAND" == "enqueue" ]]; then
-  # enqueue takes positional file paths + optional --state-dir
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --state-dir) STATE_DIR="${2:-}"; shift 2 ;;
-      --help|-h)   usage; exit 0 ;;
-      *)           ENQUEUE_FILES+=("$1"); shift ;;
-    esac
-  done
-  [[ ${#ENQUEUE_FILES[@]} -eq 0 ]] && { echo "enqueue requires at least one file path." >&2; exit 1; }
-else
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --path)       PATH_PREFIX="${2:-}"; shift 2 ;;
-      --recursive)  RECURSIVE=1; shift ;;
-      --dry-run)    DRY_RUN=1; shift ;;
-      --force)      FORCE=1; shift ;;
-      --track)      TRACK_TARGET="${2:-}"; shift 2 ;;
-      --keep-only)  KEEP_ONLY="${2:-}"; shift 2 ;;
-      --keep-profile-langs) KEEP_PROFILE_LANGS=1; shift ;;
-      --bloat-threshold) BLOAT_THRESHOLD="${2:-6}"; shift 2 ;;
-      --bazarr-url) BAZARR_URL="${2:-}"; shift 2 ;;
-      --bazarr-db)  BAZARR_DB="${2:-}"; shift 2 ;;
-      --state-dir)  STATE_DIR="${2:-}"; shift 2 ;;
-      --codec-state-dir) CODEC_STATE_DIR="${2:-}"; shift 2 ;;
-      --log-level)  LOG_LEVEL="${2:-}"; shift 2 ;;
-      --path-prefix) PATH_PREFIX_ROOT="${2:-}"; shift 2 ;;
-      --since)       SINCE_MINUTES="${2:-0}"; shift 2 ;;
-      --emby-url)    EMBY_URL="${2:-}"; shift 2 ;;
-      --emby-api-key) EMBY_API_KEY="${2:-}"; shift 2 ;;
-      --help|-h)    usage; exit 0 ;;
-      *)            echo "Unknown option: $1" >&2; usage; exit 1 ;;
-    esac
-  done
-fi
-
-if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]] && [[ "$COMMAND" != "enqueue" ]]; then
-  echo "--path is required." >&2; exit 1
-fi
-
-if [[ "$COMMAND" == "auto-maintain" ]] && [[ -z "$PATH_PREFIX_ROOT" ]]; then
-  echo "--path-prefix is required for auto-maintain." >&2; exit 1
-fi
-
-if [[ "$COMMAND" == "strip" ]] && [[ -z "$TRACK_TARGET" ]] && [[ -z "$KEEP_ONLY" ]]; then
-  echo "--track or --keep-only is required for strip command." >&2; exit 1
-fi
-
-if [[ "$COMMAND" == "strip" ]] && [[ -n "$TRACK_TARGET" ]] && [[ -n "$KEEP_ONLY" ]]; then
-  echo "--track and --keep-only are mutually exclusive." >&2; exit 1
-fi
-
-BAZARR_API_KEY="${BAZARR_API_KEY:-$(getenv_fallback BAZARR_API_KEY BAZARR_KEY)}"
-
 # Override lib's log() with our own prefix
 log() {
   printf '%s [sub-quality] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S')" "$*" >&2
@@ -1833,6 +1768,73 @@ cmd_enqueue() {
   log "enqueue done: $count file(s) added to pending queue"
 }
 
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+
+COMMAND="${1:-}"
+[[ -z "$COMMAND" ]] && { usage; exit 1; }
+shift
+
+case "$COMMAND" in
+  audit|mux|strip|auto-maintain|enqueue) ;;
+  --help|-h) usage; exit 0 ;;
+  *) echo "Unknown command: $COMMAND" >&2; usage; exit 1 ;;
+esac
+
+ENQUEUE_FILES=()
+if [[ "$COMMAND" == "enqueue" ]]; then
+  # enqueue takes positional file paths + optional --state-dir
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --state-dir) STATE_DIR="${2:-}"; shift 2 ;;
+      --help|-h)   usage; exit 0 ;;
+      *)           ENQUEUE_FILES+=("$1"); shift ;;
+    esac
+  done
+  [[ ${#ENQUEUE_FILES[@]} -eq 0 ]] && { echo "enqueue requires at least one file path." >&2; exit 1; }
+else
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --path)       PATH_PREFIX="${2:-}"; shift 2 ;;
+      --recursive)  RECURSIVE=1; shift ;;
+      --dry-run)    DRY_RUN=1; shift ;;
+      --force)      FORCE=1; shift ;;
+      --track)      TRACK_TARGET="${2:-}"; shift 2 ;;
+      --keep-only)  KEEP_ONLY="${2:-}"; shift 2 ;;
+      --keep-profile-langs) KEEP_PROFILE_LANGS=1; shift ;;
+      --bloat-threshold) BLOAT_THRESHOLD="${2:-6}"; shift 2 ;;
+      --bazarr-url) BAZARR_URL="${2:-}"; shift 2 ;;
+      --bazarr-db)  BAZARR_DB="${2:-}"; shift 2 ;;
+      --state-dir)  STATE_DIR="${2:-}"; shift 2 ;;
+      --codec-state-dir) CODEC_STATE_DIR="${2:-}"; shift 2 ;;
+      --log-level)  LOG_LEVEL="${2:-}"; shift 2 ;;
+      --path-prefix) PATH_PREFIX_ROOT="${2:-}"; shift 2 ;;
+      --since)       SINCE_MINUTES="${2:-0}"; shift 2 ;;
+      --emby-url)    EMBY_URL="${2:-}"; shift 2 ;;
+      --emby-api-key) EMBY_API_KEY="${2:-}"; shift 2 ;;
+      --help|-h)    usage; exit 0 ;;
+      *)            echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    esac
+  done
+fi
+
+if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]] && [[ "$COMMAND" != "enqueue" ]]; then
+  echo "--path is required." >&2; exit 1
+fi
+
+if [[ "$COMMAND" == "auto-maintain" ]] && [[ -z "$PATH_PREFIX_ROOT" ]]; then
+  echo "--path-prefix is required for auto-maintain." >&2; exit 1
+fi
+
+if [[ "$COMMAND" == "strip" ]] && [[ -z "$TRACK_TARGET" ]] && [[ -z "$KEEP_ONLY" ]]; then
+  echo "--track or --keep-only is required for strip command." >&2; exit 1
+fi
+
+if [[ "$COMMAND" == "strip" ]] && [[ -n "$TRACK_TARGET" ]] && [[ -n "$KEEP_ONLY" ]]; then
+  echo "--track and --keep-only are mutually exclusive." >&2; exit 1
+fi
+
+BAZARR_API_KEY="${BAZARR_API_KEY:-$(getenv_fallback BAZARR_API_KEY BAZARR_KEY)}"
+
 case "$COMMAND" in
   audit)        cmd_audit ;;
   mux)          cmd_mux ;;
@@ -1840,3 +1842,5 @@ case "$COMMAND" in
   auto-maintain) cmd_auto_maintain ;;
   enqueue)      cmd_enqueue ;;
 esac
+
+fi

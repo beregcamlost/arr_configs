@@ -32,3 +32,4 @@ __pycache__/
 automation/configs/sonarr-config.xml
 automation/configs/radarr-config.xml
 automation/configs/bazarr-config.yaml
+tests/bats/vendor/

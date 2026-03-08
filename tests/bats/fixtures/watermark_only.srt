@@ -1,0 +1,12 @@
+1
+00:00:01,000 --> 00:00:03,000
+YIFY Subtitles
+
+2
+00:00:04,000 --> 00:00:06,000
+<font color="#00ff00">Advertise your product or brand here</font>
+
+3
+00:00:07,000 --> 00:00:09,000
+Downloaded from opensubtitles.org
+

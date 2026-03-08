@@ -36,6 +36,8 @@ Options:
 EOF
 }
 
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --path-prefix)
@@ -584,6 +586,14 @@ if [[ "$DRY_RUN" -eq 0 && "${#changed_paths[@]}" -gt 0 && -n "${EMBY_URL:-}" && 
   done
 fi
 
+# Enqueue changed files for subtitle auto-maintain (ensures mux/strip even if --since window is missed)
+if [[ "$DRY_RUN" -eq 0 && "${#changed_paths[@]}" -gt 0 ]]; then
+  for _cp in "${changed_paths[@]}"; do
+    /config/berenstuff/automation/scripts/subtitles/subtitle_quality_manager.sh enqueue \
+      "$_cp" >> /config/berenstuff/automation/logs/subtitle_quality_manager.log 2>&1 </dev/null || true
+  done
+fi
+
 # Discord notification (only when changes were made)
 if [[ "$DRY_RUN" -eq 0 && "$changed" -gt 0 && -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
   _elapsed=$(( SECONDS - _dedupe_start ))
@@ -632,3 +642,5 @@ if [[ "$DRY_RUN" -eq 0 && "$changed" -gt 0 && -n "${DISCORD_WEBHOOK_URL:-}" ]]; 
 fi
 
 log "Done scanned=$scanned processed=$processed skipped_unchanged=$skipped_unchanged changed=$changed converted=$total_converted renamed=$total_renamed removed=$total_removed stripped=$total_stripped rescans=$rescan_count"
+
+fi
