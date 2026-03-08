@@ -495,13 +495,18 @@ cmd_mux() {
     emb_json_mux="$(get_embedded_subs "$mkv_file")"
     emb_count_mux="$(jq 'length' <<<"$emb_json_mux")"
     declare -A embedded_lang_idx=()
+    declare -A embedded_lang_codec=()
     for ((ei=0; ei<emb_count_mux; ei++)); do
-      local ei_lang ei_idx ei_norm
+      local ei_lang ei_idx ei_norm ei_codec
       ei_idx="$(jq -r ".[$ei].index" <<<"$emb_json_mux")"
       ei_lang="$(jq -r ".[$ei].tags.language" <<<"$emb_json_mux")"
+      ei_codec="$(jq -r ".[$ei].codec_name" <<<"$emb_json_mux")"
       ei_norm="$(normalize_track_lang "$ei_lang")"
       # Keep first (oldest) track index per normalized language for collision detection
-      [[ -z "${embedded_lang_idx[$ei_norm]:-}" ]] && embedded_lang_idx["$ei_norm"]="$ei_idx"
+      if [[ -z "${embedded_lang_idx[$ei_norm]:-}" ]]; then
+        embedded_lang_idx["$ei_norm"]="$ei_idx"
+        embedded_lang_codec["$ei_norm"]="$ei_codec"
+      fi
     done
     local -a premux_strip_indices=()
 
@@ -532,13 +537,35 @@ cmd_mux() {
         continue
       fi
 
-      # Pre-mux collision check: if embedded track exists for this language, mark for stripping
+      # Pre-mux collision check: only strip embedded if external is actually better
       local srt_norm
       srt_norm="$(normalize_track_lang "$ext_lang")"
       if [[ -n "${embedded_lang_idx[$srt_norm]:-}" ]]; then
         local collide_idx="${embedded_lang_idx[$srt_norm]}"
-        premux_strip_indices+=("$collide_idx")
-        log "COLLISION lang=$srt_norm: will replace embedded idx=$collide_idx with better external SRT: $srt_basename"
+        local collide_codec="${embedded_lang_codec[$srt_norm]:-unknown}"
+        local ext_wins=1
+        # For text-based embedded subs, compare quality before stripping
+        if is_text_sub_codec "$collide_codec"; then
+          local emb_tmp="${mkv_file%.*}.emb_cmp_${srt_norm}.srt"
+          if ffmpeg -y -v quiet -i "$mkv_file" -map "0:${collide_idx}" "$emb_tmp" </dev/null 2>/dev/null && [[ -s "$emb_tmp" ]]; then
+            local emb_analysis emb_cues emb_first emb_last emb_mojibake emb_wm emb_rating
+            emb_analysis="$(analyze_srt_file "$emb_tmp")"
+            read -r emb_cues emb_first emb_last emb_mojibake emb_wm <<<"$emb_analysis"
+            emb_rating="$(score_subtitle "$emb_cues" "$emb_first" "$emb_last" "$duration" "$emb_mojibake" "$emb_wm")"
+            if [[ "$emb_rating" == "GOOD" && "$emb_cues" -gt "$cues" ]]; then
+              ext_wins=0
+              log "PROTECT embedded idx=$collide_idx lang=$srt_norm (${emb_cues} cues > external ${cues} cues): $srt_basename"
+            elif [[ "$emb_rating" == "GOOD" && "$rating" != "GOOD" ]]; then
+              ext_wins=0
+              log "PROTECT embedded idx=$collide_idx lang=$srt_norm (GOOD vs external ${rating}): $srt_basename"
+            fi
+          fi
+          rm -f "$emb_tmp"
+        fi
+        if [[ "$ext_wins" -eq 1 ]]; then
+          premux_strip_indices+=("$collide_idx")
+          log "COLLISION lang=$srt_norm: will replace embedded idx=$collide_idx with external SRT: $srt_basename"
+        fi
         unset "embedded_lang_idx[$srt_norm]"
       fi
 
@@ -828,8 +855,9 @@ cmd_auto_maintain() {
   [[ "$pending_count" -gt 0 ]] && log "auto-maintain: drained $pending_count file(s) from pending queue"
 
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
-  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0
+  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0 bad_deleted=0
   local -a modified_dirs=()
+  local -a bad_search_queue=()
   local -A bazarr_rescanned=()
 
   # Cleanup orphaned temp files from interrupted operations (older than 1 hour)
@@ -939,8 +967,43 @@ cmd_auto_maintain() {
           p0_codec="$(jq -r ".[$i].codec_name" <<<"$emb_json_p0")"
           p0_forced="$(jq -r ".[$i].forced" <<<"$emb_json_p0")"
 
-          # Skip tracks that belong to the profile
-          lang_in_set "$p0_lang" "$am_profile_set" && continue
+          # Profile tracks: never strip, but extract as translation source if needed
+          if lang_in_set "$p0_lang" "$am_profile_set"; then
+            # Check if this profile-lang embedded track can serve as a DeepL translation source
+            local p0_profile_norm
+            p0_profile_norm="$(normalize_track_lang "$p0_lang")"
+            local p0_profile_out="${dir}/${name_stem}.${p0_profile_norm}.srt"
+            if is_text_sub_codec "$p0_codec" && [[ "$p0_forced" -ne 1 ]] && [[ ! -f "$p0_profile_out" ]]; then
+              # Check if at least one OTHER profile language is missing an external SRT
+              local _p0_has_missing=0
+              IFS=',' read -ra _p0_pcodes <<< "$am_profile_langs"
+              for _p0_pc in "${_p0_pcodes[@]}"; do
+                local _p0_pc_norm
+                _p0_pc_norm="$(normalize_track_lang "$_p0_pc")"
+                [[ "$_p0_pc_norm" == "$p0_profile_norm" ]] && continue
+                if [[ ! -f "${dir}/${name_stem}.${_p0_pc_norm}.srt" ]]; then
+                  _p0_has_missing=1
+                  break
+                fi
+              done
+              if [[ "$_p0_has_missing" -eq 1 ]]; then
+                if [[ "$DRY_RUN" -eq 0 ]]; then
+                  if ffmpeg -v quiet -i "$mkv_file" -map "0:${p0_idx}" -f srt "$p0_profile_out" </dev/null 2>/dev/null && [[ -s "$p0_profile_out" ]]; then
+                    touch "${p0_profile_out}.deepl-source"
+                    log "EXTRACTED profile embedded as translation source: ${name_stem}.${p0_profile_norm}.srt: $basename"
+                    extracted_nonprofile=$((extracted_nonprofile + 1))
+                  else
+                    rm -f "$p0_profile_out"
+                    log "WARN: extraction failed for translation source idx=${p0_idx} lang=${p0_profile_norm}: $basename"
+                  fi
+                else
+                  log "[DRY-RUN] Would extract profile embedded as translation source: ${name_stem}.${p0_profile_norm}.srt: $basename"
+                  extracted_nonprofile=$((extracted_nonprofile + 1))
+                fi
+              fi
+            fi
+            continue
+          fi
 
           local p0_norm_lang
           p0_norm_lang="$(normalize_track_lang "$p0_lang")"
@@ -1043,12 +1106,17 @@ cmd_auto_maintain() {
     emb_json_p1="$(get_embedded_subs "$mkv_file")"
     emb_count_p1="$(jq 'length' <<<"$emb_json_p1")"
     declare -A embedded_lang_idx_p1=()
+    declare -A embedded_lang_codec_p1=()
     for ((ei=0; ei<emb_count_p1; ei++)); do
-      local ei_lang ei_idx ei_norm
+      local ei_lang ei_idx ei_norm ei_codec
       ei_idx="$(jq -r ".[$ei].index" <<<"$emb_json_p1")"
       ei_lang="$(jq -r ".[$ei].tags.language" <<<"$emb_json_p1")"
+      ei_codec="$(jq -r ".[$ei].codec_name" <<<"$emb_json_p1")"
       ei_norm="$(normalize_track_lang "$ei_lang")"
-      [[ -z "${embedded_lang_idx_p1[$ei_norm]:-}" ]] && embedded_lang_idx_p1["$ei_norm"]="$ei_idx"
+      if [[ -z "${embedded_lang_idx_p1[$ei_norm]:-}" ]]; then
+        embedded_lang_idx_p1["$ei_norm"]="$ei_idx"
+        embedded_lang_codec_p1["$ei_norm"]="$ei_codec"
+      fi
     done
     local -a premux_strip_indices_p1=()
 
@@ -1067,6 +1135,11 @@ cmd_auto_maintain() {
 
       case "$rating" in
         GOOD)
+          # Skip translation-source extractions (embedded original stays intact)
+          if [[ -f "${srt_file}.deepl-source" ]]; then
+            debug "SKIP mux (translation source extraction): $srt_basename"
+            continue
+          fi
           # Check for .deepl marker (DeepL-translated SRT grace period)
           if [[ -f "${srt_file}.deepl" ]]; then
             local marker_mtime srt_mtime
@@ -1101,11 +1174,37 @@ cmd_auto_maintain() {
             continue
           fi
 
-          # Pre-mux collision check
+          # Pre-mux collision check: only strip embedded if external is actually better
           if [[ -n "${embedded_lang_idx_p1[$srt_norm_p1]:-}" ]]; then
             local collide_idx_p1="${embedded_lang_idx_p1[$srt_norm_p1]}"
-            premux_strip_indices_p1+=("$collide_idx_p1")
-            log "COLLISION lang=$srt_norm_p1: will replace embedded idx=$collide_idx_p1 with external SRT: $srt_basename"
+            local collide_codec_p1="${embedded_lang_codec_p1[$srt_norm_p1]:-unknown}"
+            local ext_wins=1
+            # For text-based embedded subs in profile languages, compare quality
+            if is_text_sub_codec "$collide_codec_p1" && lang_in_set "$srt_norm_p1" "$am_profile_set"; then
+              local emb_tmp="${mkv_file%.*}.emb_cmp_${srt_norm_p1}.srt"
+              if ffmpeg -y -v quiet -i "$mkv_file" -map "0:${collide_idx_p1}" "$emb_tmp" </dev/null 2>/dev/null && [[ -s "$emb_tmp" ]]; then
+                local emb_analysis ext_analysis emb_rating ext_rating
+                emb_analysis="$(analyze_srt_file "$emb_tmp")"
+                ext_analysis="$(analyze_srt_file "$srt_file")"
+                read -r emb_cues _ _ emb_mojibake emb_wm <<<"$emb_analysis"
+                read -r ext_cues _ _ ext_mojibake ext_wm <<<"$ext_analysis"
+                emb_rating="$(score_subtitle $emb_analysis "$duration")"
+                ext_rating="$(score_subtitle $ext_analysis "$duration")"
+                # Embedded wins if it's GOOD and has more cues or external has issues
+                if [[ "$emb_rating" == "GOOD" && "$ext_rating" == "GOOD" && "$emb_cues" -gt "$ext_cues" ]]; then
+                  ext_wins=0
+                  log "PROTECT embedded idx=$collide_idx_p1 lang=$srt_norm_p1 (${emb_cues} cues > external ${ext_cues} cues): $basename"
+                elif [[ "$emb_rating" == "GOOD" && "$ext_rating" != "GOOD" ]]; then
+                  ext_wins=0
+                  log "PROTECT embedded idx=$collide_idx_p1 lang=$srt_norm_p1 (GOOD vs external ${ext_rating}): $basename"
+                fi
+              fi
+              rm -f "$emb_tmp"
+            fi
+            if [[ "$ext_wins" -eq 1 ]]; then
+              premux_strip_indices_p1+=("$collide_idx_p1")
+              log "COLLISION lang=$srt_norm_p1: will replace embedded idx=$collide_idx_p1 with external SRT: $srt_basename"
+            fi
             unset "embedded_lang_idx_p1[$srt_norm_p1]"
           fi
 
@@ -1116,7 +1215,16 @@ cmd_auto_maintain() {
           warned=$((warned + 1))
           ;;
         BAD)
-          debug "SKIP BAD external: $srt_basename"
+          if [[ "$DRY_RUN" -eq 1 ]]; then
+            log "[DRY-RUN] Would delete BAD external: $srt_basename"
+          else
+            rm -f "$srt_file"
+            log "DELETED BAD external: $srt_basename (will trigger Bazarr re-search)"
+            bad_deleted=$((bad_deleted + 1))
+            file_modified=1
+            # Queue Bazarr subtitle search for this language
+            bad_search_queue+=("${mkv_file}|${ext_lang}")
+          fi
           ;;
       esac
     done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null | sort)
@@ -1258,6 +1366,13 @@ cmd_auto_maintain() {
               rm -f "$remaining_srt" "${remaining_srt}.deepl"
             fi
             log "CLEANUP non-profile external SRT: $rb (lang=$el_norm_p15, profile=$am_profile_langs)"
+            cleaned_nonprofile=$((cleaned_nonprofile + 1))
+            file_modified=1
+          elif [[ -f "${remaining_srt}.deepl-source" ]]; then
+            if [[ "$DRY_RUN" -eq 0 ]]; then
+              rm -f "$remaining_srt" "${remaining_srt}.deepl-source"
+            fi
+            log "CLEANUP translation source: $rb (all profile langs satisfied)"
             cleaned_nonprofile=$((cleaned_nonprofile + 1))
             file_modified=1
           fi
@@ -1444,10 +1559,42 @@ cmd_auto_maintain() {
     done
   fi
 
-  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
+  # Deferred Bazarr subtitle search for deleted BAD externals (after scan-disk so Bazarr sees the deletion)
+  if [[ "$DRY_RUN" -eq 0 ]] && [[ ${#bad_search_queue[@]} -gt 0 ]] && [[ -n "$BAZARR_API_KEY" ]]; then
+    sleep 2  # let scan-disk settle
+    log "triggering Bazarr subtitle search for ${#bad_search_queue[@]} deleted BAD external(s)"
+    for entry in "${bad_search_queue[@]}"; do
+      local bsq_file="${entry%%|*}" bsq_lang="${entry##*|}"
+      local bsq_search_endpoint="" bsq_http=""
+      if is_tv_path "$bsq_file"; then
+        # Resolve Sonarr episode ID via Bazarr DB
+        local bsq_series_id bsq_episode_id
+        bsq_series_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "${bsq_file%%/Season*}")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+        bsq_episode_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrEpisodeId FROM table_episodes WHERE path LIKE '%$(sql_escape "$(basename "$bsq_file" | sed 's/\.[^.]*$//')")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+        if [[ -n "$bsq_series_id" && -n "$bsq_episode_id" ]]; then
+          bsq_search_endpoint="${BAZARR_URL}/api/episodes/subtitles?seriesid=${bsq_series_id}&episodeid=${bsq_episode_id}&language=${bsq_lang}&forced=False&hi=False"
+        fi
+      else
+        local bsq_radarr_id
+        bsq_radarr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$bsq_file")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+        if [[ -n "$bsq_radarr_id" ]]; then
+          bsq_search_endpoint="${BAZARR_URL}/api/movies/subtitles?radarrid=${bsq_radarr_id}&language=${bsq_lang}&forced=False&hi=False"
+        fi
+      fi
+      if [[ -n "$bsq_search_endpoint" ]]; then
+        bsq_http="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+          -H "X-API-KEY: ${BAZARR_API_KEY}" "$bsq_search_endpoint" </dev/null 2>/dev/null)" || true
+        log "BAZARR_SEARCH lang=$bsq_lang http=$bsq_http: $(basename "$bsq_file")"
+      else
+        log "WARN: could not resolve Bazarr IDs for: $(basename "$bsq_file")"
+      fi
+    done
+  fi
+
+  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) bad_deleted=$bad_deleted extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
 
   # Discord notification (non-fatal, only when actions taken)
-  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files + extracted_nonprofile + cleaned_nonprofile)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files + extracted_nonprofile + cleaned_nonprofile + bad_deleted)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
     local mode="quick"
     [[ "$SINCE_MINUTES" -eq 0 ]] && mode="full"
 
@@ -1467,6 +1614,7 @@ cmd_auto_maintain() {
     _am_fields+="{\"name\":\"🔍 Scanned\",\"value\":\"${total_files}\",\"inline\":true}"
     [[ "$extracted_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"📤 Extracted\",\"value\":\"${extracted_nonprofile} track(s)\",\"inline\":true}"
     [[ "$cleaned_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"🧹 Cleaned\",\"value\":\"${cleaned_nonprofile} SRT(s)\",\"inline\":true}"
+    [[ "$bad_deleted" -gt 0 ]] && _am_fields+=",{\"name\":\"🗑️ BAD Deleted\",\"value\":\"${bad_deleted} SRT(s)\",\"inline\":true}"
     [[ "$deepl_deferred" -gt 0 ]] && _am_fields+=",{\"name\":\"⏳ DeepL Deferred\",\"value\":\"${deepl_deferred}\",\"inline\":true}"
     [[ "$warned" -gt 0 ]] && _am_fields+=",{\"name\":\"⚠️ Manual Review\",\"value\":\"${warned}\",\"inline\":true}"
     local _skips=""
