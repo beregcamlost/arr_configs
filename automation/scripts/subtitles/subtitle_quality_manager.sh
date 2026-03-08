@@ -836,6 +836,195 @@ cmd_strip() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Provider cycling: try all Bazarr manual-search results for a language
+# ---------------------------------------------------------------------------
+
+try_providers_for_lang() {
+  local mkv_file="$1" lang="$2" duration="$3"
+  local max_attempts=8
+
+  # Resolve Bazarr IDs
+  local media_type endpoint_type id_param
+  if is_tv_path "$mkv_file"; then
+    media_type="episode"
+    endpoint_type="episodes"
+    local series_dir="${mkv_file%%/Season*}"
+    local bsq_series_id bsq_episode_id
+    bsq_series_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$series_dir")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    bsq_episode_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrEpisodeId FROM table_episodes WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    [[ -z "$bsq_series_id" || -z "$bsq_episode_id" ]] && { log "PROVIDER_CYCLE: no Bazarr episode ID for $(basename "$mkv_file")"; return 1; }
+    id_param="episodeid=${bsq_episode_id}"
+  else
+    media_type="movie"
+    endpoint_type="movies"
+    local bsq_radarr_id
+    bsq_radarr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    [[ -z "$bsq_radarr_id" ]] && { log "PROVIDER_CYCLE: no Bazarr movie ID for $(basename "$mkv_file")"; return 1; }
+    id_param="radarrid=${bsq_radarr_id}"
+  fi
+
+  # Manual search: get all provider results
+  local search_json
+  search_json="$(curl -sS -m 60 --connect-timeout 10 \
+    -H "X-API-KEY: ${BAZARR_API_KEY}" \
+    "${BAZARR_URL}/api/providers/${endpoint_type}?${id_param}" </dev/null 2>/dev/null)" || { log "PROVIDER_CYCLE: manual search request failed"; return 1; }
+
+  # Filter by target language and sort by score descending
+  local target_lang3
+  target_lang3="$(lang_to_iso639_2 "$lang")"
+  local filtered
+  filtered="$(jq -c --arg lang2 "$lang" --arg lang3 "$target_lang3" '
+    [.data // . | if type == "array" then .[] else empty end
+     | select(
+         (.language // "" | ascii_downcase) == ($lang2 | ascii_downcase) or
+         (.language // "" | ascii_downcase) == ($lang3 | ascii_downcase) or
+         (.code2 // "" | ascii_downcase) == ($lang2 | ascii_downcase) or
+         (.code3 // "" | ascii_downcase) == ($lang3 | ascii_downcase)
+       )]
+    | sort_by(-.score)
+    | .[:'"$max_attempts"']
+  ' <<<"$search_json" 2>/dev/null)" || filtered="[]"
+
+  local result_count
+  result_count="$(jq 'length' <<<"$filtered")"
+  [[ "$result_count" -eq 0 ]] && { log "PROVIDER_CYCLE: 0 results for lang=$lang: $(basename "$mkv_file")"; return 1; }
+
+  log "PROVIDER_CYCLE: trying $result_count result(s) for lang=$lang: $(basename "$mkv_file")"
+
+  local dir name_stem
+  dir="$(dirname "$mkv_file")"
+  name_stem="$(basename "${mkv_file%.*}")"
+
+  local attempt=0
+  for ((ri=0; ri<result_count; ri++)); do
+    attempt=$((attempt + 1))
+    local provider subtitle_obj score
+    provider="$(jq -r ".[$ri].provider" <<<"$filtered")"
+    subtitle_obj="$(jq -r ".[$ri].subtitle" <<<"$filtered")"
+    score="$(jq -r ".[$ri].score" <<<"$filtered")"
+
+    # Download this specific result
+    local dl_payload
+    if [[ "$media_type" == "episode" ]]; then
+      dl_payload="$(jq -nc --arg p "$provider" --arg s "$subtitle_obj" \
+        --arg sid "$bsq_series_id" --arg eid "$bsq_episode_id" \
+        '{provider: $p, subtitle: $s, seriesid: ($sid | tonumber), episodeid: ($eid | tonumber), language: "'"$lang"'"}')"
+    else
+      dl_payload="$(jq -nc --arg p "$provider" --arg s "$subtitle_obj" \
+        --arg rid "$bsq_radarr_id" \
+        '{provider: $p, subtitle: $s, radarrid: ($rid | tonumber), language: "'"$lang"'"}')"
+    fi
+
+    local dl_http
+    dl_http="$(curl -sS -m 30 --connect-timeout 10 -o /dev/null -w '%{http_code}' \
+      -X POST -H "X-API-KEY: ${BAZARR_API_KEY}" -H "Content-Type: application/json" \
+      -d "$dl_payload" "${BAZARR_URL}/api/providers/${endpoint_type}" </dev/null 2>/dev/null)" || dl_http="000"
+
+    if [[ "$dl_http" != "200" && "$dl_http" != "201" && "$dl_http" != "204" ]]; then
+      log "PROVIDER_CYCLE: download failed (http=$dl_http) provider=$provider attempt=$attempt/$result_count"
+      continue
+    fi
+
+    # Wait for Bazarr to write the file
+    sleep 3
+
+    # Find the newly written SRT
+    local new_srt=""
+    while IFS= read -r candidate; do
+      [[ -z "$candidate" ]] && continue
+      [[ -f "${candidate}.deepl-source" ]] && continue
+      new_srt="$candidate"
+      break
+    done < <(find "$dir" -maxdepth 1 -name "${name_stem}.${lang}*.srt" -type f -newer "$mkv_file" 2>/dev/null | sort -r)
+
+    # Fallback: check for any SRT matching the lang (Bazarr may use different naming)
+    if [[ -z "$new_srt" ]]; then
+      while IFS= read -r candidate; do
+        [[ -z "$candidate" ]] && continue
+        [[ -f "${candidate}.deepl-source" ]] && continue
+        local cand_base cand_lang
+        cand_base="$(basename "$candidate")"
+        cand_lang="$(echo "$cand_base" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+        cand_lang="$(normalize_track_lang "$cand_lang")"
+        if [[ "$cand_lang" == "$lang" ]]; then
+          new_srt="$candidate"
+          break
+        fi
+      done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f -mmin -1 2>/dev/null | sort -r)
+    fi
+
+    if [[ -z "$new_srt" ]]; then
+      log "PROVIDER_CYCLE: no SRT found after download, provider=$provider attempt=$attempt/$result_count"
+      continue
+    fi
+
+    # Score the downloaded SRT
+    local analysis cues first_sec last_sec mojibake watermarks rating
+    analysis="$(analyze_srt_file "$new_srt")"
+    read -r cues first_sec last_sec mojibake watermarks <<<"$analysis"
+    rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
+
+    if [[ "$rating" == "GOOD" || "$rating" == "WARN" ]]; then
+      log "PROVIDER_CYCLE: SUCCESS provider=$provider score=$score rating=$rating attempt=$attempt/$result_count: $(basename "$new_srt")"
+      return 0
+    fi
+
+    # BAD — delete, blacklist, try next
+    rm -f "$new_srt"
+    log "PROVIDER_CYCLE: BAD result, blacklisting provider=$provider score=$score attempt=$attempt/$result_count"
+
+    # Blacklist this result
+    local bl_payload
+    if [[ "$media_type" == "episode" ]]; then
+      bl_payload="$(jq -nc --arg p "$provider" --arg s "$subtitle_obj" \
+        --arg sid "$bsq_series_id" --arg eid "$bsq_episode_id" \
+        --arg lang "$lang" \
+        '{provider: $p, subtitle: $s, seriesid: ($sid | tonumber), episodeid: ($eid | tonumber), language: $lang}')"
+    else
+      bl_payload="$(jq -nc --arg p "$provider" --arg s "$subtitle_obj" \
+        --arg rid "$bsq_radarr_id" --arg lang "$lang" \
+        '{provider: $p, subtitle: $s, radarrid: ($rid | tonumber), language: $lang}')"
+    fi
+    curl -sS -m 15 --connect-timeout 8 -o /dev/null \
+      -X POST -H "X-API-KEY: ${BAZARR_API_KEY}" -H "Content-Type: application/json" \
+      -d "$bl_payload" "${BAZARR_URL}/api/${endpoint_type}/blacklist" </dev/null 2>/dev/null || true
+  done
+
+  log "PROVIDER_CYCLE: all $result_count result(s) exhausted for lang=$lang: $(basename "$mkv_file")"
+  return 1
+}
+
+try_translate_inline() {
+  local mkv_file="$1" target_lang="$2"
+  log "TRANSLATE_INLINE: attempting DeepL translation for lang=$target_lang: $(basename "$mkv_file")"
+  PYTHONPATH="${SCRIPT_DIR}/../../scripts" python3 \
+    -m translation.translator translate --file "$mkv_file" </dev/null 2>&1 | while IFS= read -r line; do
+    log "TRANSLATE_INLINE: $line"
+  done
+  # Check if the SRT was created
+  local dir name_stem
+  dir="$(dirname "$mkv_file")"
+  name_stem="$(basename "${mkv_file%.*}")"
+  local translated_srt=""
+  while IFS= read -r candidate; do
+    [[ -z "$candidate" ]] && continue
+    local cand_lang
+    cand_lang="$(echo "$(basename "$candidate")" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+    cand_lang="$(normalize_track_lang "$cand_lang")"
+    if [[ "$cand_lang" == "$target_lang" ]]; then
+      translated_srt="$candidate"
+      break
+    fi
+  done < <(find "$dir" -maxdepth 1 -name "${name_stem}.${target_lang}*.srt" -type f -mmin -2 2>/dev/null | sort -r)
+  if [[ -n "$translated_srt" ]]; then
+    log "TRANSLATE_INLINE: SUCCESS created $(basename "$translated_srt")"
+    return 0
+  fi
+  log "TRANSLATE_INLINE: no SRT produced for lang=$target_lang"
+  return 1
+}
+
 cmd_auto_maintain() {
   load_streaming_candidates
   log "auto-maintain: path=$PATH_PREFIX_ROOT since=$SINCE_MINUTES keep_profile_langs=$KEEP_PROFILE_LANGS bloat_threshold=$BLOAT_THRESHOLD dry_run=$DRY_RUN"
@@ -857,7 +1046,6 @@ cmd_auto_maintain() {
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
   local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0 bad_deleted=0
   local -a modified_dirs=()
-  local -a bad_search_queue=()
   local -A bazarr_rescanned=()
 
   # Cleanup orphaned temp files from interrupted operations (older than 1 hour)
@@ -967,41 +1155,8 @@ cmd_auto_maintain() {
           p0_codec="$(jq -r ".[$i].codec_name" <<<"$emb_json_p0")"
           p0_forced="$(jq -r ".[$i].forced" <<<"$emb_json_p0")"
 
-          # Profile tracks: never strip, but extract as translation source if needed
+          # Profile tracks: never strip
           if lang_in_set "$p0_lang" "$am_profile_set"; then
-            # Check if this profile-lang embedded track can serve as a DeepL translation source
-            local p0_profile_norm
-            p0_profile_norm="$(normalize_track_lang "$p0_lang")"
-            local p0_profile_out="${dir}/${name_stem}.${p0_profile_norm}.srt"
-            if is_text_sub_codec "$p0_codec" && [[ "$p0_forced" -ne 1 ]] && [[ ! -f "$p0_profile_out" ]]; then
-              # Check if at least one OTHER profile language is missing an external SRT
-              local _p0_has_missing=0
-              IFS=',' read -ra _p0_pcodes <<< "$am_profile_langs"
-              for _p0_pc in "${_p0_pcodes[@]}"; do
-                local _p0_pc_norm
-                _p0_pc_norm="$(normalize_track_lang "$_p0_pc")"
-                [[ "$_p0_pc_norm" == "$p0_profile_norm" ]] && continue
-                if [[ ! -f "${dir}/${name_stem}.${_p0_pc_norm}.srt" ]]; then
-                  _p0_has_missing=1
-                  break
-                fi
-              done
-              if [[ "$_p0_has_missing" -eq 1 ]]; then
-                if [[ "$DRY_RUN" -eq 0 ]]; then
-                  if ffmpeg -v quiet -i "$mkv_file" -map "0:${p0_idx}" -f srt "$p0_profile_out" </dev/null 2>/dev/null && [[ -s "$p0_profile_out" ]]; then
-                    touch "${p0_profile_out}.deepl-source"
-                    log "EXTRACTED profile embedded as translation source: ${name_stem}.${p0_profile_norm}.srt: $basename"
-                    extracted_nonprofile=$((extracted_nonprofile + 1))
-                  else
-                    rm -f "$p0_profile_out"
-                    log "WARN: extraction failed for translation source idx=${p0_idx} lang=${p0_profile_norm}: $basename"
-                  fi
-                else
-                  log "[DRY-RUN] Would extract profile embedded as translation source: ${name_stem}.${p0_profile_norm}.srt: $basename"
-                  extracted_nonprofile=$((extracted_nonprofile + 1))
-                fi
-              fi
-            fi
             continue
           fi
 
@@ -1216,14 +1371,55 @@ cmd_auto_maintain() {
           ;;
         BAD)
           if [[ "$DRY_RUN" -eq 1 ]]; then
-            log "[DRY-RUN] Would delete BAD external: $srt_basename"
+            log "[DRY-RUN] Would delete BAD external and cycle providers: $srt_basename"
           else
             rm -f "$srt_file"
-            log "DELETED BAD external: $srt_basename (will trigger Bazarr re-search)"
+            log "DELETED BAD external: $srt_basename (starting provider cycle)"
             bad_deleted=$((bad_deleted + 1))
             file_modified=1
-            # Queue Bazarr subtitle search for this language
-            bad_search_queue+=("${mkv_file}|${ext_lang}")
+
+            local ext_lang_norm
+            ext_lang_norm="$(normalize_track_lang "$ext_lang")"
+
+            if [[ -n "$BAZARR_API_KEY" ]] && try_providers_for_lang "$mkv_file" "$ext_lang_norm" "$duration"; then
+              log "PROVIDER_CYCLE: resolved via providers for lang=$ext_lang_norm: $basename"
+            else
+              # All providers failed or no API key — try DeepL translation
+              log "PROVIDER_CYCLE: falling back to DeepL translation for lang=$ext_lang_norm: $basename"
+              # Extract embedded sub as translation source if available
+              if [[ -n "$am_profile_set" ]]; then
+                local emb_json_bad emb_count_bad
+                emb_json_bad="$(get_embedded_subs "$mkv_file")"
+                emb_count_bad="$(jq 'length' <<<"$emb_json_bad")"
+                for ((bi=0; bi<emb_count_bad; bi++)); do
+                  local bi_lang bi_codec bi_idx bi_forced
+                  bi_lang="$(jq -r ".[$bi].tags.language" <<<"$emb_json_bad")"
+                  bi_codec="$(jq -r ".[$bi].codec_name" <<<"$emb_json_bad")"
+                  bi_idx="$(jq -r ".[$bi].index" <<<"$emb_json_bad")"
+                  bi_forced="$(jq -r ".[$bi].forced" <<<"$emb_json_bad")"
+                  local bi_norm
+                  bi_norm="$(normalize_track_lang "$bi_lang")"
+                  # Extract a profile-language embedded track as translation source
+                  if lang_in_set "$bi_norm" "$am_profile_set" && is_text_sub_codec "$bi_codec" && [[ "$bi_forced" -ne 1 ]]; then
+                    local src_srt="${dir}/${name_stem}.${bi_norm}.srt"
+                    if [[ ! -f "$src_srt" ]]; then
+                      if ffmpeg -v quiet -i "$mkv_file" -map "0:${bi_idx}" -f srt "$src_srt" </dev/null 2>/dev/null && [[ -s "$src_srt" ]]; then
+                        touch "${src_srt}.deepl-source"
+                        log "EXTRACTED translation source: ${name_stem}.${bi_norm}.srt for DeepL fallback"
+                      else
+                        rm -f "$src_srt"
+                      fi
+                    fi
+                  fi
+                done
+              fi
+              if try_translate_inline "$mkv_file" "$ext_lang_norm"; then
+                log "TRANSLATE_INLINE: resolved via DeepL for lang=$ext_lang_norm: $basename"
+                file_modified=1
+              else
+                log "EXHAUSTED: no provider or translation available for lang=$ext_lang_norm: $basename"
+              fi
+            fi
           fi
           ;;
       esac
@@ -1556,38 +1752,6 @@ cmd_auto_maintain() {
     log "firing deferred Bazarr scan-disk for ${#bazarr_rescanned[@]} dir(s)"
     for rescan_key in "${!bazarr_rescanned[@]}"; do
       bazarr_rescan_for_file "${bazarr_rescanned[$rescan_key]}" "$BAZARR_DB" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr rescan failed for $rescan_key"
-    done
-  fi
-
-  # Deferred Bazarr subtitle search for deleted BAD externals (after scan-disk so Bazarr sees the deletion)
-  if [[ "$DRY_RUN" -eq 0 ]] && [[ ${#bad_search_queue[@]} -gt 0 ]] && [[ -n "$BAZARR_API_KEY" ]]; then
-    sleep 2  # let scan-disk settle
-    log "triggering Bazarr subtitle search for ${#bad_search_queue[@]} deleted BAD external(s)"
-    for entry in "${bad_search_queue[@]}"; do
-      local bsq_file="${entry%%|*}" bsq_lang="${entry##*|}"
-      local bsq_search_endpoint="" bsq_http=""
-      if is_tv_path "$bsq_file"; then
-        # Resolve Sonarr episode ID via Bazarr DB
-        local bsq_series_id bsq_episode_id
-        bsq_series_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "${bsq_file%%/Season*}")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
-        bsq_episode_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrEpisodeId FROM table_episodes WHERE path LIKE '%$(sql_escape "$(basename "$bsq_file" | sed 's/\.[^.]*$//')")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
-        if [[ -n "$bsq_series_id" && -n "$bsq_episode_id" ]]; then
-          bsq_search_endpoint="${BAZARR_URL}/api/episodes/subtitles?seriesid=${bsq_series_id}&episodeid=${bsq_episode_id}&language=${bsq_lang}&forced=False&hi=False"
-        fi
-      else
-        local bsq_radarr_id
-        bsq_radarr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$bsq_file")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
-        if [[ -n "$bsq_radarr_id" ]]; then
-          bsq_search_endpoint="${BAZARR_URL}/api/movies/subtitles?radarrid=${bsq_radarr_id}&language=${bsq_lang}&forced=False&hi=False"
-        fi
-      fi
-      if [[ -n "$bsq_search_endpoint" ]]; then
-        bsq_http="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
-          -H "X-API-KEY: ${BAZARR_API_KEY}" "$bsq_search_endpoint" </dev/null 2>/dev/null)" || true
-        log "BAZARR_SEARCH lang=$bsq_lang http=$bsq_http: $(basename "$bsq_file")"
-      else
-        log "WARN: could not resolve Bazarr IDs for: $(basename "$bsq_file")"
-      fi
     done
   fi
 
