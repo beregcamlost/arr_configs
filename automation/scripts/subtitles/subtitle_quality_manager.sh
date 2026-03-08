@@ -290,8 +290,13 @@ score_subtitle() {
     fi
   fi
 
-  if [[ "$(awk "BEGIN { print ($first > 120) }")" -eq 1 ]]; then
-    rating="WARN"
+  # Late first-cue: only WARN when coverage is also low (high coverage = artistic choice)
+  if [[ "$duration" != "0" ]] && [[ "$duration" != "0.0" ]] && [[ "$cues" -gt 0 ]]; then
+    local late_coverage
+    late_coverage="$(awk "BEGIN { printf \"%.0f\", ($last / $duration) * 100 }")"
+    if [[ "$(awk "BEGIN { print ($first > 300) }")" -eq 1 ]] && [[ "$late_coverage" -lt 80 ]]; then
+      rating="WARN"
+    fi
   fi
 
   [[ "$watermarks" -eq 1 ]] && rating="WARN"
@@ -1338,7 +1343,7 @@ cmd_auto_maintain() {
       emby_refresh_item "$mkv_file" || log "WARN: Emby refresh failed (non-fatal)"
       modified_dirs+=("$mkv_file")
 
-      # Bazarr scan-disk (deduplicated per series/movie dir)
+      # Track series/movie dirs needing Bazarr rescan (fired after all files processed)
       if [[ -n "$BAZARR_API_KEY" ]]; then
         local rescan_key
         if is_tv_path "$mkv_file"; then
@@ -1346,10 +1351,7 @@ cmd_auto_maintain() {
         else
           rescan_key="$(dirname "$mkv_file")"
         fi
-        if [[ -z "${bazarr_rescanned[$rescan_key]:-}" ]]; then
-          bazarr_rescanned["$rescan_key"]=1
-          bazarr_rescan_for_file "$mkv_file" "$BAZARR_DB" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr rescan failed"
-        fi
+        bazarr_rescanned["$rescan_key"]="$mkv_file"
       fi
     fi
 
@@ -1362,6 +1364,14 @@ cmd_auto_maintain() {
       sqlite3 "$state_db" "PRAGMA busy_timeout=30000; INSERT OR REPLACE INTO file_audits (file_path, mtime, last_audit_ts, action_taken) VALUES ('$(sql_escape "$mkv_file")', $current_mtime, $(date +%s), '$action_val');" 2>/dev/null || true
     fi
   done
+
+  # Deferred Bazarr scan-disk (after all files processed, so Bazarr sees final state)
+  if [[ "$DRY_RUN" -eq 0 ]] && [[ ${#bazarr_rescanned[@]} -gt 0 ]] && [[ -n "$BAZARR_API_KEY" ]]; then
+    log "firing deferred Bazarr scan-disk for ${#bazarr_rescanned[@]} dir(s)"
+    for rescan_key in "${!bazarr_rescanned[@]}"; do
+      bazarr_rescan_for_file "${bazarr_rescanned[$rescan_key]}" "$BAZARR_DB" "$BAZARR_URL" "$BAZARR_API_KEY" || log "WARN: Bazarr rescan failed for $rescan_key"
+    done
+  fi
 
   log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
 

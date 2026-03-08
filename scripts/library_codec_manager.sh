@@ -34,8 +34,6 @@ TARGET_PRESET="medium"
 IMPORT_FILE=""
 IMPORT_MEDIA_TYPE=""
 IMPORT_REF_ID=""
-DISCORD_WEBHOOK_AUDIT_DONE="${DISCORD_WEBHOOK_AUDIT_DONE:-}"
-DISCORD_WEBHOOK_STATUS="${DISCORD_WEBHOOK_STATUS:-$DISCORD_WEBHOOK_AUDIT_DONE}"
 DEFAULT_TARGET_CONTAINER="mkv"
 MAX_ATTEMPTS_DEFAULT=30
 MAX_ATTEMPTS="$MAX_ATTEMPTS_DEFAULT"
@@ -241,7 +239,7 @@ notify_discord_audit_done() {
   local elapsed="$5"
   local skipped="${6:-0}"
 
-  [[ -z "${DISCORD_WEBHOOK_AUDIT_DONE:-}" ]] && return 0
+  [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
 
   # Query DB for conversion progress context
   local media_count swapped_total eligible_count audio_remaining video_remaining
@@ -325,7 +323,7 @@ notify_discord_audit_done() {
   local resp_file err_file http_code resp_snippet err_snippet curl_rc
   resp_file="$(mktemp)"
   err_file="$(mktemp)"
-  if http_code="$(curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors -o "$resp_file" -w '%{http_code}' -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_AUDIT_DONE" 2>"$err_file")"; then
+  if http_code="$(curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors -o "$resp_file" -w '%{http_code}' -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" 2>"$err_file")"; then
     curl_rc=0
   else
     curl_rc=$?
@@ -356,7 +354,7 @@ notify_discord_audit_done() {
 }
 
 notify_discord_daily_status() {
-  [[ -z "${DISCORD_WEBHOOK_STATUS:-}" ]] && return 0
+  [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
 
   local media_count eligible_count audio_only_count video_tx_count swapped_total failed_total running_now attempt_limited_total
   local swapped_24h failed_24h recovered_24h attempt_limited_24h last_run
@@ -412,7 +410,7 @@ notify_discord_daily_status() {
   local resp_file err_file http_code resp_snippet err_snippet curl_rc
   resp_file="$(mktemp)"
   err_file="$(mktemp)"
-  if http_code="$(curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors -o "$resp_file" -w '%{http_code}' -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_STATUS" 2>"$err_file")"; then
+  if http_code="$(curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors -o "$resp_file" -w '%{http_code}' -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" 2>"$err_file")"; then
     curl_rc=0
   else
     curl_rc=$?
@@ -433,7 +431,7 @@ notify_discord_attempt_limit() {
   local path="$2"
   local attempts="$3"
   local max_attempts="$4"
-  [[ -z "${DISCORD_WEBHOOK_STATUS:-}" ]] && return 0
+  [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
 
   local payload
   payload="$(jq -nc \
@@ -456,7 +454,7 @@ notify_discord_attempt_limit() {
     }]}')"
 
   curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
-    -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_STATUS" >/dev/null 2>&1 || true
+    -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
 die() {
