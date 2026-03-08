@@ -237,6 +237,48 @@ get_embedded_subs() {
     | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und"), title: (.tags.title // "")}, forced: (.disposition.forced // 0)}]'
 }
 
+build_embedded_lang_map() {
+  local mkv_file="$1"
+  declare -n _idx_map="$2"
+  declare -n _codec_map="$3"
+  local emb_json
+  emb_json="$(get_embedded_subs "$mkv_file")"
+  while IFS=$'\t' read -r ei_idx ei_lang ei_codec; do
+    [[ -z "$ei_idx" ]] && continue
+    local ei_norm
+    ei_norm="$(normalize_track_lang "$ei_lang")"
+    if [[ -z "${_idx_map[$ei_norm]:-}" ]]; then
+      _idx_map["$ei_norm"]="$ei_idx"
+      _codec_map["$ei_norm"]="$ei_codec"
+    fi
+  done < <(jq -r '.[] | [(.index | tostring), (.tags.language // "und"), .codec_name] | @tsv' <<<"$emb_json")
+}
+
+# Returns 0 = external wins (strip embedded), 1 = embedded wins (protect)
+check_embedded_collision() {
+  local mkv_file="$1" lang="$2" collide_idx="$3" collide_codec="$4"
+  local ext_rating="$5" ext_cues="$6" duration="$7" log_label="$8"
+  local ext_wins=1
+  if is_text_sub_codec "$collide_codec"; then
+    local emb_tmp="${mkv_file%.*}.emb_cmp_${lang}.srt"
+    if ffmpeg -y -v quiet -i "$mkv_file" -map "0:${collide_idx}" "$emb_tmp" </dev/null 2>/dev/null && [[ -s "$emb_tmp" ]]; then
+      local emb_analysis emb_cues emb_first emb_last emb_mojibake emb_wm emb_rating
+      emb_analysis="$(analyze_srt_file "$emb_tmp")"
+      read -r emb_cues emb_first emb_last emb_mojibake emb_wm <<<"$emb_analysis"
+      emb_rating="$(score_subtitle "$emb_cues" "$emb_first" "$emb_last" "$duration" "$emb_mojibake" "$emb_wm")"
+      if [[ "$emb_rating" == "GOOD" && "$ext_rating" == "GOOD" && "$emb_cues" -gt "$ext_cues" ]]; then
+        ext_wins=0
+        log "PROTECT embedded idx=$collide_idx lang=$lang (${emb_cues} cues > external ${ext_cues} cues): $log_label"
+      elif [[ "$emb_rating" == "GOOD" && "$ext_rating" != "GOOD" ]]; then
+        ext_wins=0
+        log "PROTECT embedded idx=$collide_idx lang=$lang (GOOD vs external ${ext_rating}): $log_label"
+      fi
+    fi
+    rm -f "$emb_tmp"
+  fi
+  return $(( 1 - ext_wins ))
+}
+
 # ---------------------------------------------------------------------------
 # Quality scoring
 # ---------------------------------------------------------------------------
@@ -360,7 +402,7 @@ cmd_audit() {
       [[ -z "$srt_file" ]] && continue
       local srt_basename ext_lang
       srt_basename="$(basename "$srt_file")"
-      ext_lang="$(echo "$srt_basename" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+      ext_lang="$(extract_srt_lang "$srt_basename" "$name_stem")"
       [[ -z "$ext_lang" ]] && ext_lang="und"
 
       local analysis cues first_sec last_sec mojibake watermarks
@@ -426,23 +468,9 @@ cmd_mux() {
     fi
 
     # Build embedded language map for collision detection
-    local emb_json_mux emb_count_mux
-    emb_json_mux="$(get_embedded_subs "$mkv_file")"
-    emb_count_mux="$(jq 'length' <<<"$emb_json_mux")"
     declare -A embedded_lang_idx=()
     declare -A embedded_lang_codec=()
-    for ((ei=0; ei<emb_count_mux; ei++)); do
-      local ei_lang ei_idx ei_norm ei_codec
-      ei_idx="$(jq -r ".[$ei].index" <<<"$emb_json_mux")"
-      ei_lang="$(jq -r ".[$ei].tags.language" <<<"$emb_json_mux")"
-      ei_codec="$(jq -r ".[$ei].codec_name" <<<"$emb_json_mux")"
-      ei_norm="$(normalize_track_lang "$ei_lang")"
-      # Keep first (oldest) track index per normalized language for collision detection
-      if [[ -z "${embedded_lang_idx[$ei_norm]:-}" ]]; then
-        embedded_lang_idx["$ei_norm"]="$ei_idx"
-        embedded_lang_codec["$ei_norm"]="$ei_codec"
-      fi
-    done
+    build_embedded_lang_map "$mkv_file" embedded_lang_idx embedded_lang_codec
     local -a premux_strip_indices=()
 
     # Find external SRT files for this MKV
@@ -452,7 +480,7 @@ cmd_mux() {
       [[ -z "$srt_file" ]] && continue
       local srt_basename ext_lang
       srt_basename="$(basename "$srt_file")"
-      ext_lang="$(echo "$srt_basename" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+      ext_lang="$(extract_srt_lang "$srt_basename" "$name_stem")"
       [[ -z "$ext_lang" ]] && ext_lang="und"
 
       # Audit the SRT
@@ -476,30 +504,11 @@ cmd_mux() {
       local srt_norm
       srt_norm="$(normalize_track_lang "$ext_lang")"
       if [[ -n "${embedded_lang_idx[$srt_norm]:-}" ]]; then
-        local collide_idx="${embedded_lang_idx[$srt_norm]}"
-        local collide_codec="${embedded_lang_codec[$srt_norm]:-unknown}"
-        local ext_wins=1
-        # For text-based embedded subs, compare quality before stripping
-        if is_text_sub_codec "$collide_codec"; then
-          local emb_tmp="${mkv_file%.*}.emb_cmp_${srt_norm}.srt"
-          if ffmpeg -y -v quiet -i "$mkv_file" -map "0:${collide_idx}" "$emb_tmp" </dev/null 2>/dev/null && [[ -s "$emb_tmp" ]]; then
-            local emb_analysis emb_cues emb_first emb_last emb_mojibake emb_wm emb_rating
-            emb_analysis="$(analyze_srt_file "$emb_tmp")"
-            read -r emb_cues emb_first emb_last emb_mojibake emb_wm <<<"$emb_analysis"
-            emb_rating="$(score_subtitle "$emb_cues" "$emb_first" "$emb_last" "$duration" "$emb_mojibake" "$emb_wm")"
-            if [[ "$emb_rating" == "GOOD" && "$emb_cues" -gt "$cues" ]]; then
-              ext_wins=0
-              log "PROTECT embedded idx=$collide_idx lang=$srt_norm (${emb_cues} cues > external ${cues} cues): $srt_basename"
-            elif [[ "$emb_rating" == "GOOD" && "$rating" != "GOOD" ]]; then
-              ext_wins=0
-              log "PROTECT embedded idx=$collide_idx lang=$srt_norm (GOOD vs external ${rating}): $srt_basename"
-            fi
-          fi
-          rm -f "$emb_tmp"
-        fi
-        if [[ "$ext_wins" -eq 1 ]]; then
-          premux_strip_indices+=("$collide_idx")
-          log "COLLISION lang=$srt_norm: will replace embedded idx=$collide_idx with external SRT: $srt_basename"
+        if check_embedded_collision "$mkv_file" "$srt_norm" \
+             "${embedded_lang_idx[$srt_norm]}" "${embedded_lang_codec[$srt_norm]:-unknown}" \
+             "$rating" "$cues" "$duration" "$srt_basename"; then
+          premux_strip_indices+=("${embedded_lang_idx[$srt_norm]}")
+          log "COLLISION lang=$srt_norm: will replace embedded idx=${embedded_lang_idx[$srt_norm]} with external SRT: $srt_basename"
         fi
         unset "embedded_lang_idx[$srt_norm]"
       fi
@@ -831,13 +840,20 @@ try_providers_for_lang() {
   dir="$(dirname "$mkv_file")"
   name_stem="$(basename "${mkv_file%.*}")"
 
+  local -a _prov_arr=() _sub_arr=() _score_arr=()
+  while IFS=$'\t' read -r _p _s _sc; do
+    _prov_arr+=("$_p")
+    _sub_arr+=("$_s")
+    _score_arr+=("$_sc")
+  done < <(jq -r '.[] | [.provider, .subtitle, (.score | tostring)] | @tsv' <<<"$filtered")
+
   local attempt=0
   for ((ri=0; ri<result_count; ri++)); do
     attempt=$((attempt + 1))
     local provider subtitle_obj score
-    provider="$(jq -r ".[$ri].provider" <<<"$filtered")"
-    subtitle_obj="$(jq -r ".[$ri].subtitle" <<<"$filtered")"
-    score="$(jq -r ".[$ri].score" <<<"$filtered")"
+    provider="${_prov_arr[$ri]}"
+    subtitle_obj="${_sub_arr[$ri]}"
+    score="${_score_arr[$ri]}"
 
     # Download this specific result
     local dl_payload
@@ -880,7 +896,7 @@ try_providers_for_lang() {
         [[ -f "${candidate}.deepl-source" ]] && continue
         local cand_base cand_lang
         cand_base="$(basename "$candidate")"
-        cand_lang="$(echo "$cand_base" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+        cand_lang="$(extract_srt_lang "$cand_base" "$name_stem")"
         cand_lang="$(normalize_track_lang "$cand_lang")"
         if [[ "$cand_lang" == "$lang" ]]; then
           new_srt="$candidate"
@@ -945,7 +961,7 @@ try_translate_inline() {
   while IFS= read -r candidate; do
     [[ -z "$candidate" ]] && continue
     local cand_lang
-    cand_lang="$(echo "$(basename "$candidate")" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+    cand_lang="$(extract_srt_lang "$(basename "$candidate")" "$name_stem")"
     cand_lang="$(normalize_track_lang "$cand_lang")"
     if [[ "$cand_lang" == "$target_lang" ]]; then
       translated_srt="$candidate"
@@ -1192,22 +1208,9 @@ cmd_auto_maintain() {
 
     # --- Phase 1: Audit & mux external SRTs ---
     # Build embedded language map for collision detection
-    local emb_json_p1 emb_count_p1
-    emb_json_p1="$(get_embedded_subs "$mkv_file")"
-    emb_count_p1="$(jq 'length' <<<"$emb_json_p1")"
     declare -A embedded_lang_idx_p1=()
     declare -A embedded_lang_codec_p1=()
-    for ((ei=0; ei<emb_count_p1; ei++)); do
-      local ei_lang ei_idx ei_norm ei_codec
-      ei_idx="$(jq -r ".[$ei].index" <<<"$emb_json_p1")"
-      ei_lang="$(jq -r ".[$ei].tags.language" <<<"$emb_json_p1")"
-      ei_codec="$(jq -r ".[$ei].codec_name" <<<"$emb_json_p1")"
-      ei_norm="$(normalize_track_lang "$ei_lang")"
-      if [[ -z "${embedded_lang_idx_p1[$ei_norm]:-}" ]]; then
-        embedded_lang_idx_p1["$ei_norm"]="$ei_idx"
-        embedded_lang_codec_p1["$ei_norm"]="$ei_codec"
-      fi
-    done
+    build_embedded_lang_map "$mkv_file" embedded_lang_idx_p1 embedded_lang_codec_p1
     local -a premux_strip_indices_p1=()
 
     local -a good_srts=() good_langs=()
@@ -1215,7 +1218,7 @@ cmd_auto_maintain() {
       [[ -z "$srt_file" ]] && continue
       local srt_basename ext_lang
       srt_basename="$(basename "$srt_file")"
-      ext_lang="$(echo "$srt_basename" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+      ext_lang="$(extract_srt_lang "$srt_basename" "$name_stem")"
       [[ -z "$ext_lang" ]] && ext_lang="und"
 
       local analysis cues first_sec last_sec mojibake watermarks rating
@@ -1266,34 +1269,11 @@ cmd_auto_maintain() {
 
           # Pre-mux collision check: only strip embedded if external is actually better
           if [[ -n "${embedded_lang_idx_p1[$srt_norm_p1]:-}" ]]; then
-            local collide_idx_p1="${embedded_lang_idx_p1[$srt_norm_p1]}"
-            local collide_codec_p1="${embedded_lang_codec_p1[$srt_norm_p1]:-unknown}"
-            local ext_wins=1
-            # For text-based embedded subs in profile languages, compare quality
-            if is_text_sub_codec "$collide_codec_p1" && lang_in_set "$srt_norm_p1" "$am_profile_set"; then
-              local emb_tmp="${mkv_file%.*}.emb_cmp_${srt_norm_p1}.srt"
-              if ffmpeg -y -v quiet -i "$mkv_file" -map "0:${collide_idx_p1}" "$emb_tmp" </dev/null 2>/dev/null && [[ -s "$emb_tmp" ]]; then
-                local emb_analysis ext_analysis emb_rating ext_rating
-                emb_analysis="$(analyze_srt_file "$emb_tmp")"
-                ext_analysis="$(analyze_srt_file "$srt_file")"
-                read -r emb_cues _ _ emb_mojibake emb_wm <<<"$emb_analysis"
-                read -r ext_cues _ _ ext_mojibake ext_wm <<<"$ext_analysis"
-                emb_rating="$(score_subtitle $emb_analysis "$duration")"
-                ext_rating="$(score_subtitle $ext_analysis "$duration")"
-                # Embedded wins if it's GOOD and has more cues or external has issues
-                if [[ "$emb_rating" == "GOOD" && "$ext_rating" == "GOOD" && "$emb_cues" -gt "$ext_cues" ]]; then
-                  ext_wins=0
-                  log "PROTECT embedded idx=$collide_idx_p1 lang=$srt_norm_p1 (${emb_cues} cues > external ${ext_cues} cues): $basename"
-                elif [[ "$emb_rating" == "GOOD" && "$ext_rating" != "GOOD" ]]; then
-                  ext_wins=0
-                  log "PROTECT embedded idx=$collide_idx_p1 lang=$srt_norm_p1 (GOOD vs external ${ext_rating}): $basename"
-                fi
-              fi
-              rm -f "$emb_tmp"
-            fi
-            if [[ "$ext_wins" -eq 1 ]]; then
-              premux_strip_indices_p1+=("$collide_idx_p1")
-              log "COLLISION lang=$srt_norm_p1: will replace embedded idx=$collide_idx_p1 with external SRT: $srt_basename"
+            if check_embedded_collision "$mkv_file" "$srt_norm_p1" \
+                 "${embedded_lang_idx_p1[$srt_norm_p1]}" "${embedded_lang_codec_p1[$srt_norm_p1]:-unknown}" \
+                 "$rating" "$cues" "$duration" "$srt_basename"; then
+              premux_strip_indices_p1+=("${embedded_lang_idx_p1[$srt_norm_p1]}")
+              log "COLLISION lang=$srt_norm_p1: will replace embedded idx=${embedded_lang_idx_p1[$srt_norm_p1]} with external SRT: $srt_basename"
             fi
             unset "embedded_lang_idx_p1[$srt_norm_p1]"
           fi
@@ -1326,12 +1306,19 @@ cmd_auto_maintain() {
                 local emb_json_bad emb_count_bad
                 emb_json_bad="$(get_embedded_subs "$mkv_file")"
                 emb_count_bad="$(jq 'length' <<<"$emb_json_bad")"
+                local -a _bad_lang=() _bad_codec=() _bad_idx=() _bad_forced=()
+                while IFS=$'\t' read -r _bl _bc _bi _bf; do
+                  _bad_lang+=("$_bl")
+                  _bad_codec+=("$_bc")
+                  _bad_idx+=("$_bi")
+                  _bad_forced+=("$_bf")
+                done < <(jq -r '.[] | [(.tags.language // "und"), .codec_name, (.index | tostring), (if .forced == 1 then "1" else "0" end)] | @tsv' <<<"$emb_json_bad")
+                local bi_lang bi_codec bi_idx bi_forced
                 for ((bi=0; bi<emb_count_bad; bi++)); do
-                  local bi_lang bi_codec bi_idx bi_forced
-                  bi_lang="$(jq -r ".[$bi].tags.language" <<<"$emb_json_bad")"
-                  bi_codec="$(jq -r ".[$bi].codec_name" <<<"$emb_json_bad")"
-                  bi_idx="$(jq -r ".[$bi].index" <<<"$emb_json_bad")"
-                  bi_forced="$(jq -r ".[$bi].forced" <<<"$emb_json_bad")"
+                  bi_lang="${_bad_lang[$bi]}"
+                  bi_codec="${_bad_codec[$bi]}"
+                  bi_idx="${_bad_idx[$bi]}"
+                  bi_forced="${_bad_forced[$bi]}"
                   local bi_norm
                   bi_norm="$(normalize_track_lang "$bi_lang")"
                   # Extract a profile-language embedded track as translation source
@@ -1446,17 +1433,15 @@ cmd_auto_maintain() {
     if [[ -n "$am_profile_set" ]]; then
       # Check if ALL profile languages have subtitles (embedded or external)
       # Re-read embedded after potential mux
-      local emb_json_p15 emb_count_p15
+      local emb_json_p15
       emb_json_p15="$(get_embedded_subs "$mkv_file")"
-      emb_count_p15="$(jq 'length' <<<"$emb_json_p15")"
 
       declare -A emb_langs_p15=()
-      for ((ei=0; ei<emb_count_p15; ei++)); do
-        local el
-        el="$(jq -r ".[$ei].tags.language" <<<"$emb_json_p15")"
+      while IFS= read -r el; do
+        [[ -z "$el" ]] && continue
         el="$(normalize_track_lang "$el")"
         emb_langs_p15["$el"]=1
-      done
+      done < <(jq -r '.[].tags.language // "und"' <<<"$emb_json_p15")
 
       # Build set of remaining external SRT languages
       declare -A ext_langs_p15=()
@@ -1464,7 +1449,7 @@ cmd_auto_maintain() {
         [[ -z "$remaining_srt" ]] && continue
         local rb el_p15
         rb="$(basename "$remaining_srt")"
-        el_p15="$(echo "$rb" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+        el_p15="$(extract_srt_lang "$rb" "$name_stem")"
         [[ -z "$el_p15" ]] && el_p15="und"
         el_p15="$(normalize_track_lang "$el_p15")"
         ext_langs_p15["$el_p15"]=1
@@ -1488,7 +1473,7 @@ cmd_auto_maintain() {
           [[ -z "$remaining_srt" ]] && continue
           local rb el_p15
           rb="$(basename "$remaining_srt")"
-          el_p15="$(echo "$rb" | sed "s/^${name_stem}\.//" | sed 's/\.srt$//' | sed 's/\.forced$//' | sed 's/\.hi$//')"
+          el_p15="$(extract_srt_lang "$rb" "$name_stem")"
           [[ -z "$el_p15" ]] && el_p15="und"
           local el_norm_p15
           el_norm_p15="$(normalize_track_lang "$el_p15")"
