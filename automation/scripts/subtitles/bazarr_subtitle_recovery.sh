@@ -118,6 +118,8 @@ if ! flock -n 9; then
 fi
 
 sqlite3 "$STATE_DB" '
+PRAGMA journal_mode=WAL;
+PRAGMA busy_timeout=30000;
 CREATE TABLE IF NOT EXISTS recovery_state (
   media_type TEXT NOT NULL,
   media_id INTEGER NOT NULL,
@@ -148,6 +150,18 @@ if [[ -z "$(sqlite3 "$STATE_DB" "SELECT 1 FROM pragma_table_info('recovery_state
 fi
 
 # ---------------------------------------------------------------------------
+# SQLite wrapper for STATE_DB — applies busy_timeout and prevents stdin
+# consumption in while-read loops via </dev/null
+# ---------------------------------------------------------------------------
+recovery_db() {
+  local flags=()
+  while [[ "${1:-}" == -* ]]; do
+    flags+=("$1" "$2"); shift 2
+  done
+  sqlite3 "${flags[@]}" -cmd ".timeout 30000" "$STATE_DB" "$@" </dev/null
+}
+
+# ---------------------------------------------------------------------------
 # --report mode: dump state summary and exit
 # ---------------------------------------------------------------------------
 if [[ "$REPORT_MODE" -eq 1 ]]; then
@@ -163,11 +177,11 @@ if [[ "$REPORT_MODE" -eq 1 ]]; then
   echo ""
 
   # Items by recovery stage
-  stage1="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE bazarr_attempts < 5 AND COALESCE(last_arr_try_ts,0)=0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
-  stage2="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE bazarr_attempts >= 5 AND COALESCE(last_arr_try_ts,0)=0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
-  stage3="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(last_arr_try_ts,0)>0 AND COALESCE(arr_attempts,0)<$MAX_ARR_ATTEMPTS AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
-  stage4="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(arr_attempts,0)>=$MAX_ARR_ATTEMPTS AND COALESCE(regrab_attempts,0)>0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
-  exhausted="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(last_result,'')='exhausted_all_stages';")"
+  stage1="$(recovery_db "SELECT COUNT(*) FROM recovery_state WHERE bazarr_attempts < 5 AND COALESCE(last_arr_try_ts,0)=0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
+  stage2="$(recovery_db "SELECT COUNT(*) FROM recovery_state WHERE bazarr_attempts >= 5 AND COALESCE(last_arr_try_ts,0)=0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
+  stage3="$(recovery_db "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(last_arr_try_ts,0)>0 AND COALESCE(arr_attempts,0)<$MAX_ARR_ATTEMPTS AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
+  stage4="$(recovery_db "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(arr_attempts,0)>=$MAX_ARR_ATTEMPTS AND COALESCE(regrab_attempts,0)>0 AND COALESCE(last_result,'') <> 'exhausted_all_stages';")"
+  exhausted="$(recovery_db "SELECT COUNT(*) FROM recovery_state WHERE COALESCE(last_result,'')='exhausted_all_stages';")"
   echo "Items by recovery stage (in state DB):"
   echo "  Stage 1 (bazarr attempts 0-4):  $stage1"
   echo "  Stage 2 (bazarr attempts 5+):   $stage2"
@@ -177,8 +191,8 @@ if [[ "$REPORT_MODE" -eq 1 ]]; then
   echo ""
 
   # Resolved vs still missing
-  resolved="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE last_result LIKE 'resolved%';")"
-  still_missing="$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM recovery_state WHERE last_result IS NULL OR last_result NOT LIKE 'resolved%';")"
+  resolved="$(recovery_db "SELECT COUNT(*) FROM recovery_state WHERE last_result LIKE 'resolved%';")"
+  still_missing="$(recovery_db "SELECT COUNT(*) FROM recovery_state WHERE last_result IS NULL OR last_result NOT LIKE 'resolved%';")"
   echo "Resolution status:"
   echo "  Resolved:       $resolved"
   echo "  Still missing:  $still_missing"
@@ -186,11 +200,11 @@ if [[ "$REPORT_MODE" -eq 1 ]]; then
 
   # Last activity timestamps
   echo "Last activity timestamps:"
-  last_bazarr="$(sqlite3 "$STATE_DB" "SELECT datetime(MAX(last_bazarr_try_ts),'unixepoch','localtime') FROM recovery_state WHERE last_bazarr_try_ts > 0;" 2>/dev/null || echo "never")"
-  last_translate="$(sqlite3 "$STATE_DB" "SELECT datetime(MAX(last_translate_try_ts),'unixepoch','localtime') FROM recovery_state WHERE last_translate_try_ts > 0;" 2>/dev/null || echo "never")"
-  last_arr="$(sqlite3 "$STATE_DB" "SELECT datetime(MAX(last_arr_try_ts),'unixepoch','localtime') FROM recovery_state WHERE last_arr_try_ts > 0;" 2>/dev/null || echo "never")"
-  last_regrab="$(sqlite3 "$STATE_DB" "SELECT datetime(MAX(last_regrab_ts),'unixepoch','localtime') FROM recovery_state WHERE last_regrab_ts > 0;" 2>/dev/null || echo "never")"
-  last_update="$(sqlite3 "$STATE_DB" "SELECT MAX(updated_at) FROM recovery_state;" 2>/dev/null || echo "never")"
+  last_bazarr="$(recovery_db "SELECT datetime(MAX(last_bazarr_try_ts),'unixepoch','localtime') FROM recovery_state WHERE last_bazarr_try_ts > 0;" 2>/dev/null || echo "never")"
+  last_translate="$(recovery_db "SELECT datetime(MAX(last_translate_try_ts),'unixepoch','localtime') FROM recovery_state WHERE last_translate_try_ts > 0;" 2>/dev/null || echo "never")"
+  last_arr="$(recovery_db "SELECT datetime(MAX(last_arr_try_ts),'unixepoch','localtime') FROM recovery_state WHERE last_arr_try_ts > 0;" 2>/dev/null || echo "never")"
+  last_regrab="$(recovery_db "SELECT datetime(MAX(last_regrab_ts),'unixepoch','localtime') FROM recovery_state WHERE last_regrab_ts > 0;" 2>/dev/null || echo "never")"
+  last_update="$(recovery_db "SELECT MAX(updated_at) FROM recovery_state;" 2>/dev/null || echo "never")"
   [[ -n "$last_bazarr" ]] || last_bazarr="never"
   [[ -n "$last_translate" ]] || last_translate="never"
   [[ -n "$last_arr" ]] || last_arr="never"
@@ -205,7 +219,7 @@ if [[ "$REPORT_MODE" -eq 1 ]]; then
 
   # Top items by bazarr attempts (most stubborn)
   echo "Top 10 most-attempted items:"
-  sqlite3 -column -header "$STATE_DB" "
+  recovery_db -column -header "
     SELECT media_type, media_id, lang_code, bazarr_attempts,
            COALESCE(arr_attempts,0) AS arr_attempts,
            COALESCE(regrab_attempts,0) AS regrab_attempts,
@@ -312,7 +326,7 @@ notify_discord() {
 
 state_get_col() {
   local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5" col="$6"
-  sqlite3 "$STATE_DB" "
+  recovery_db "
     SELECT COALESCE($col,0) FROM recovery_state
     WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi
     LIMIT 1;
@@ -325,7 +339,7 @@ state_inc_col() {
     log "[DRY-RUN] state_inc_col $media_type $media_id $lang forced=$forced hi=$hi col=$col"
     return 0
   fi
-  sqlite3 "$STATE_DB" "
+  recovery_db "
     INSERT INTO recovery_state
       (media_type, media_id, lang_code, forced, hi, $col, updated_at)
     VALUES
@@ -347,7 +361,7 @@ state_set() {
     log "[DRY-RUN] state_set $media_type $media_id $lang forced=$forced hi=$hi result=$result"
     return 0
   fi
-  sqlite3 "$STATE_DB" "
+  recovery_db "
     INSERT INTO recovery_state
       (media_type, media_id, lang_code, forced, hi, last_bazarr_try_ts, last_translate_try_ts, last_arr_try_ts, bazarr_attempts, last_result, updated_at)
     VALUES
@@ -367,7 +381,7 @@ state_reset_bazarr_attempts() {
     log "[DRY-RUN] state_reset_bazarr_attempts $media_type $media_id $lang forced=$forced hi=$hi"
     return 0
   fi
-  sqlite3 "$STATE_DB" "
+  recovery_db "
     UPDATE recovery_state
     SET bazarr_attempts=0, updated_at=datetime('now')
     WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi;
@@ -380,7 +394,7 @@ state_reset_for_regrab() {
     log "[DRY-RUN] state_reset_for_regrab $media_type $media_id $lang forced=$forced hi=$hi"
     return 0
   fi
-  sqlite3 "$STATE_DB" "
+  recovery_db "
     UPDATE recovery_state
     SET bazarr_attempts=0, arr_attempts=0,
         last_bazarr_try_ts=0, last_translate_try_ts=0, last_arr_try_ts=0,
@@ -771,7 +785,7 @@ should_skip_since() {
   local cutoff_ts last_update_ts
   cutoff_ts="$(date -d "$SINCE_MINUTES minutes ago" +%s)"
   # Check if ANY lang for this media was updated recently
-  last_update_ts="$(sqlite3 "$STATE_DB" "
+  last_update_ts="$(recovery_db "
     SELECT COALESCE(MAX(strftime('%s', updated_at)), 0)
     FROM recovery_state
     WHERE media_type='$media_type' AND media_id=$media_id;
@@ -858,7 +872,7 @@ process_item() {
     [[ -n "$arr_att" ]] || arr_att=0
     regrab_att="$(state_get_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "regrab_attempts")"
     [[ -n "$regrab_att" ]] || regrab_att=0
-    last_result_val="$(sqlite3 "$STATE_DB" "
+    last_result_val="$(recovery_db "
       SELECT COALESCE(last_result,'') FROM recovery_state
       WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi
       LIMIT 1;

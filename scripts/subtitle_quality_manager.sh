@@ -107,11 +107,21 @@ init_state_db() {
   " </dev/null >/dev/null 2>&1
 }
 
+# SQLite wrapper: sets busy_timeout via -cmd (no stdout leakage), passes through flags and query
+sqm_db() {
+  local db="$1"; shift
+  local flags=()
+  while [[ "${1:-}" == -* ]]; do
+    flags+=("$1" "$2"); shift 2
+  done
+  sqlite3 "${flags[@]}" -cmd ".timeout 30000" "$db" "$@" </dev/null
+}
+
 # Enqueue a file for auto-maintain processing (survives --since window)
 enqueue_pending() {
   local db="$1" file_path="$2" source="${3:-manual}"
   init_state_db "$db"
-  sqlite3 "$db" "PRAGMA busy_timeout=30000; INSERT OR REPLACE INTO pending_work (file_path, enqueued_at, source) VALUES ('$(sql_escape "$file_path")', $(date +%s), '$source');" </dev/null >/dev/null 2>&1 || true
+  sqm_db "$db" "INSERT OR REPLACE INTO pending_work (file_path, enqueued_at, source) VALUES ('$(sql_escape "$file_path")', $(date +%s), '$source');" >/dev/null 2>&1 || true
 }
 
 # Drain pending queue, returns file paths one per line
@@ -120,10 +130,10 @@ drain_pending() {
   [[ ! -f "$db" ]] && return 0
   local -a paths=()
   while IFS= read -r p; do
-    [[ -n "$p" && "$p" != "30000" ]] && paths+=("$p")
-  done < <(sqlite3 "$db" "PRAGMA busy_timeout=30000; SELECT file_path FROM pending_work;" </dev/null 2>/dev/null || true)
+    [[ -n "$p" ]] && paths+=("$p")
+  done < <(sqm_db "$db" "SELECT file_path FROM pending_work;" 2>/dev/null || true)
   # Delete drained entries
-  sqlite3 "$db" "PRAGMA busy_timeout=30000; DELETE FROM pending_work;" </dev/null 2>/dev/null || true
+  sqm_db "$db" "DELETE FROM pending_work;" 2>/dev/null || true
   for p in "${paths[@]}"; do
     printf '%s\n' "$p"
   done
@@ -1075,8 +1085,8 @@ cmd_auto_maintain() {
     if [[ "$SINCE_MINUTES" -eq 0 ]]; then
       local current_mtime stored_mtime
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
-      stored_mtime="$(sqlite3 "$state_db" "PRAGMA busy_timeout=30000; SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null | tail -1 || true)"
-      [[ -z "$stored_mtime" || "$stored_mtime" == "30000" ]] && stored_mtime=0
+      stored_mtime="$(sqm_db "$state_db" "SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null || true)"
+      [[ -z "$stored_mtime" ]] && stored_mtime=0
       if [[ "$current_mtime" -eq "$stored_mtime" ]] && [[ "$stored_mtime" -gt 0 ]]; then
         debug "SKIP (unchanged): $basename"
         continue
@@ -1663,7 +1673,7 @@ cmd_auto_maintain() {
       [[ "$muxed_files" -gt 0 ]] && [[ "$file_modified" -eq 1 ]] && action_val="muxed"
       [[ "$stripped_files" -gt 0 ]] && [[ "$file_modified" -eq 1 ]] && action_val="stripped"
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
-      sqlite3 "$state_db" "PRAGMA busy_timeout=30000; INSERT OR REPLACE INTO file_audits (file_path, mtime, last_audit_ts, action_taken) VALUES ('$(sql_escape "$mkv_file")', $current_mtime, $(date +%s), '$action_val');" 2>/dev/null || true
+      sqm_db "$state_db" "INSERT OR REPLACE INTO file_audits (file_path, mtime, last_audit_ts, action_taken) VALUES ('$(sql_escape "$mkv_file")', $current_mtime, $(date +%s), '$action_val');" 2>/dev/null || true
     fi
   done
 

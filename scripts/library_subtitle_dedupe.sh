@@ -139,12 +139,6 @@ CREATE TABLE IF NOT EXISTS media_state (
 CREATE INDEX IF NOT EXISTS idx_media_state_dir ON media_state(media_dir);
 '
 
-sql_escape() {
-  local s="${1:-}"
-  s="${s//\'/\'\'}"
-  printf '%s' "$s"
-}
-
 subtitle_group_key() {
   local sub="$1"
   local no_ext no_forced last lang forced
