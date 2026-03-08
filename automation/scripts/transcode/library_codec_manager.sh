@@ -244,14 +244,21 @@ notify_discord_audit_done() {
   # Query DB for conversion progress context
   local media_count swapped_total eligible_count audio_remaining video_remaining
   local swapped_7d compliant_count uhd_hdr_count
-  media_count="$(db "SELECT COUNT(*) FROM media_files;" 2>/dev/null || echo 0)"
-  swapped_total="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';" 2>/dev/null || echo 0)"
-  eligible_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;" 2>/dev/null || echo 0)"
-  audio_remaining="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;" 2>/dev/null || echo 0)"
-  video_remaining="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;" 2>/dev/null || echo 0)"
-  swapped_7d="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped' AND COALESCE(end_ts,start_ts) >= datetime('now','-7 days');" 2>/dev/null || echo 0)"
-  compliant_count="$(db "SELECT COUNT(*) FROM media_files WHERE id NOT IN (SELECT media_id FROM conversion_plan WHERE eligible=1) AND id IN (SELECT media_id FROM audit_status WHERE probe_ok=1);" 2>/dev/null || echo 0)"
-  uhd_hdr_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=0 AND reason LIKE '%UHD%' OR reason LIKE '%HDR%' OR reason LIKE '%4K%';" 2>/dev/null || echo 0)"
+  IFS=$'\t' read -r media_count swapped_total eligible_count audio_remaining \
+    video_remaining swapped_7d compliant_count uhd_hdr_count < <(
+    db -separator $'\t' "SELECT
+      (SELECT COUNT(*) FROM media_files WHERE deleted_at IS NULL),
+      (SELECT COUNT(*) FROM conversion_runs WHERE status='swapped'),
+      (SELECT COUNT(*) FROM conversion_plan WHERE eligible=1),
+      (SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1),
+      (SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10),
+      (SELECT COUNT(*) FROM conversion_runs WHERE status='swapped' AND COALESCE(end_ts,start_ts) >= datetime('now','-7 days')),
+      (SELECT COUNT(*) FROM media_files WHERE id NOT IN (SELECT media_id FROM conversion_plan WHERE eligible=1) AND id IN (SELECT media_id FROM audit_status WHERE probe_ok=1)),
+      (SELECT COUNT(*) FROM conversion_plan WHERE eligible=0 AND (reason LIKE '%UHD%' OR reason LIKE '%HDR%' OR reason LIKE '%4K%'));" 2>/dev/null
+  ) || {
+    media_count=0 swapped_total=0 eligible_count=0 audio_remaining=0
+    video_remaining=0 swapped_7d=0 compliant_count=0 uhd_hdr_count=0
+  }
 
   # Calculate progress, rate, ETA
   local total_convertible pct_10x pct_int pct_frac bar_str rate_str eta_str
@@ -358,18 +365,23 @@ notify_discord_daily_status() {
 
   local media_count eligible_count audio_only_count video_tx_count swapped_total failed_total running_now attempt_limited_total
   local swapped_24h failed_24h recovered_24h attempt_limited_24h last_run
-  media_count="$(db "SELECT COUNT(*) FROM media_files;")"
-  eligible_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
-  audio_only_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1;")"
-  video_tx_count="$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10;")"
-  swapped_total="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped';")"
-  failed_total="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='failed';")"
-  attempt_limited_total="$(db "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached';")"
-  running_now="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='running' AND end_ts IS NULL;")"
-  swapped_24h="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='swapped' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
-  failed_24h="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='failed' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
-  attempt_limited_24h="$(db "SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
-  recovered_24h="$(db "SELECT COUNT(*) FROM conversion_runs WHERE status='failed' AND error='stale_running_recovered' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day');")"
+  IFS=$'\t' read -r media_count eligible_count audio_only_count video_tx_count \
+    swapped_total failed_total attempt_limited_total running_now \
+    swapped_24h failed_24h attempt_limited_24h recovered_24h < <(
+    db -separator $'\t' "SELECT
+      (SELECT COUNT(*) FROM media_files WHERE deleted_at IS NULL),
+      (SELECT COUNT(*) FROM conversion_plan WHERE eligible=1),
+      (SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=1),
+      (SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority=10),
+      (SELECT COUNT(*) FROM conversion_runs WHERE status='swapped'),
+      (SELECT COUNT(*) FROM conversion_runs WHERE status='failed'),
+      (SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached'),
+      (SELECT COUNT(*) FROM conversion_runs WHERE status='running' AND end_ts IS NULL),
+      (SELECT COUNT(*) FROM conversion_runs WHERE status='swapped' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day')),
+      (SELECT COUNT(*) FROM conversion_runs WHERE status='failed' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day')),
+      (SELECT COUNT(DISTINCT media_id) FROM conversion_runs WHERE status='attempt_limit_reached' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day')),
+      (SELECT COUNT(*) FROM conversion_runs WHERE status='failed' AND error='stale_running_recovered' AND COALESCE(end_ts,start_ts) >= datetime('now','-1 day'));"
+  )
   last_run="$(db "SELECT COALESCE((SELECT run_id || ' [' || status || '] @ ' || COALESCE(end_ts,start_ts) FROM conversion_runs ORDER BY id DESC LIMIT 1),'none');")"
 
   local payload
@@ -794,6 +806,7 @@ CREATE TABLE IF NOT EXISTS media_files (
   size_bytes INTEGER,
   mtime INTEGER,
   container TEXT,
+  deleted_at TEXT DEFAULT NULL,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -880,6 +893,10 @@ CREATE TABLE IF NOT EXISTS events (
   message TEXT,
   context_json TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_conversion_plan_eligible_priority ON conversion_plan(eligible, priority);
+CREATE INDEX IF NOT EXISTS idx_conversion_runs_status ON conversion_runs(status);
+CREATE INDEX IF NOT EXISTS idx_conversion_runs_media_status ON conversion_runs(media_id, status);
+CREATE INDEX IF NOT EXISTS idx_media_files_deleted_at ON media_files(deleted_at);
 SQL
 
   # Migration: add priority column if missing (existing DBs)
@@ -888,6 +905,14 @@ SQL
   if [[ "$has_priority" -eq 0 ]]; then
     db "ALTER TABLE conversion_plan ADD COLUMN priority INTEGER DEFAULT 10;"
     log "info" "Migrated conversion_plan: added priority column"
+  fi
+
+  # Migration: add deleted_at column if missing (existing DBs)
+  local has_deleted_at
+  has_deleted_at="$(db "SELECT COUNT(*) FROM pragma_table_info('media_files') WHERE name='deleted_at';")"
+  if [[ "$has_deleted_at" -eq 0 ]]; then
+    db "ALTER TABLE media_files ADD COLUMN deleted_at TEXT DEFAULT NULL;"
+    log "info" "Migrated media_files: added deleted_at column"
   fi
 }
 
@@ -1097,17 +1122,16 @@ audit_cmd() {
 
     # Incremental: skip ffprobe if mtime unchanged and probe data already exists
     local stored_mtime has_probes
-    stored_mtime="$(db "SELECT mtime FROM media_files WHERE id=$media_id LIMIT 1;" 2>/dev/null)"
-    if [[ "$stored_mtime" == "$mtime" && -n "$stored_mtime" ]]; then
-      has_probes="$(db "SELECT 1 FROM probe_streams WHERE media_id=$media_id LIMIT 1;" 2>/dev/null)"
-      if [[ "$has_probes" == "1" ]]; then
-        skipped=$((skipped + 1))
-        ok=$((ok + 1))
-        if (( total % 500 == 0 )); then
-          log "info" "Audit progress: $total processed ($skipped unchanged)"
-        fi
-        continue
+    IFS=$'\t' read -r stored_mtime has_probes < <(
+      db -separator $'\t' "SELECT m.mtime, EXISTS(SELECT 1 FROM probe_streams WHERE media_id=$media_id LIMIT 1) FROM media_files m WHERE m.id=$media_id LIMIT 1;" 2>/dev/null
+    )
+    if [[ "$stored_mtime" == "$mtime" && -n "$stored_mtime" && "$has_probes" == "1" ]]; then
+      skipped=$((skipped + 1))
+      ok=$((ok + 1))
+      if (( total % 500 == 0 )); then
+        log "info" "Audit progress: $total processed ($skipped unchanged)"
       fi
+      continue
     fi
 
     local tmp_json tmp_err
@@ -1155,15 +1179,27 @@ plan_cmd() {
   db -separator $'\t' "
 SELECT m.id,m.path,m.container,
        COALESCE(a.exists_flag,0),COALESCE(a.probe_ok,0),
-       COALESCE((SELECT MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END) FROM probe_streams ps WHERE ps.media_id=m.id),0) AS max_w,
-       COALESCE((SELECT MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END) FROM probe_streams ps WHERE ps.media_id=m.id),0) AS max_h,
-       COALESCE((SELECT MAX(is_hdr) FROM probe_streams ps WHERE ps.media_id=m.id AND ps.stream_type='video'),0) AS has_hdr,
-       COALESCE((SELECT SUM(CASE WHEN stream_type='video' AND codec='h264' THEN 1 ELSE 0 END) FROM probe_streams ps WHERE ps.media_id=m.id),0) AS h264_v,
-       COALESCE((SELECT SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END) FROM probe_streams ps WHERE ps.media_id=m.id),0) AS total_v,
-       COALESCE((SELECT SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels <= 2 THEN 1 ELSE 0 END) FROM probe_streams ps WHERE ps.media_id=m.id),0) AS good_a,
-       COALESCE((SELECT SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END) FROM probe_streams ps WHERE ps.media_id=m.id),0) AS total_a
+       COALESCE(ps_agg.max_w,0),
+       COALESCE(ps_agg.max_h,0),
+       COALESCE(ps_agg.has_hdr,0),
+       COALESCE(ps_agg.h264_v,0),
+       COALESCE(ps_agg.total_v,0),
+       COALESCE(ps_agg.good_a,0),
+       COALESCE(ps_agg.total_a,0)
 FROM media_files m
 LEFT JOIN audit_status a ON a.media_id=m.id
+LEFT JOIN (
+  SELECT media_id,
+         MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END) AS max_w,
+         MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END) AS max_h,
+         MAX(CASE WHEN stream_type='video' THEN is_hdr ELSE 0 END) AS has_hdr,
+         SUM(CASE WHEN stream_type='video' AND codec='h264' THEN 1 ELSE 0 END) AS h264_v,
+         SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END) AS total_v,
+         SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END) AS good_a,
+         SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END) AS total_a
+  FROM probe_streams
+  GROUP BY media_id
+) ps_agg ON ps_agg.media_id=m.id
 ORDER BY m.path${where_limit};
 " | while IFS=$'\t' read -r media_id path container exists_flag probe_ok max_w max_h has_hdr h264_v total_v good_a total_a; do
 
@@ -1232,7 +1268,7 @@ report_cmd() {
 
   {
     echo "metric,value"
-    echo "media_files,$(db "SELECT COUNT(*) FROM media_files;")"
+    echo "media_files,$(db "SELECT COUNT(*) FROM media_files WHERE deleted_at IS NULL;")"
     echo "audit_ok,$(db "SELECT COUNT(*) FROM audit_status WHERE probe_ok=1;")"
     echo "missing_files,$(db "SELECT COUNT(*) FROM audit_status WHERE exists_flag=0;")"
     echo "plan_eligible,$(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
@@ -1287,7 +1323,7 @@ ORDER BY cr.id DESC;
     echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')"
     echo
     echo "## Counts"
-    echo "- Media files: $(db "SELECT COUNT(*) FROM media_files;")"
+    echo "- Media files: $(db "SELECT COUNT(*) FROM media_files WHERE deleted_at IS NULL;")"
     echo "- Audit ok: $(db "SELECT COUNT(*) FROM audit_status WHERE probe_ok=1;")"
     echo "- Missing files: $(db "SELECT COUNT(*) FROM audit_status WHERE exists_flag=0;")"
     echo "- Eligible for convert: $(db "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;")"
@@ -1489,16 +1525,20 @@ build_temp_output_path() {
 }
 
 run_convert_for_media() {
-  local run_id="$1" media_id="$2" attempt_no="$3" src container
-  src="$(db "SELECT path FROM media_files WHERE id=$media_id LIMIT 1;")"
-  container="$(db "SELECT target_container FROM conversion_plan WHERE media_id=$media_id LIMIT 1;")"
-  if [[ -z "$container" ]]; then
-    container="$(db "SELECT container FROM media_files WHERE id=$media_id LIMIT 1;")"
-  fi
+  local run_id="$1" media_id="$2" attempt_no="$3"
+  local src container media_type_val bazarr_ref_id_val
+  IFS=$'\t' read -r src container media_type_val bazarr_ref_id_val < <(
+    db -separator $'\t' "SELECT m.path, COALESCE(cp.target_container, m.container), m.media_type, m.bazarr_ref_id
+    FROM media_files m LEFT JOIN conversion_plan cp ON cp.media_id=m.id
+    WHERE m.id=$media_id LIMIT 1;"
+  )
 
   [[ -f "$src" ]] || {
     db "INSERT INTO conversion_runs(run_id,media_id,start_ts,end_ts,status,attempt,error) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'failed',${attempt_no:-1},'source_missing');"
-    insert_event "error" "convert" "$media_id" "Source missing at convert time" "{\"path\":\"$(sql_quote "$src")\"}"
+    db "UPDATE media_files SET deleted_at = CURRENT_TIMESTAMP WHERE id = $media_id AND deleted_at IS NULL;"
+    db "UPDATE conversion_plan SET eligible = 0, skip_reason = 'source_deleted' WHERE media_id = $media_id;"
+    insert_event "error" "convert" "$media_id" "Source missing — soft-deleted, marked ineligible" "{\"path\":\"$(sql_quote "$src")\"}"
+    log "warn" "Soft-deleted media_id=$media_id (source missing): $src"
     return
   }
 
@@ -1521,9 +1561,8 @@ run_convert_for_media() {
 
   # Resolve Bazarr profile languages + true original language for audio stream selection.
   local media_type_ref bazarr_ref_id_ref profile_langs="" profile_lang_set="" orig_lang_override=""
-  IFS=$'\t' read -r media_type_ref bazarr_ref_id_ref < <(
-    db -separator $'\t' "SELECT media_type, bazarr_ref_id FROM media_files WHERE id=$media_id LIMIT 1;"
-  ) || true
+  media_type_ref="$media_type_val"
+  bazarr_ref_id_ref="$bazarr_ref_id_val"
 
   if [[ -n "$bazarr_ref_id_ref" && "$bazarr_ref_id_ref" != "NULL" && -f "$BAZARR_DB" ]]; then
     profile_langs="$(resolve_profile_langs_by_id "$media_type_ref" "$bazarr_ref_id_ref" "$BAZARR_DB")" || true
@@ -1692,6 +1731,7 @@ SELECT cp.media_id,
            AND cr2.status NOT IN ('planned','attempt_limit_reached')
        ),0) AS attempt_count
 FROM conversion_plan cp
+JOIN media_files mf ON mf.id=cp.media_id
 LEFT JOIN (
   SELECT media_id, MAX(id) AS max_id
   FROM conversion_runs
@@ -1699,6 +1739,7 @@ LEFT JOIN (
 ) rmax ON rmax.media_id=cp.media_id
 LEFT JOIN conversion_runs cr ON cr.id=rmax.max_id
 WHERE cp.eligible=1
+  AND mf.deleted_at IS NULL
   AND COALESCE(cr.status,'') NOT IN ('swapped','running','attempt_limit_reached')
 ORDER BY cp.priority, cp.media_id${limit_clause};
 ")
@@ -1789,13 +1830,17 @@ enqueue_import_cmd() {
 
   # Evaluate plan eligibility (same logic as plan_cmd, single row)
   local max_w max_h has_hdr h264_v total_v good_a total_a
-  max_w="$(db "SELECT COALESCE(MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
-  max_h="$(db "SELECT COALESCE(MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
-  has_hdr="$(db "SELECT COALESCE(MAX(is_hdr),0) FROM probe_streams WHERE media_id=$media_id AND stream_type='video';")"
-  h264_v="$(db "SELECT COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' THEN 1 ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
-  total_v="$(db "SELECT COALESCE(SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
-  good_a="$(db "SELECT COALESCE(SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
-  total_a="$(db "SELECT COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0) FROM probe_streams WHERE media_id=$media_id;")"
+  IFS=$'\t' read -r max_w max_h has_hdr h264_v total_v good_a total_a < <(
+    db -separator $'\t' "SELECT
+      COALESCE(MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END),0),
+      COALESCE(MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END),0),
+      COALESCE(MAX(CASE WHEN stream_type='video' THEN is_hdr ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0)
+    FROM probe_streams WHERE media_id=$media_id;"
+  )
 
   local eligible=0 reason="" skip_reason="" priority=99
   local target_container="$container"

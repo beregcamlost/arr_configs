@@ -191,6 +191,19 @@ normalize_track_lang() {
   esac
 }
 
+# Extract language code from SRT filename: "stem.en.forced.srt" → "en"
+# Usage: extract_srt_lang "stem.en.forced.srt" "stem"
+extract_srt_lang() {
+  local filename="$1" stem="$2"
+  local lang="${filename#"${stem}".}"
+  lang="${lang%.srt}"
+  lang="${lang%.forced}"
+  lang="${lang%.hi}"
+  lang="${lang%.cc}"
+  lang="${lang%.sdh}"
+  echo "$lang"
+}
+
 # Detect the language of an SRT file.
 # Tries langdetect (offline, fast) first, falls back to DeepL API detection.
 # Returns 2-letter language code on stdout, or returns 1 if detection fails.
