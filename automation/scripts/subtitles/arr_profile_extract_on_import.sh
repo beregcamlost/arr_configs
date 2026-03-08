@@ -342,6 +342,11 @@ main() {
     >> /config/berenstuff/automation/logs/codec_enqueue_import.log 2>&1 </dev/null &
   disown
 
+  # Enqueue for subtitle auto-maintain (ensures processing even if --since window is missed)
+  /config/berenstuff/automation/scripts/subtitles/subtitle_quality_manager.sh enqueue \
+    "$MEDIA_PATH" >> /config/berenstuff/automation/logs/subtitle_quality_manager.log 2>&1 </dev/null &
+  disown
+
   # Check streaming availability and tag (background, non-blocking)
   local streaming_media_type
   if [[ "$ARR_TYPE" == "sonarr" ]]; then

@@ -35,6 +35,7 @@ Commands:
   mux            Embed good external .srt files into MKV/MP4/M4V (runs audit first)
   strip          Remove specific embedded subtitle tracks from MKV/MP4/M4V
   auto-maintain  Automated mux/strip with safety checks (quick + full mode)
+  enqueue        Add file path(s) to pending work queue for next auto-maintain run
 
 Common options:
   --path DIR            Media directory to process (required for audit/mux/strip)
@@ -70,6 +71,7 @@ Examples:
   subtitle_quality_manager.sh strip --path "/media/tv/Show" --keep-only eng,spa --recursive
   subtitle_quality_manager.sh auto-maintain --path-prefix /media --since 15 --dry-run
   subtitle_quality_manager.sh auto-maintain --path-prefix /media --keep-profile-langs
+  subtitle_quality_manager.sh enqueue /path/to/file.mkv [/path/to/file2.mkv ...]
 EOF
 }
 
@@ -78,36 +80,49 @@ COMMAND="${1:-}"
 shift
 
 case "$COMMAND" in
-  audit|mux|strip|auto-maintain) ;;
+  audit|mux|strip|auto-maintain|enqueue) ;;
   --help|-h) usage; exit 0 ;;
   *) echo "Unknown command: $COMMAND" >&2; usage; exit 1 ;;
 esac
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --path)       PATH_PREFIX="${2:-}"; shift 2 ;;
-    --recursive)  RECURSIVE=1; shift ;;
-    --dry-run)    DRY_RUN=1; shift ;;
-    --force)      FORCE=1; shift ;;
-    --track)      TRACK_TARGET="${2:-}"; shift 2 ;;
-    --keep-only)  KEEP_ONLY="${2:-}"; shift 2 ;;
-    --keep-profile-langs) KEEP_PROFILE_LANGS=1; shift ;;
-    --bloat-threshold) BLOAT_THRESHOLD="${2:-6}"; shift 2 ;;
-    --bazarr-url) BAZARR_URL="${2:-}"; shift 2 ;;
-    --bazarr-db)  BAZARR_DB="${2:-}"; shift 2 ;;
-    --state-dir)  STATE_DIR="${2:-}"; shift 2 ;;
-    --codec-state-dir) CODEC_STATE_DIR="${2:-}"; shift 2 ;;
-    --log-level)  LOG_LEVEL="${2:-}"; shift 2 ;;
-    --path-prefix) PATH_PREFIX_ROOT="${2:-}"; shift 2 ;;
-    --since)       SINCE_MINUTES="${2:-0}"; shift 2 ;;
-    --emby-url)    EMBY_URL="${2:-}"; shift 2 ;;
-    --emby-api-key) EMBY_API_KEY="${2:-}"; shift 2 ;;
-    --help|-h)    usage; exit 0 ;;
-    *)            echo "Unknown option: $1" >&2; usage; exit 1 ;;
-  esac
-done
+ENQUEUE_FILES=()
+if [[ "$COMMAND" == "enqueue" ]]; then
+  # enqueue takes positional file paths + optional --state-dir
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --state-dir) STATE_DIR="${2:-}"; shift 2 ;;
+      --help|-h)   usage; exit 0 ;;
+      *)           ENQUEUE_FILES+=("$1"); shift ;;
+    esac
+  done
+  [[ ${#ENQUEUE_FILES[@]} -eq 0 ]] && { echo "enqueue requires at least one file path." >&2; exit 1; }
+else
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --path)       PATH_PREFIX="${2:-}"; shift 2 ;;
+      --recursive)  RECURSIVE=1; shift ;;
+      --dry-run)    DRY_RUN=1; shift ;;
+      --force)      FORCE=1; shift ;;
+      --track)      TRACK_TARGET="${2:-}"; shift 2 ;;
+      --keep-only)  KEEP_ONLY="${2:-}"; shift 2 ;;
+      --keep-profile-langs) KEEP_PROFILE_LANGS=1; shift ;;
+      --bloat-threshold) BLOAT_THRESHOLD="${2:-6}"; shift 2 ;;
+      --bazarr-url) BAZARR_URL="${2:-}"; shift 2 ;;
+      --bazarr-db)  BAZARR_DB="${2:-}"; shift 2 ;;
+      --state-dir)  STATE_DIR="${2:-}"; shift 2 ;;
+      --codec-state-dir) CODEC_STATE_DIR="${2:-}"; shift 2 ;;
+      --log-level)  LOG_LEVEL="${2:-}"; shift 2 ;;
+      --path-prefix) PATH_PREFIX_ROOT="${2:-}"; shift 2 ;;
+      --since)       SINCE_MINUTES="${2:-0}"; shift 2 ;;
+      --emby-url)    EMBY_URL="${2:-}"; shift 2 ;;
+      --emby-api-key) EMBY_API_KEY="${2:-}"; shift 2 ;;
+      --help|-h)    usage; exit 0 ;;
+      *)            echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    esac
+  done
+fi
 
-if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]]; then
+if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]] && [[ "$COMMAND" != "enqueue" ]]; then
   echo "--path is required." >&2; exit 1
 fi
 
@@ -147,9 +162,36 @@ init_state_db() {
       external_json TEXT DEFAULT '[]',
       action_taken TEXT DEFAULT 'none'
     );
+    CREATE TABLE IF NOT EXISTS pending_work (
+      file_path TEXT PRIMARY KEY,
+      enqueued_at INTEGER NOT NULL,
+      source TEXT DEFAULT 'unknown'
+    );
     PRAGMA journal_mode=WAL;
     PRAGMA busy_timeout=30000;
-  "
+  " </dev/null >/dev/null 2>&1
+}
+
+# Enqueue a file for auto-maintain processing (survives --since window)
+enqueue_pending() {
+  local db="$1" file_path="$2" source="${3:-manual}"
+  init_state_db "$db"
+  sqlite3 "$db" "PRAGMA busy_timeout=30000; INSERT OR REPLACE INTO pending_work (file_path, enqueued_at, source) VALUES ('$(sql_escape "$file_path")', $(date +%s), '$source');" </dev/null >/dev/null 2>&1 || true
+}
+
+# Drain pending queue, returns file paths one per line
+drain_pending() {
+  local db="$1"
+  [[ ! -f "$db" ]] && return 0
+  local -a paths=()
+  while IFS= read -r p; do
+    [[ -n "$p" && "$p" != "30000" ]] && paths+=("$p")
+  done < <(sqlite3 "$db" "PRAGMA busy_timeout=30000; SELECT file_path FROM pending_work;" </dev/null 2>/dev/null || true)
+  # Delete drained entries
+  sqlite3 "$db" "PRAGMA busy_timeout=30000; DELETE FROM pending_work;" </dev/null 2>/dev/null || true
+  for p in "${paths[@]}"; do
+    printf '%s\n' "$p"
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -772,7 +814,18 @@ cmd_auto_maintain() {
   log "auto-maintain: path=$PATH_PREFIX_ROOT since=$SINCE_MINUTES keep_profile_langs=$KEEP_PROFILE_LANGS bloat_threshold=$BLOAT_THRESHOLD dry_run=$DRY_RUN"
 
   local state_db="$STATE_DIR/subtitle_quality_state.db"
-  [[ "$SINCE_MINUTES" -eq 0 ]] && init_state_db "$state_db"
+  init_state_db "$state_db"
+
+  # Drain pending work queue (files enqueued by import hook / dedupe)
+  local -A pending_set=()
+  local pending_count=0
+  while IFS= read -r pf; do
+    [[ -z "$pf" ]] && continue
+    [[ -f "$pf" ]] || continue
+    pending_set["$pf"]=1
+    pending_count=$((pending_count + 1))
+  done < <(drain_pending "$state_db")
+  [[ "$pending_count" -gt 0 ]] && log "auto-maintain: drained $pending_count file(s) from pending queue"
 
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
   local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0
@@ -806,13 +859,21 @@ cmd_auto_maintain() {
       # Check if any SRT was recently modified
       local recent_srt
       recent_srt="$(find "$dir" -maxdepth 1 -name "${stem}.*.srt" -type f -mmin "-${SINCE_MINUTES}" 2>/dev/null | head -1)"
-      [[ "$mkv_age_ok" -eq 0 && -z "$recent_srt" ]] && continue
+      # Allow through if file is in pending queue (regardless of mtime)
+      [[ "$mkv_age_ok" -eq 0 && -z "$recent_srt" && -z "${pending_set[$mkv_file]+x}" ]] && continue
     fi
 
     mkv_files+=("$mkv_file")
   done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" 2>/dev/null | sort)
 
-  log "auto-maintain: found ${#mkv_files[@]} candidate files"
+  # Add pending files that are outside PATH_PREFIX_ROOT (edge case) or weren't found by the scan
+  local -A mkv_seen=()
+  for f in "${mkv_files[@]}"; do mkv_seen["$f"]=1; done
+  for pf in "${!pending_set[@]}"; do
+    [[ -z "${mkv_seen[$pf]+x}" ]] && [[ -f "$pf" ]] && mkv_files+=("$pf")
+  done
+
+  log "auto-maintain: found ${#mkv_files[@]} candidate files (${pending_count} from pending queue)"
 
   for mkv_file in "${mkv_files[@]}"; do
     local basename dir name_stem duration
@@ -889,6 +950,7 @@ cmd_auto_maintain() {
           [[ "$p0_forced" -eq 1 ]] && p0_out_name+=".forced"
           p0_out_name+=".srt"
           local p0_out="${dir}/${p0_out_name}"
+          local p0_detected_lang=""
 
           # Extract text-based subs to external SRT (bitmap codecs can't be extracted)
           if is_text_sub_codec "$p0_codec"; then
@@ -903,6 +965,7 @@ cmd_auto_maintain() {
                     local detected_lang
                     if detected_lang="$(detect_srt_language "$p0_out" "${DEEPL_API_KEY:-}")"; then
                       detected_lang="$(normalize_track_lang "$detected_lang")"
+                      p0_detected_lang="$detected_lang"
                       local renamed="${name_stem}.${detected_lang}"
                       [[ "$p0_forced" -eq 1 ]] && renamed+=".forced"
                       renamed+=".srt"
@@ -932,8 +995,16 @@ cmd_auto_maintain() {
             debug "SKIP extract (bitmap codec=${p0_codec}): idx=${p0_idx} lang=${p0_norm_lang}: $basename"
           fi
 
-          # Mark for stripping regardless of codec type
-          p0_strip_indices+=("$p0_idx")
+          # Mark for stripping — but protect und tracks that turn out to be profile languages
+          if [[ "$p0_norm_lang" == "und" && -n "${p0_detected_lang:-}" ]] && lang_in_set "$p0_detected_lang" "$am_profile_set"; then
+            # und track detected as a profile language — do NOT strip
+            log "PROTECT und→${p0_detected_lang} (profile language, keeping embedded): idx=${p0_idx}: $basename"
+          elif [[ "$p0_norm_lang" == "und" && -z "${p0_detected_lang:-}" ]]; then
+            # und track with failed detection — do NOT strip (safe fallback)
+            log "PROTECT und (detection failed, keeping embedded): idx=${p0_idx}: $basename"
+          else
+            p0_strip_indices+=("$p0_idx")
+          fi
         done
 
         if [[ ${#p0_strip_indices[@]} -gt 0 ]]; then
@@ -1434,9 +1505,26 @@ cmd_auto_maintain() {
   fi
 }
 
+cmd_enqueue() {
+  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  local count=0
+  # Remaining args after options were parsed are in ENQUEUE_FILES
+  for f in "${ENQUEUE_FILES[@]}"; do
+    if [[ -f "$f" ]]; then
+      enqueue_pending "$state_db" "$f" "manual"
+      log "ENQUEUED: $f"
+      count=$((count + 1))
+    else
+      log "WARN: file not found, skipping: $f"
+    fi
+  done
+  log "enqueue done: $count file(s) added to pending queue"
+}
+
 case "$COMMAND" in
   audit)        cmd_audit ;;
   mux)          cmd_mux ;;
   strip)        cmd_strip ;;
   auto-maintain) cmd_auto_maintain ;;
+  enqueue)      cmd_enqueue ;;
 esac
