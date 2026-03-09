@@ -645,3 +645,185 @@ class TestCheckImport:
         assert result.exit_code == 0, result.output
         mock_motn.assert_not_called()
         mock_tmdb.assert_called_once()
+
+
+class TestScanRapidAPIVerify:
+    """Tests for RapidAPI cross-validation in scan command."""
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_verify_filters_false_positive(
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
+        mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """TMDB says Netflix but RapidAPI disagrees → match filtered out."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
+        }
+        # RapidAPI returns empty — no Netflix
+        mock_rapid.return_value = []
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Newly streaming: 0" in result.output
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_verify_keeps_confirmed_match(
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
+        mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """Both TMDB and RapidAPI agree → match kept."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
+        }
+        mock_rapid.return_value = [
+            {"service_id": "netflix", "service_name": "Netflix"},
+        ]
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Newly streaming: 1" in result.output
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_skip_verify_bypasses_rapidapi(
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
+        mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """--skip-verify should not call RapidAPI."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
+        }
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--skip-verify", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Newly streaming: 1" in result.output
+        mock_rapid.assert_not_called()
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_no_rapidapi_key_falls_back_to_tmdb_only(
+        self, mock_movies, mock_series, mock_tag, mock_batch,
+        mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """Without RAPIDAPI_KEY, scan uses TMDB-only (no verify)."""
+        monkeypatch.delenv("RAPIDAPI_KEY", raising=False)
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
+        }
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Newly streaming: 1" in result.output
+
+
+class TestScanExclusions:
+    """Tests for manual exclusion filtering in scan command."""
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_excluded_items_not_scanned(
+        self, mock_movies, mock_series, mock_tag, mock_batch,
+        mock_notify, runner, env_config, tmp_path,
+    ):
+        """Excluded items should not appear in batch_check input."""
+        from streaming.db import add_exclusion
+        db = _make_db(tmp_path)
+        add_exclusion(db, 550, "movie", title="Fight Club", reason="false positive")
+
+        mock_batch.return_value = {}
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--skip-verify", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        # batch_check should only receive Toy Story (tmdb_id=862), not Fight Club
+        call_args = mock_batch.call_args
+        items_checked = call_args[0][1]  # second positional arg is items
+        tmdb_ids = [i["tmdb_id"] for i in items_checked]
+        assert 550 not in tmdb_ids
+        assert 862 in tmdb_ids
+
+
+class TestExcludeCommand:
+    """Tests for the exclude CLI subcommand."""
+
+    def test_add_exclusion(self, runner, env_config, tmp_path):
+        db = _make_db(tmp_path)
+        result = runner.invoke(cli, [
+            "exclude", "--add", "550", "movie",
+            "--title", "Fight Club", "--reason", "TMDB false positive",
+            "--db-path", db,
+        ])
+        assert result.exit_code == 0, result.output
+        assert "Added exclusion" in result.output
+
+    def test_list_exclusions(self, runner, env_config, tmp_path):
+        from streaming.db import add_exclusion
+        db = _make_db(tmp_path)
+        add_exclusion(db, 550, "movie", title="Fight Club", reason="false positive")
+
+        result = runner.invoke(cli, ["exclude", "--list", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Fight Club" in result.output
+        assert "false positive" in result.output
+
+    def test_list_empty(self, runner, env_config, tmp_path):
+        db = _make_db(tmp_path)
+        result = runner.invoke(cli, ["exclude", "--list", "--db-path", db])
+        assert result.exit_code == 0
+        assert "No streaming exclusions" in result.output
+
+    def test_remove_exclusion(self, runner, env_config, tmp_path):
+        from streaming.db import add_exclusion
+        db = _make_db(tmp_path)
+        add_exclusion(db, 550, "movie", title="Fight Club")
+
+        result = runner.invoke(cli, [
+            "exclude", "--remove", "550", "movie", "--db-path", db,
+        ])
+        assert result.exit_code == 0, result.output
+        assert "Removed exclusion" in result.output
+
+    def test_remove_nonexistent(self, runner, env_config, tmp_path):
+        db = _make_db(tmp_path)
+        result = runner.invoke(cli, [
+            "exclude", "--remove", "999", "movie", "--db-path", db,
+        ])
+        assert result.exit_code == 0
+        assert "No exclusion found" in result.output
+
+    def test_add_invalid_media_type(self, runner, env_config, tmp_path):
+        db = _make_db(tmp_path)
+        result = runner.invoke(cli, [
+            "exclude", "--add", "550", "podcast", "--db-path", db,
+        ])
+        assert result.exit_code != 0 or "Error" in result.output

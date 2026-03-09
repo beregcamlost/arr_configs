@@ -60,6 +60,14 @@ def init_db(db_path):
                 ON streaming_status (arr_id, media_type);
             CREATE INDEX IF NOT EXISTS idx_streaming_stale
                 ON streaming_status (stale_flagged_at, deleted_at);
+            CREATE TABLE IF NOT EXISTS streaming_exclusions (
+                tmdb_id INTEGER NOT NULL,
+                media_type TEXT NOT NULL,
+                title TEXT,
+                reason TEXT,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (tmdb_id, media_type)
+            );
         """)
         # Migration: add columns to existing DBs
         try:
@@ -353,6 +361,48 @@ def get_scan_history(db_path, limit=5):
         )
         rows = [dict(r) for r in cursor.fetchall()]
     return rows
+
+
+def add_exclusion(db_path, tmdb_id, media_type, title=None, reason=None):
+    """Add an item to the streaming exclusion list."""
+    now = _now_iso()
+    with contextlib.closing(_connect(db_path)) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO streaming_exclusions "
+            "(tmdb_id, media_type, title, reason, added_at) VALUES (?, ?, ?, ?, ?)",
+            (tmdb_id, media_type, title, reason, now),
+        )
+        conn.commit()
+
+
+def remove_exclusion(db_path, tmdb_id, media_type):
+    """Remove an item from the streaming exclusion list. Returns rows deleted."""
+    with contextlib.closing(_connect(db_path)) as conn:
+        cursor = conn.execute(
+            "DELETE FROM streaming_exclusions WHERE tmdb_id=? AND media_type=?",
+            (tmdb_id, media_type),
+        )
+        count = cursor.rowcount
+        conn.commit()
+    return count
+
+
+def get_exclusions(db_path):
+    """Get set of (tmdb_id, media_type) for all excluded items."""
+    with contextlib.closing(_connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT tmdb_id, media_type FROM streaming_exclusions"
+        ).fetchall()
+    return {(r[0], r[1]) for r in rows}
+
+
+def list_exclusions(db_path):
+    """Get all exclusions as list of dicts for display."""
+    with contextlib.closing(_connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT * FROM streaming_exclusions ORDER BY added_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_summary_stats(db_path):

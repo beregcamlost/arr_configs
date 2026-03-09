@@ -3,9 +3,11 @@
 import pytest
 
 from streaming.db import (
+    add_exclusion,
     flag_stale_item,
     get_active_matches,
     get_active_matches_filtered,
+    get_exclusions,
     get_left_streaming,
     get_scan_history,
     get_stale_candidate_paths,
@@ -13,9 +15,11 @@ from streaming.db import (
     get_streaming_item,
     get_summary_stats,
     init_db,
+    list_exclusions,
     mark_deleted,
     mark_left_streaming,
     record_scan,
+    remove_exclusion,
     touch_keep_local_items,
     unflag_stale_item,
     update_streaming_seasons,
@@ -33,6 +37,7 @@ class TestInitDb:
         conn.close()
         assert "streaming_status" in tables
         assert "scan_history" in tables
+        assert "streaming_exclusions" in tables
 
     def test_idempotent(self, tmp_db):
         # Calling init_db again should not fail
@@ -461,3 +466,55 @@ class TestUpdateStreamingSeasons:
         update_streaming_seasons(tmp_db, 1396, 8, "[1, 2, 3]", season_count=5)
         item = get_streaming_item(tmp_db, 1396, "tv", 8)
         assert item["streaming_seasons"] is None
+
+
+class TestExclusions:
+    def test_add_exclusion(self, tmp_db):
+        add_exclusion(tmp_db, 550, "movie", title="Fight Club", reason="TMDB false positive")
+        exclusions = get_exclusions(tmp_db)
+        assert (550, "movie") in exclusions
+
+    def test_add_exclusion_idempotent(self, tmp_db):
+        add_exclusion(tmp_db, 550, "movie", title="Fight Club", reason="reason1")
+        add_exclusion(tmp_db, 550, "movie", title="Fight Club", reason="reason2")
+        exclusions = list_exclusions(tmp_db)
+        assert len(exclusions) == 1
+        assert exclusions[0]["reason"] == "reason2"
+
+    def test_remove_exclusion(self, tmp_db):
+        add_exclusion(tmp_db, 550, "movie", title="Fight Club")
+        count = remove_exclusion(tmp_db, 550, "movie")
+        assert count == 1
+        assert (550, "movie") not in get_exclusions(tmp_db)
+
+    def test_remove_nonexistent(self, tmp_db):
+        count = remove_exclusion(tmp_db, 999, "movie")
+        assert count == 0
+
+    def test_get_exclusions_empty(self, tmp_db):
+        assert get_exclusions(tmp_db) == set()
+
+    def test_get_exclusions_multiple(self, tmp_db):
+        add_exclusion(tmp_db, 550, "movie", title="Fight Club")
+        add_exclusion(tmp_db, 1396, "tv", title="Breaking Bad")
+        exclusions = get_exclusions(tmp_db)
+        assert len(exclusions) == 2
+        assert (550, "movie") in exclusions
+        assert (1396, "tv") in exclusions
+
+    def test_list_exclusions(self, tmp_db):
+        add_exclusion(tmp_db, 550, "movie", title="Fight Club", reason="false positive")
+        items = list_exclusions(tmp_db)
+        assert len(items) == 1
+        assert items[0]["tmdb_id"] == 550
+        assert items[0]["title"] == "Fight Club"
+        assert items[0]["reason"] == "false positive"
+        assert items[0]["added_at"] is not None
+
+    def test_list_exclusions_empty(self, tmp_db):
+        assert list_exclusions(tmp_db) == []
+
+    def test_same_tmdb_different_media_type(self, tmp_db):
+        add_exclusion(tmp_db, 550, "movie")
+        add_exclusion(tmp_db, 550, "tv")
+        assert len(get_exclusions(tmp_db)) == 2

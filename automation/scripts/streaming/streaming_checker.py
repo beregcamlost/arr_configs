@@ -27,17 +27,21 @@ from streaming.arr_client import (
 )
 from streaming.config import PROVIDER_MAP, Config, load_config
 from streaming.db import (
+    add_exclusion,
     flag_stale_item,
     get_active_matches,
     get_active_matches_filtered,
+    get_exclusions,
     get_left_streaming,
     get_scan_history,
     get_stale_flagged_items,
     get_summary_stats,
     init_db,
+    list_exclusions,
     mark_deleted,
     mark_left_streaming,
     record_scan,
+    remove_exclusion,
     touch_keep_local_items,
     unflag_stale_item,
     update_streaming_seasons,
@@ -115,13 +119,67 @@ def cli():
     pass
 
 
+def _verify_with_rapidapi(cfg, tmdb_results, items_by_key):
+    """Cross-validate TMDB matches against RapidAPI. Returns filtered results.
+
+    For each item TMDB says is streaming, calls get_streaming_providers() via
+    RapidAPI and only keeps providers confirmed by both sources.
+    """
+    if not tmdb_results:
+        return tmdb_results
+
+    filtered = {}
+    verified_count = 0
+    disagreed_count = 0
+
+    for key, matched_providers in tmdb_results.items():
+        item = items_by_key.get(key)
+        if not item:
+            filtered[key] = matched_providers
+            continue
+
+        tmdb_id, media_type = key
+        rapid_results = get_streaming_providers(
+            cfg.rapidapi_key, tmdb_id, media_type, country=cfg.country.lower(),
+        )
+        time.sleep(0.05)  # Rate-limit
+
+        # Build set of RapidAPI provider IDs
+        rapid_provider_ids = set()
+        for r in rapid_results:
+            pid = SERVICE_TO_PROVIDER.get(r["service_id"])
+            if pid:
+                rapid_provider_ids.add(pid)
+
+        # Keep only providers confirmed by both
+        confirmed = []
+        for p in matched_providers:
+            if p["provider_id"] in rapid_provider_ids:
+                confirmed.append(p)
+                verified_count += 1
+            else:
+                disagreed_count += 1
+                log.info(
+                    "TMDB says %s on %s but RapidAPI disagrees — skipping",
+                    item["title"], p["provider_name"],
+                )
+
+        if confirmed:
+            filtered[key] = confirmed
+
+    log.info("RapidAPI cross-check: %d verified, %d disagreements filtered",
+             verified_count, disagreed_count)
+    return filtered
+
+
 @cli.command()
 @click.option("--country", default=None, help="ISO 3166-1 country code (default: CL)")
 @click.option("--providers", default=None, help="Comma-separated provider names (default: netflix,disney)")
 @click.option("--dry-run", is_flag=True, help="Check availability without modifying tags")
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
 @click.option("--db-path", default=None, help="Path to state database")
-def scan(country, providers, dry_run, verbose, db_path):
+@click.option("--skip-verify", is_flag=True, help="Skip RapidAPI cross-validation")
+def scan(country, providers, dry_run, verbose, db_path, skip_verify):
     """Scan library against streaming providers and update state."""
     _setup_logging(verbose)
     cfg = load_config(country, providers, dry_run, verbose, db_path)
@@ -169,6 +227,15 @@ def scan(country, providers, dry_run, verbose, db_path):
         if touched:
             log.info("Touched %d keep-local DB records", touched)
 
+    # 3b. Filter out manually excluded items
+    exclusion_set = get_exclusions(cfg.db_path)
+    if exclusion_set:
+        before = len(all_items)
+        all_items = [i for i in all_items if (i["tmdb_id"], i["media_type"]) not in exclusion_set]
+        excluded = before - len(all_items)
+        if excluded:
+            log.info("Excluded %d manually excluded items from scan", excluded)
+
     log.info("Checking %d items against TMDB (providers: %s, country: %s)",
              len(all_items), cfg.providers, cfg.country)
 
@@ -178,18 +245,24 @@ def scan(country, providers, dry_run, verbose, db_path):
         country=cfg.country, max_workers=10,
     )
 
+    # Build lookup for items by key
+    items_by_key = {}
+    for item in all_items:
+        key = (item["tmdb_id"], item["media_type"])
+        items_by_key[key] = item
+
+    # 4b. Cross-validate TMDB matches against RapidAPI
+    if cfg.rapidapi_key and not skip_verify:
+        tmdb_results = _verify_with_rapidapi(cfg, tmdb_results, items_by_key)
+    elif not cfg.rapidapi_key and not skip_verify:
+        log.warning("RAPIDAPI_KEY not set — skipping RapidAPI cross-validation")
+
     # 5. Process matches
     streaming_tag_radarr = ensure_tag(cfg.radarr_url, cfg.radarr_key, TAG_LABEL) if not cfg.dry_run else None
     streaming_tag_sonarr = ensure_tag(cfg.sonarr_url, cfg.sonarr_key, TAG_LABEL) if not cfg.dry_run else None
 
     new_items = []
     total_matches = 0
-
-    # Build lookup for items by key
-    items_by_key = {}
-    for item in all_items:
-        key = (item["tmdb_id"], item["media_type"])
-        items_by_key[key] = item
 
     for key, matched_providers in tmdb_results.items():
         item = items_by_key.get(key)
@@ -1176,6 +1249,53 @@ def stale_delete_cmd(grace_days, yes, db_path):
             refresh_library(cfg.emby_url, cfg.emby_api_key)
         if cfg.discord_webhook_url:
             notify_deletion(cfg.discord_webhook_url, deleted_items, total_freed)
+
+
+@cli.command()
+@click.option("--add", nargs=2, type=(int, str), default=None,
+              help="Add exclusion: TMDB_ID MEDIA_TYPE (movie or tv)")
+@click.option("--remove", nargs=2, type=(int, str), default=None,
+              help="Remove exclusion: TMDB_ID MEDIA_TYPE")
+@click.option("--list", "list_all", is_flag=True, help="List all exclusions")
+@click.option("--reason", default=None, help="Reason for exclusion (used with --add)")
+@click.option("--title", "item_title", default=None, help="Title for display (used with --add)")
+@click.option("--db-path", default=None, help="Path to state database")
+def exclude(add, remove, list_all, reason, item_title, db_path):
+    """Manage manual streaming exclusion list.
+
+    Excluded items are skipped during scan — useful for TMDB/RapidAPI false positives.
+    """
+    _setup_logging(False)
+    cfg = load_config(db_path=db_path)
+    init_db(cfg.db_path)
+
+    if add:
+        tmdb_id, media_type = add
+        if media_type not in ("movie", "tv"):
+            click.echo("Error: media_type must be 'movie' or 'tv'")
+            sys.exit(1)
+        add_exclusion(cfg.db_path, tmdb_id, media_type, title=item_title, reason=reason)
+        click.echo(f"Added exclusion: TMDB {tmdb_id} ({media_type})"
+                   + (f" — {item_title}" if item_title else ""))
+    elif remove:
+        tmdb_id, media_type = remove
+        count = remove_exclusion(cfg.db_path, tmdb_id, media_type)
+        if count:
+            click.echo(f"Removed exclusion: TMDB {tmdb_id} ({media_type})")
+        else:
+            click.echo(f"No exclusion found for TMDB {tmdb_id} ({media_type})")
+    elif list_all:
+        exclusions = list_exclusions(cfg.db_path)
+        if not exclusions:
+            click.echo("No streaming exclusions configured.")
+            return
+        click.echo(f"\n=== Streaming Exclusions ({len(exclusions)}) ===")
+        for e in exclusions:
+            title_str = e.get("title") or "unknown"
+            reason_str = f" — {e['reason']}" if e.get("reason") else ""
+            click.echo(f"  TMDB {e['tmdb_id']} ({e['media_type']}): {title_str}{reason_str} [added {e['added_at']}]")
+    else:
+        click.echo("Use --add, --remove, or --list. See --help for details.")
 
 
 @cli.command()
