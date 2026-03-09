@@ -832,6 +832,93 @@ class TestScanCrossValidation:
         # Should have added 3 tags: streaming-available, keep-local, keep-by-disagree
         assert mock_add_tag.call_count == 3
 
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], True))
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_mixed_confirmed_and_disputed_providers(
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
+        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """Item with 2 providers: one confirmed by MoTN, one disputed."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [
+                {"provider_id": 8, "provider_name": "Netflix"},
+                {"provider_id": 337, "provider_name": "Disney Plus"},
+            ],
+        }
+        # MoTN only confirms Netflix, not Disney+
+        mock_rapid.return_value = (
+            [{"service_id": "netflix", "service_name": "Netflix"}], True,
+        )
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        # Netflix confirmed, Disney+ disputed
+        assert "Newly streaming: 1" in result.output
+        assert "Disputed:        1" in result.output
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies")
+    def test_keep_local_items_skipped_in_scan(
+        self, mock_movies, mock_series, mock_tag, mock_batch,
+        mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """Items with keep-local tag should be filtered out before batch_check."""
+        db = str(tmp_path / "test.db")
+
+        # Give Fight Club the keep-local tag (ensure_tag returns 1)
+        fight_club_with_kl = {**MOCK_MOVIES[0], "tags": [1]}
+        mock_movies.return_value = [fight_club_with_kl, MOCK_MOVIES[1]]
+        mock_batch.return_value = {}
+
+        # Run without --dry-run so keep_local tag IDs are looked up via ensure_tag
+        result = runner.invoke(cli, ["scan", "--skip-verify", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        # batch_check should only receive Toy Story (arr_id=2), not Fight Club
+        call_args = mock_batch.call_args
+        items_checked = call_args[0][1]  # second positional arg is items
+        tmdb_ids = [i["tmdb_id"] for i in items_checked]
+        assert 550 not in tmdb_ids  # Fight Club filtered out
+        assert 862 in tmdb_ids  # Toy Story still present
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_both_sources_unreachable_confirms_all(
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
+        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """Both RAPIDAPI_KEY and WATCHMODE_API_KEY set but both unreachable → all confirmed."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        monkeypatch.setenv("WATCHMODE_API_KEY", "test-wm-key")
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
+        }
+        # Both external sources unreachable (api_responded=False)
+        mock_rapid.return_value = ([], False)
+        mock_wm.return_value = ([], False)
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Newly streaming: 1" in result.output
+        assert "Disputed:        0" in result.output
+
 
 class TestScanExclusions:
     """Tests for manual exclusion filtering in scan command."""
@@ -1013,3 +1100,73 @@ class TestVerifyDisputed:
         db = _make_db(tmp_path)
         result = runner.invoke(cli, ["verify-disputed", "--db-path", db])
         assert result.exit_code != 0
+
+    @patch("requests.post")
+    @patch("streaming.streaming_checker.remove_tag_from_item")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies")
+    @patch("streaming.streaming_checker.get_tag_id")
+    def test_discord_notification_sent(
+        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm,
+        mock_remove_tag, mock_requests_post, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """Discord webhook called with correct embed structure on resolution."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.example.com/webhook")
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
+
+        mock_tag_id.side_effect = lambda url, key, tag: 99 if tag == "keep-by-disagree" else 88
+        mock_movies.return_value = [
+            {**MOCK_MOVIES[0], "tags": [99, 88]},
+        ]
+        mock_rapid.return_value = (
+            [{"service_id": "netflix", "service_name": "Netflix"}], True,
+        )
+
+        result = runner.invoke(cli, ["verify-disputed", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Resolved:        1" in result.output
+        # Verify Discord was called
+        mock_requests_post.assert_called_once()
+        call_args = mock_requests_post.call_args
+        payload = call_args[1]["json"] if "json" in call_args[1] else call_args[0][1]
+        embed = payload["embeds"][0]
+        assert "Verify Disputed" in embed["title"]
+        assert embed["color"] == 3066993  # green for resolved
+        assert len(embed["fields"]) == 3
+
+    @patch("streaming.streaming_checker._is_dual_audio_keep_local", return_value=True)
+    @patch("streaming.streaming_checker.remove_tag_from_item")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies")
+    @patch("streaming.streaming_checker.get_tag_id")
+    def test_preserves_keep_local_for_dual_audio(
+        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm,
+        mock_remove_tag, mock_dual_audio, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """Resolution removes keep-by-disagree but preserves keep-local for dual-audio items."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
+
+        mock_tag_id.side_effect = lambda url, key, tag: 99 if tag == "keep-by-disagree" else 88
+        mock_movies.return_value = [
+            {**MOCK_MOVIES[0], "tags": [99, 88]},
+        ]
+        mock_rapid.return_value = (
+            [{"service_id": "netflix", "service_name": "Netflix"}], True,
+        )
+
+        result = runner.invoke(cli, ["verify-disputed", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Resolved:        1" in result.output
+        # Should only remove keep-by-disagree (1 call), NOT keep-local
+        assert mock_remove_tag.call_count == 1
+        # Verify only disagree tag removed
+        call_args = mock_remove_tag.call_args_list[0]
+        assert call_args[0][4] == 99  # disagree tag id

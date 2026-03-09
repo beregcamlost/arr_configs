@@ -1600,14 +1600,15 @@ def verify_disputed(dry_run, verbose, db_path):
                 if item["media_type"] == "movie":
                     remove_tag_from_item(cfg.radarr_url, cfg.radarr_key, "movie",
                                          item["arr_id"], disagree_radarr)
-                    # Only remove keep-local if we added it (item has keep-by-disagree)
-                    if kl_radarr:
+                    # Only remove keep-local if it was added by disagree system,
+                    # not if it was added by check-audio (dual-audio) or check-seasons.
+                    if kl_radarr and not _is_dual_audio_keep_local(item.get("path", "")):
                         remove_tag_from_item(cfg.radarr_url, cfg.radarr_key, "movie",
                                              item["arr_id"], kl_radarr)
                 else:
                     remove_tag_from_item(cfg.sonarr_url, cfg.sonarr_key, "series",
                                          item["arr_id"], disagree_sonarr)
-                    if kl_sonarr:
+                    if kl_sonarr and not _is_dual_audio_keep_local(item.get("path", "")):
                         remove_tag_from_item(cfg.sonarr_url, cfg.sonarr_key, "series",
                                              item["arr_id"], kl_sonarr)
         else:
