@@ -16,7 +16,7 @@
 | `db.py` | 🗄️ SQLite state DB — tracks streaming history across scans |
 | `config.py` | ⚙️ Config loader — reads `.env`, maps provider names to IDs |
 | `discord.py` | 💬 Discord webhook notifications (new matches, deletions) |
-| `tests/` | ✅ 134 tests (pytest) |
+| `tests/` | ✅ 233 tests (pytest) |
 
 ---
 
@@ -147,7 +147,7 @@ SQLite at `/APPBOX_DATA/storage/.streaming-state/streaming_state.db`
 ```bash
 cd /config/berenstuff/automation/scripts
 python3 -m pytest streaming/tests/ -v
-# 134 tests covering all modules
+# 233 tests covering all modules
 ```
 
 ---

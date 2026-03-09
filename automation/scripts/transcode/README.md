@@ -23,7 +23,7 @@
 ## ✨ Features
 
 - **🎯 H.264 CRF 19 + AAC 192k** — high quality, broad compatibility target codec profile
-- **📦 MKV output container** — preserves subtitle tracks, chapters, and all metadata
+- **📦 MKV/MP4 output container** — preserves subtitle tracks, chapters, and all metadata
 - **⚡ Priority queue** — audio-only remux (priority 1) before video transcode (priority 10); import-hook files get priority 0 (highest)
 - **🛡️ UHD/4K/HDR skip** — never touches 4K or HDR content
 - **🌊 Streaming candidate skip** — files flagged by the streaming checker are excluded from conversion
@@ -197,8 +197,8 @@ probe_streams (media_id, stream_index, codec_type, codec_name, ...)
 |----------|------------------|
 | **Target video** | `h264` (libx264, CRF 19, preset medium, yuv420p) |
 | **Target audio** | `aac` (192k, stereo, 48kHz) |
-| **Container** | MKV |
-| **Skip: already compliant** | video=h264 + audio=aac + container=mkv |
+| **Container** | MKV or MP4 (preserved); others → MKV |
+| **Skip: already compliant** | video=h264 + audio=aac + container=mkv/mp4 |
 | **Skip: UHD/4K/HDR** | width > 3800 OR HDR metadata detected |
 | **Skip: streaming candidate** | path in streaming checker DB |
 | **Audio stream selection** | Bazarr profile langs + detected original language |

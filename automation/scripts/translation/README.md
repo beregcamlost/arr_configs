@@ -15,7 +15,7 @@
 | `db.py` | 🗄️ SQLite state DB — translation history + 24h cooldown |
 | `config.py` | ⚙️ Config loader + language code mappings (ISO 639 ↔ DeepL) |
 | `discord.py` | 💬 Discord webhook — translation summaries + quota warnings |
-| `tests/` | ✅ 40 tests (pytest) |
+| `tests/` | ✅ 41 tests (pytest) |
 
 ---
 
@@ -126,7 +126,7 @@ pt → PT-PT      it → IT      ...
 ```bash
 cd /config/berenstuff/automation/scripts
 python3 -m pytest translation/tests/ -v
-# 40 tests covering all modules
+# 41 tests covering all modules
 ```
 
 ---

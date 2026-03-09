@@ -32,9 +32,9 @@
 [![TMDB](https://img.shields.io/badge/TMDB-✓-01D277?style=flat-square&logo=themoviedatabase&logoColor=white)](https://www.themoviedatabase.org)
 [![Transmission](https://img.shields.io/badge/Transmission-✓-C00?style=flat-square)](https://transmissionbt.com)
 
-[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-16%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/tests-189%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--03--03-informational?style=flat-square&logo=calendar&logoColor=white)]()
+[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-18%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
+[![Tests](https://img.shields.io/badge/tests-417%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
+[![Updated](https://img.shields.io/badge/last%20updated-2026--03--09-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -159,12 +159,14 @@ graph TB
 
 | System | Language | Tests | Cron Freq | Notifications |
 |--------|----------|-------|-----------|---------------|
-| 🎬 Subtitle Manager | Bash | — | 5 min / 10 min / daily | ✅ Discord |
+| 🎬 Subtitle Manager | Bash | 143 ✅ | 5 min / 10 min / daily | ✅ Discord |
 | 🔄 Codec Manager | Bash | — | 15 min / 3 AM daily | ✅ Discord |
-| 📺 Streaming Checker | Python | 149 ✅ | Weekly / Monthly | ✅ Discord |
-| 🌐 DeepL Translator | Python | 40 ✅ | 30 min | ✅ Discord |
+| 📺 Streaming Checker | Python | 233 ✅ | Weekly / Monthly | ✅ Discord |
+| 🌐 DeepL Translator | Python | 41 ✅ | 30 min | ✅ Discord |
 | 👻 Zombie Reaper | Bash | — | 2 min | ✅ Discord |
 | 🧹 Arr Cleanup | Bash | — | 30 min | — |
+| 📈 Trending Auto-Add | Python | 21 ✅ | Weekly (DISABLED) | — |
+| 💾 SQLite Backup | Bash | — | Every 3 days | — |
 
 <details>
 <summary>📊 <strong>Key Numbers</strong></summary>
@@ -172,8 +174,8 @@ graph TB
 
 | Metric | Value |
 |--------|-------|
-| 📜 Total cron jobs | 16 |
-| 🧪 Total tests | 189 passing |
+| 📜 Total cron jobs | 18 |
+| 🧪 Total tests | 417 passing |
 | 🌐 DeepL quota | 500K chars/month (free tier) |
 | 💾 State databases | 4 (codec, streaming, translation, bazarr) |
 | 🔌 External APIs | 6 (Sonarr, Radarr, Bazarr, Emby, TMDB, DeepL) |
@@ -271,7 +273,7 @@ Every 15 min  → bazarr subtitle recovery        (--since 30 min)
 ```
 Video   →  H.264  CRF 19  (x264)
 Audio   →  AAC    192k    stereo normalization
-Container → MKV
+Container → MKV or MP4 (preserved); others remuxed to MKV
 ```
 
 ### ⚡ Priority Queue
@@ -357,12 +359,17 @@ flowchart TD
 ### 🧪 Test Coverage
 
 ```
-149 tests passing
+233 tests passing
 ├── 96  streaming core tests
 ├── 33  keep-local filtering tests
-├──  8  tier 1.5 stale flag/delete tests
-├──  2  stale Discord notification tests
-└── 10  miscellaneous utility tests
+├── 21  trending auto-add tests
+├── 18  cross-validation voting tests
+├── 15  per-season streaming tests
+├── 14  left-streaming tracking tests
+├── 12  Discord notification tests
+├── 10  stale flag/delete tests
+├──  8  CLI argument tests
+└──  6  miscellaneous utility tests
 ```
 
 ---
@@ -407,11 +414,12 @@ Import Hook (background, async)
 ### 🧪 Test Coverage
 
 ```
-40 tests passing
+41 tests passing
 ├── CLI argument handling
 ├── Source SRT selection logic
 ├── State DB cooldown enforcement
-└── Bazarr DB profile + missing_subtitles parsing
+├── Bazarr DB profile + missing_subtitles parsing
+└── Language code mapping validation
 ```
 
 ---
@@ -499,11 +507,14 @@ gantt
 | `*/30 * * * *` | 🧹 Arr import-blocked cleanup | Cleanup | — |
 | `0 5 * * 0` | 📺 Streaming availability scan | Streaming | Weekly, Sunday 5 AM |
 | `30 5 * * 0` | 📺 Tier 1.5: stale flag (90d unwatched) | Streaming | Weekly, Sunday 5:30 AM |
+| `0 6 * * 0` | 📺 Tier 1: streaming cleanup | Streaming | Weekly, Sunday 6 AM (DISABLED) |
 | `30 6 * * 0` | 📺 Tier 1.5: stale delete (15d grace) | Streaming | Weekly, Sunday 6:30 AM |
 | `0 7 1 * *` | 📺 Tier 2: stale cleanup (365d, >3GB) | Streaming | Monthly, 1st 7 AM |
 | `2,32 * * * *` | 👻 Emby zombie reaper | Emby | Staggered |
 | `3 5 * * 2` | 👻 Emby weekly restart | Emby | Tuesday 05:03 UTC |
 | `35 3 * * 2` | 📊 Emby last played report | Reports | Tuesday 03:35 UTC |
+| `0 4 * * *` | 🔍 Verify disputed streaming | Streaming | Cross-validation voting |
+| `0 2 */3 * *` | 💾 SQLite backup | Maintenance | All state DBs |
 
 ---
 
@@ -549,7 +560,7 @@ sequenceDiagram
 ```
 📦 berenstuff/
 ├── 📄 .env                          # All secrets (never committed)
-├── 📄 CLAUDE.md                     # AI assistant context & instructions
+├── 📄 CLAUDE.md                     # Development conventions
 │
 ├── 📂 apps/                         # App config backups
 │   ├── 📂 bazarr_data/
@@ -738,7 +749,7 @@ Caused `analyze_srt_file()` failures in full scan mode.
 ╚════════════════════════════════════════════════╝
 ```
 
-**🤖 Maintained by Beren** · Last updated: **2026-03-02** · Running on an appbox near you
+**🤖 Maintained by Beren** · Last updated: **2026-03-09** · Running on an appbox near you
 
 [![GitHub](https://img.shields.io/badge/GitHub-beregcamlost%2Farr__configs-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/beregcamlost/arr_configs)
 

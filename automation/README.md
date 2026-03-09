@@ -5,6 +5,8 @@ This folder centralizes automation scripts, logs, and docs for subtitle/profile 
 ## Structure
 - `scripts/subtitles/` subtitle/profile extraction + Sonarr/Radarr hooks
 - `scripts/transcode/` library codec manager
+- `scripts/streaming/` streaming availability checker
+- `scripts/translation/` DeepL subtitle translator
 - `logs/` automation logs
 - `docs/` persistent context and operational notes
 
