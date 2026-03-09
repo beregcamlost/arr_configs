@@ -89,7 +89,7 @@ SERVICE_TO_PROVIDER = {
 }
 
 
-def get_streaming_providers(api_key, tmdb_id, media_type, country="cl"):
+def get_streaming_providers(api_key, tmdb_id, media_type, country="cl", return_status=False):
     """Check if a single item is available for streaming via Movie of the Night API.
 
     Args:
@@ -97,9 +97,15 @@ def get_streaming_providers(api_key, tmdb_id, media_type, country="cl"):
         tmdb_id: TMDB ID (integer)
         media_type: 'movie' or 'tv'
         country: ISO 3166-1 alpha-2 country code (lowercase)
+        return_status: if True, return (list, bool) tuple where bool indicates
+            whether the API responded successfully. 404 counts as True (API
+            checked and item not found). 429/auth/network errors return False
+            (API didn't check — can't count as a vote). Default False for
+            backward compatibility.
 
     Returns:
-        list of dicts with {service_id, service_name} for subscription-type providers.
+        list of dicts with {service_id, service_name} for subscription-type providers,
+        or (list, bool) tuple when return_status=True.
         Returns empty list on error (fail-open).
     """
     prefix = "movie" if media_type == "movie" else "tv"
@@ -111,17 +117,17 @@ def get_streaming_providers(api_key, tmdb_id, media_type, country="cl"):
         resp = requests.get(url, headers=headers, params=params, timeout=15)
         if resp.status_code == 429:
             log.warning("RapidAPI rate limit hit (429) for TMDB %s", tmdb_id)
-            return []
+            return ([], False) if return_status else []
         if resp.status_code in (401, 403):
             log.warning("RapidAPI auth error (%d) — check RAPIDAPI_KEY", resp.status_code)
-            return []
+            return ([], False) if return_status else []
         if resp.status_code == 404:
             log.debug("TMDB %s (%s) not found in Streaming Availability API", tmdb_id, media_type)
-            return []
+            return ([], True) if return_status else []
         resp.raise_for_status()
     except requests.RequestException as e:
         log.warning("Streaming Availability API error for TMDB %s: %s", tmdb_id, e)
-        return []
+        return ([], False) if return_status else []
 
     data = resp.json()
     options = data.get("streamingOptions", {}).get(country.lower(), [])
@@ -135,7 +141,101 @@ def get_streaming_providers(api_key, tmdb_id, media_type, country="cl"):
         if sid and sid not in seen:
             seen.add(sid)
             result.append({"service_id": sid, "service_name": service.get("name", sid)})
-    return result
+    return (result, True) if return_status else result
+
+
+WATCHMODE_BASE = "https://api.watchmode.com/v1"
+
+# Watchmode source IDs → TMDB provider IDs
+WATCHMODE_TO_PROVIDER = {
+    203: 8,    # Netflix
+    157: 337,  # Disney+
+    387: 384,  # Max (HBO)
+    26: 119,   # Amazon Prime
+    371: 350,  # Apple TV+
+    444: 531,  # Paramount+
+}
+
+
+def get_watchmode_providers(api_key, tmdb_id, media_type, country="CL"):
+    """Check streaming via Watchmode API. Returns (list, bool) — providers + success flag.
+
+    The bool indicates whether the API responded successfully:
+    - True + providers: item found on those services
+    - True + empty list: API checked, item not streaming (counts as "no" vote)
+    - False + empty list: API error/unreachable (don't count as vote)
+    """
+    if not api_key:
+        return [], False
+
+    # Step 1: Search for Watchmode title ID using TMDB ID
+    search_url = f"{WATCHMODE_BASE}/search/"
+    params = {
+        "apiKey": api_key,
+        "search_field": "tmdb_id",
+        "search_value": str(tmdb_id),
+        "types": "movie" if media_type == "movie" else "tv",
+    }
+
+    try:
+        resp = requests.get(search_url, params=params, timeout=15)
+        if resp.status_code in (429, 401, 403):
+            log.warning("Watchmode API error (%d) for TMDB %s", resp.status_code, tmdb_id)
+            return [], False
+        if resp.status_code == 404:
+            log.debug("TMDB %s not found in Watchmode search", tmdb_id)
+            return [], True  # API checked, not found
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        log.warning("Watchmode search error for TMDB %s: %s", tmdb_id, e)
+        return [], False
+
+    data = resp.json()
+    titles = data.get("title_results", [])
+    if not titles:
+        log.debug("Watchmode: no results for TMDB %s", tmdb_id)
+        return [], True  # API checked, not found
+
+    watchmode_id = titles[0].get("id")
+    if not watchmode_id:
+        return [], True
+
+    # Step 2: Get sources for the Watchmode title
+    sources_url = f"{WATCHMODE_BASE}/title/{watchmode_id}/sources/"
+    source_params = {
+        "apiKey": api_key,
+        "regions": country.upper(),
+    }
+
+    try:
+        resp = requests.get(sources_url, params=source_params, timeout=15)
+        if resp.status_code in (429, 401, 403):
+            log.warning("Watchmode sources API error (%d) for ID %s", resp.status_code, watchmode_id)
+            return [], False
+        if resp.status_code == 404:
+            return [], True
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        log.warning("Watchmode sources error for ID %s: %s", watchmode_id, e)
+        return [], False
+
+    sources = resp.json()
+    if not isinstance(sources, list):
+        sources = []
+
+    seen = set()
+    result = []
+    for src in sources:
+        # Only subscription type
+        if src.get("type") != "sub":
+            continue
+        source_id = src.get("source_id")
+        provider_id = WATCHMODE_TO_PROVIDER.get(source_id)
+        if provider_id and provider_id not in seen:
+            seen.add(provider_id)
+            result.append({"provider_id": provider_id, "source_id": source_id})
+
+    return result, True
 
 
 def _is_on_service(item_streaming_options, service, country):

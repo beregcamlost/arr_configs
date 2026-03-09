@@ -647,69 +647,74 @@ class TestCheckImport:
         mock_tmdb.assert_called_once()
 
 
-class TestScanRapidAPIVerify:
-    """Tests for RapidAPI cross-validation in scan command."""
+class TestScanCrossValidation:
+    """Tests for cross-validation (MoTN + Watchmode voting) in scan command."""
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
     @patch("streaming.streaming_checker.ensure_tag", return_value=1)
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
-    def test_verify_filters_false_positive(
+    def test_disputed_when_motn_disagrees(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
-        """TMDB says Netflix but RapidAPI disagrees → match filtered out."""
+        """TMDB says Netflix but MoTN + Watchmode disagree → disputed."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
         db = str(tmp_path / "test.db")
 
         mock_batch.return_value = {
             (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
         }
-        # RapidAPI returns empty — no Netflix
-        mock_rapid.return_value = []
+        # MoTN returns empty — no Netflix (API responded OK)
+        mock_rapid.return_value = ([], True)
 
         result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
         assert result.exit_code == 0, result.output
         assert "Newly streaming: 0" in result.output
+        assert "Disputed:        1" in result.output
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
     @patch("streaming.streaming_checker.ensure_tag", return_value=1)
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
-    def test_verify_keeps_confirmed_match(
+    def test_confirmed_when_motn_agrees(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
-        """Both TMDB and RapidAPI agree → match kept."""
+        """Both TMDB and MoTN agree → confirmed."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
         db = str(tmp_path / "test.db")
 
         mock_batch.return_value = {
             (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
         }
-        mock_rapid.return_value = [
-            {"service_id": "netflix", "service_name": "Netflix"},
-        ]
+        mock_rapid.return_value = (
+            [{"service_id": "netflix", "service_name": "Netflix"}], True,
+        )
 
         result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
         assert result.exit_code == 0, result.output
         assert "Newly streaming: 1" in result.output
+        assert "Disputed:        0" in result.output
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_watchmode_providers")
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
     @patch("streaming.streaming_checker.ensure_tag", return_value=1)
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
-    def test_skip_verify_bypasses_rapidapi(
+    def test_skip_verify_bypasses_cross_validation(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
-        """--skip-verify should not call RapidAPI."""
+        """--skip-verify should not call external APIs."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
         db = str(tmp_path / "test.db")
 
@@ -721,18 +726,20 @@ class TestScanRapidAPIVerify:
         assert result.exit_code == 0, result.output
         assert "Newly streaming: 1" in result.output
         mock_rapid.assert_not_called()
+        mock_wm.assert_not_called()
 
     @patch("streaming.streaming_checker.notify_scan_results")
     @patch("streaming.streaming_checker.batch_check")
     @patch("streaming.streaming_checker.ensure_tag", return_value=1)
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
-    def test_no_rapidapi_key_falls_back_to_tmdb_only(
+    def test_no_api_keys_falls_back_to_tmdb_only(
         self, mock_movies, mock_series, mock_tag, mock_batch,
         mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
-        """Without RAPIDAPI_KEY, scan uses TMDB-only (no verify)."""
+        """Without any external API keys, scan uses TMDB-only (no cross-validation)."""
         monkeypatch.delenv("RAPIDAPI_KEY", raising=False)
+        monkeypatch.delenv("WATCHMODE_API_KEY", raising=False)
         db = str(tmp_path / "test.db")
 
         mock_batch.return_value = {
@@ -742,6 +749,88 @@ class TestScanRapidAPIVerify:
         result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
         assert result.exit_code == 0, result.output
         assert "Newly streaming: 1" in result.output
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_confirmed_when_no_external_source_reachable(
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
+        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """If no external source was reachable, treat as confirmed (can't dispute)."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
+        }
+        # MoTN API error (unreachable)
+        mock_rapid.return_value = ([], False)
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Newly streaming: 1" in result.output
+        assert "Disputed:        0" in result.output
+
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_watchmode_providers")
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_confirmed_by_watchmode_alone(
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
+        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """MoTN disagrees but Watchmode agrees → 2 votes (TMDB+WM) → confirmed."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        monkeypatch.setenv("WATCHMODE_API_KEY", "test-wm-key")
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
+        }
+        # MoTN says no
+        mock_rapid.return_value = ([], True)
+        # Watchmode says yes
+        mock_wm.return_value = ([{"provider_id": 8, "source_id": 203}], True)
+
+        result = runner.invoke(cli, ["scan", "--dry-run", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Newly streaming: 1" in result.output
+        assert "Disputed:        0" in result.output
+
+    @patch("streaming.streaming_checker.add_tag_to_item")
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], True))
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=1)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
+    def test_disputed_item_gets_three_tags(
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
+        mock_wm, mock_notify, mock_add_tag, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """Disputed item should get streaming-available + keep-local + keep-by-disagree."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = str(tmp_path / "test.db")
+
+        mock_batch.return_value = {
+            (550, "movie"): [{"provider_id": 8, "provider_name": "Netflix"}],
+        }
+        mock_rapid.return_value = ([], True)
+
+        result = runner.invoke(cli, ["scan", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Disputed:        1" in result.output
+        # Should have added 3 tags: streaming-available, keep-local, keep-by-disagree
+        assert mock_add_tag.call_count == 3
 
 
 class TestScanExclusions:
@@ -827,3 +916,100 @@ class TestExcludeCommand:
             "exclude", "--add", "550", "podcast", "--db-path", db,
         ])
         assert result.exit_code != 0 or "Error" in result.output
+
+
+class TestVerifyDisputed:
+    """Tests for verify-disputed subcommand."""
+
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=[])
+    @patch("streaming.streaming_checker.get_tag_id", return_value=None)
+    def test_no_tags_found(self, mock_tag, mock_movies, mock_series,
+                           runner, env_config, monkeypatch, tmp_path):
+        """No keep-by-disagree tags → nothing to verify."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = _make_db(tmp_path)
+        result = runner.invoke(cli, ["verify-disputed", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "No keep-by-disagree tags found" in result.output
+
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies")
+    @patch("streaming.streaming_checker.get_tag_id", return_value=99)
+    def test_no_disputed_items(self, mock_tag, mock_movies, mock_series,
+                               runner, env_config, monkeypatch, tmp_path):
+        """Tag exists but no movies have it."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = _make_db(tmp_path)
+        mock_movies.return_value = [
+            {**MOCK_MOVIES[0], "tags": [1]},  # has tag 1, not 99
+        ]
+        result = runner.invoke(cli, ["verify-disputed", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "No items with keep-by-disagree" in result.output
+
+    @patch("streaming.streaming_checker.remove_tag_from_item")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies")
+    @patch("streaming.streaming_checker.get_tag_id")
+    def test_resolved_when_sources_agree(
+        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm,
+        mock_remove_tag, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """If sources now agree, remove keep-by-disagree + keep-local."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
+
+        # Tag IDs: keep-by-disagree=99, keep-local=88
+        mock_tag_id.side_effect = lambda url, key, tag: 99 if tag == "keep-by-disagree" else 88
+        mock_movies.return_value = [
+            {**MOCK_MOVIES[0], "tags": [99, 88]},  # has both tags
+        ]
+        # MoTN now confirms Netflix
+        mock_rapid.return_value = (
+            [{"service_id": "netflix", "service_name": "Netflix"}], True,
+        )
+
+        result = runner.invoke(cli, ["verify-disputed", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Resolved:        1" in result.output
+        # Should remove both tags
+        assert mock_remove_tag.call_count == 2
+
+    @patch("streaming.streaming_checker.remove_tag_from_item")
+    @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], True))
+    @patch("streaming.streaming_checker.get_streaming_providers")
+    @patch("streaming.streaming_checker.fetch_series", return_value=[])
+    @patch("streaming.streaming_checker.fetch_movies")
+    @patch("streaming.streaming_checker.get_tag_id")
+    def test_still_disputed(
+        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm,
+        mock_remove_tag, runner, env_config, monkeypatch, tmp_path,
+    ):
+        """If sources still disagree, keep tags."""
+        monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
+        db = _make_db(tmp_path)
+        _seed_fight_club(db)
+
+        mock_tag_id.side_effect = lambda url, key, tag: 99 if tag == "keep-by-disagree" else 88
+        mock_movies.return_value = [
+            {**MOCK_MOVIES[0], "tags": [99, 88]},
+        ]
+        # MoTN still disagrees
+        mock_rapid.return_value = ([], True)
+
+        result = runner.invoke(cli, ["verify-disputed", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        assert "Still disputed:  1" in result.output
+        mock_remove_tag.assert_not_called()
+
+    def test_requires_api_key(self, runner, env_config, monkeypatch, tmp_path):
+        """verify-disputed requires at least one external API key."""
+        monkeypatch.delenv("RAPIDAPI_KEY", raising=False)
+        monkeypatch.delenv("WATCHMODE_API_KEY", raising=False)
+        db = _make_db(tmp_path)
+        result = runner.invoke(cli, ["verify-disputed", "--db-path", db])
+        assert result.exit_code != 0

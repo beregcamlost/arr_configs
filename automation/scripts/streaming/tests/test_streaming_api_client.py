@@ -4,7 +4,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from streaming.streaming_api_client import get_season_availability, get_streaming_providers
+from streaming.streaming_api_client import (
+    get_season_availability,
+    get_streaming_providers,
+    get_watchmode_providers,
+)
 
 
 def _mock_response(json_data=None, status_code=200):
@@ -235,3 +239,133 @@ class TestGetStreamingProviders:
         mock_get.side_effect = req.RequestException("timeout")
         result = get_streaming_providers("test-key", 550, "movie", country="cl")
         assert result == []
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_return_status_true_on_success(self, mock_get):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "streamingOptions": {
+                "cl": [{"service": {"id": "netflix", "name": "Netflix"}, "type": "subscription"}]
+            }
+        }
+        mock_get.return_value.raise_for_status = lambda: None
+        result, success = get_streaming_providers("test-key", 550, "movie", "cl", return_status=True)
+        assert success is True
+        assert len(result) == 1
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_return_status_true_on_404(self, mock_get):
+        """404 = API checked, item not found — success=True."""
+        mock_get.return_value.status_code = 404
+        result, success = get_streaming_providers("test-key", 550, "movie", "cl", return_status=True)
+        assert success is True
+        assert result == []
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_return_status_false_on_429(self, mock_get):
+        """429 rate limit = API didn't check — success=False."""
+        mock_get.return_value.status_code = 429
+        result, success = get_streaming_providers("test-key", 550, "movie", "cl", return_status=True)
+        assert success is False
+        assert result == []
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_return_status_false_on_network_error(self, mock_get):
+        import requests as req
+        mock_get.side_effect = req.RequestException("timeout")
+        result, success = get_streaming_providers("test-key", 550, "movie", "cl", return_status=True)
+        assert success is False
+        assert result == []
+
+
+class TestGetWatchmodeProviders:
+    """Tests for get_watchmode_providers() — Watchmode API streaming lookup."""
+
+    def test_no_api_key_returns_false(self):
+        result, success = get_watchmode_providers("", 550, "movie")
+        assert result == []
+        assert success is False
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_found_on_netflix(self, mock_get):
+        # First call: search → returns watchmode ID
+        search_resp = _mock_response({"title_results": [{"id": 12345}]})
+        # Second call: sources → returns Netflix sub
+        sources_resp = _mock_response([
+            {"type": "sub", "source_id": 203},  # Netflix
+            {"type": "buy", "source_id": 371},   # Apple (buy, not sub)
+        ])
+        mock_get.side_effect = [search_resp, sources_resp]
+
+        result, success = get_watchmode_providers("test-key", 550, "movie")
+        assert success is True
+        assert len(result) == 1
+        assert result[0]["provider_id"] == 8  # Netflix TMDB ID
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_not_found_returns_empty_success(self, mock_get):
+        """Title not found = API checked, not streaming."""
+        mock_get.return_value = _mock_response({"title_results": []})
+        result, success = get_watchmode_providers("test-key", 99999, "movie")
+        assert success is True
+        assert result == []
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_search_rate_limit(self, mock_get):
+        resp = MagicMock()
+        resp.status_code = 429
+        mock_get.return_value = resp
+        result, success = get_watchmode_providers("test-key", 550, "movie")
+        assert success is False
+        assert result == []
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_search_network_error(self, mock_get):
+        import requests as req
+        mock_get.side_effect = req.RequestException("timeout")
+        result, success = get_watchmode_providers("test-key", 550, "movie")
+        assert success is False
+        assert result == []
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_sources_rate_limit(self, mock_get):
+        """Search succeeds but sources endpoint hits rate limit."""
+        search_resp = _mock_response({"title_results": [{"id": 12345}]})
+        sources_resp = MagicMock()
+        sources_resp.status_code = 429
+        mock_get.side_effect = [search_resp, sources_resp]
+
+        result, success = get_watchmode_providers("test-key", 550, "movie")
+        assert success is False
+        assert result == []
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_multiple_providers(self, mock_get):
+        search_resp = _mock_response({"title_results": [{"id": 12345}]})
+        sources_resp = _mock_response([
+            {"type": "sub", "source_id": 203},  # Netflix
+            {"type": "sub", "source_id": 157},  # Disney+
+            {"type": "sub", "source_id": 387},  # Max
+        ])
+        mock_get.side_effect = [search_resp, sources_resp]
+
+        result, success = get_watchmode_providers("test-key", 550, "movie")
+        assert success is True
+        assert len(result) == 3
+        provider_ids = {r["provider_id"] for r in result}
+        assert provider_ids == {8, 337, 384}
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_filters_unknown_source_ids(self, mock_get):
+        """Source IDs not in WATCHMODE_TO_PROVIDER mapping are ignored."""
+        search_resp = _mock_response({"title_results": [{"id": 12345}]})
+        sources_resp = _mock_response([
+            {"type": "sub", "source_id": 203},  # Netflix (known)
+            {"type": "sub", "source_id": 999},  # Unknown
+        ])
+        mock_get.side_effect = [search_resp, sources_resp]
+
+        result, success = get_watchmode_providers("test-key", 550, "movie")
+        assert success is True
+        assert len(result) == 1
+        assert result[0]["provider_id"] == 8

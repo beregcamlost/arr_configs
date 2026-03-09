@@ -56,12 +56,20 @@ from streaming.discord import (
     notify_stale_flag,
 )
 from streaming.emby_client import get_last_played_map, is_playing, refresh_library
-from streaming.streaming_api_client import get_season_availability, get_streaming_providers, SERVICE_TO_PROVIDER
+from streaming.streaming_api_client import (
+    get_season_availability,
+    get_streaming_providers,
+    get_watchmode_providers,
+    SERVICE_TO_PROVIDER,
+    WATCHMODE_TO_PROVIDER,
+)
 from streaming.tmdb_client import batch_check, check_streaming
 
 log = logging.getLogger("streaming_checker")
 
 TAG_LABEL = "streaming-available"
+TAG_KEEP_LOCAL = "keep-local"
+TAG_KEEP_BY_DISAGREE = "keep-by-disagree"
 
 
 def _parse_dt(s: str) -> datetime:
@@ -119,57 +127,94 @@ def cli():
     pass
 
 
-def _verify_with_rapidapi(cfg, tmdb_results, items_by_key):
-    """Cross-validate TMDB matches against RapidAPI. Returns filtered results.
+def _cross_validate_matches(cfg, tmdb_results, items_by_key):
+    """Cross-validate TMDB matches via voting (MoTN + Watchmode).
 
-    For each item TMDB says is streaming, calls get_streaming_providers() via
-    RapidAPI and only keeps providers confirmed by both sources.
+    For each item TMDB says is streaming, checks MoTN and Watchmode APIs.
+    Voting: 2+ sources agree → confirmed. Only TMDB with active disagreement → disputed.
+
+    Returns:
+        dict: {(tmdb_id, media_type): {"confirmed": [providers], "disputed": [providers]}}
     """
     if not tmdb_results:
-        return tmdb_results
+        return {}
 
-    filtered = {}
+    result = {}
     verified_count = 0
-    disagreed_count = 0
+    disputed_count = 0
 
     for key, matched_providers in tmdb_results.items():
         item = items_by_key.get(key)
         if not item:
-            filtered[key] = matched_providers
+            # No item context — treat as confirmed
+            result[key] = {"confirmed": matched_providers, "disputed": []}
             continue
 
         tmdb_id, media_type = key
-        rapid_results = get_streaming_providers(
-            cfg.rapidapi_key, tmdb_id, media_type, country=cfg.country.lower(),
-        )
-        time.sleep(0.05)  # Rate-limit
 
-        # Build set of RapidAPI provider IDs
-        rapid_provider_ids = set()
-        for r in rapid_results:
-            pid = SERVICE_TO_PROVIDER.get(r["service_id"])
-            if pid:
-                rapid_provider_ids.add(pid)
+        # Source 1: MoTN (RapidAPI)
+        motn_provider_ids = set()
+        motn_available = False
+        if cfg.rapidapi_key:
+            motn_results, motn_available = get_streaming_providers(
+                cfg.rapidapi_key, tmdb_id, media_type,
+                country=cfg.country.lower(), return_status=True,
+            )
+            time.sleep(0.05)
+            for r in motn_results:
+                pid = SERVICE_TO_PROVIDER.get(r["service_id"])
+                if pid:
+                    motn_provider_ids.add(pid)
 
-        # Keep only providers confirmed by both
+        # Source 2: Watchmode
+        wm_provider_ids = set()
+        wm_available = False
+        if cfg.watchmode_api_key:
+            wm_results, wm_available = get_watchmode_providers(
+                cfg.watchmode_api_key, tmdb_id, media_type,
+                country=cfg.country.upper(),
+            )
+            time.sleep(0.05)
+            for r in wm_results:
+                pid = r.get("provider_id")
+                if pid:
+                    wm_provider_ids.add(pid)
+
+        # Count external sources that actually responded
+        external_sources_checked = sum([motn_available, wm_available])
+
         confirmed = []
+        disputed = []
         for p in matched_providers:
-            if p["provider_id"] in rapid_provider_ids:
+            pid = p["provider_id"]
+            # TMDB = 1 vote (always)
+            votes = 1
+            if motn_available and pid in motn_provider_ids:
+                votes += 1
+            if wm_available and pid in wm_provider_ids:
+                votes += 1
+
+            if votes >= 2:
+                confirmed.append(p)
+                verified_count += 1
+            elif external_sources_checked == 0:
+                # No external source was reachable — can't dispute, treat as confirmed
                 confirmed.append(p)
                 verified_count += 1
             else:
-                disagreed_count += 1
+                # Only TMDB voted yes, at least one source actively disagreed
+                disputed.append(p)
+                disputed_count += 1
                 log.info(
-                    "TMDB says %s on %s but RapidAPI disagrees — skipping",
-                    item["title"], p["provider_name"],
+                    "DISPUTED: TMDB says %s on %s but external sources disagree (votes: %d/3)",
+                    item["title"], p["provider_name"], votes,
                 )
 
-        if confirmed:
-            filtered[key] = confirmed
+        result[key] = {"confirmed": confirmed, "disputed": disputed}
 
-    log.info("RapidAPI cross-check: %d verified, %d disagreements filtered",
-             verified_count, disagreed_count)
-    return filtered
+    log.info("Cross-validation: %d confirmed, %d disputed",
+             verified_count, disputed_count)
+    return result
 
 
 @cli.command()
@@ -251,53 +296,99 @@ def scan(country, providers, dry_run, verbose, db_path, skip_verify):
         key = (item["tmdb_id"], item["media_type"])
         items_by_key[key] = item
 
-    # 4b. Cross-validate TMDB matches against RapidAPI
-    if cfg.rapidapi_key and not skip_verify:
-        tmdb_results = _verify_with_rapidapi(cfg, tmdb_results, items_by_key)
-    elif not cfg.rapidapi_key and not skip_verify:
-        log.warning("RAPIDAPI_KEY not set — skipping RapidAPI cross-validation")
+    # 4b. Cross-validate TMDB matches
+    cross_validated = None
+    if (cfg.rapidapi_key or cfg.watchmode_api_key) and not skip_verify:
+        cross_validated = _cross_validate_matches(cfg, tmdb_results, items_by_key)
+    elif not cfg.rapidapi_key and not cfg.watchmode_api_key and not skip_verify:
+        log.warning("No external API keys set — skipping cross-validation")
 
     # 5. Process matches
     streaming_tag_radarr = ensure_tag(cfg.radarr_url, cfg.radarr_key, TAG_LABEL) if not cfg.dry_run else None
     streaming_tag_sonarr = ensure_tag(cfg.sonarr_url, cfg.sonarr_key, TAG_LABEL) if not cfg.dry_run else None
+    kl_tag_radarr = ensure_tag(cfg.radarr_url, cfg.radarr_key, TAG_KEEP_LOCAL) if not cfg.dry_run else None
+    kl_tag_sonarr = ensure_tag(cfg.sonarr_url, cfg.sonarr_key, TAG_KEEP_LOCAL) if not cfg.dry_run else None
+    disagree_tag_radarr = ensure_tag(cfg.radarr_url, cfg.radarr_key, TAG_KEEP_BY_DISAGREE) if not cfg.dry_run else None
+    disagree_tag_sonarr = ensure_tag(cfg.sonarr_url, cfg.sonarr_key, TAG_KEEP_BY_DISAGREE) if not cfg.dry_run else None
 
     new_items = []
+    disputed_items = []
     total_matches = 0
 
-    for key, matched_providers in tmdb_results.items():
-        item = items_by_key.get(key)
-        if not item:
-            continue
-        for provider in matched_providers:
-            total_matches += 1
-            is_new = upsert_streaming_item(
-                cfg.db_path,
-                tmdb_id=item["tmdb_id"],
-                media_type=item["media_type"],
-                provider_id=provider["provider_id"],
-                provider_name=provider["provider_name"],
-                title=item["title"],
-                year=item.get("year"),
-                arr_id=item["arr_id"],
-                library=item.get("library"),
-                size_bytes=item.get("size_bytes"),
-                path=item.get("path"),
-            )
-            if is_new:
-                new_items.append({
-                    **item,
-                    "provider_name": provider["provider_name"],
-                    "provider_id": provider["provider_id"],
-                })
+    def _process_provider(item, provider, is_disputed=False):
+        """Upsert to DB and tag in arr. Returns True if newly streaming."""
+        nonlocal total_matches
+        total_matches += 1
+        is_new = upsert_streaming_item(
+            cfg.db_path,
+            tmdb_id=item["tmdb_id"],
+            media_type=item["media_type"],
+            provider_id=provider["provider_id"],
+            provider_name=provider["provider_name"],
+            title=item["title"],
+            year=item.get("year"),
+            arr_id=item["arr_id"],
+            library=item.get("library"),
+            size_bytes=item.get("size_bytes"),
+            path=item.get("path"),
+        )
 
-            # Tag in arr
-            if not cfg.dry_run:
-                if item["media_type"] == "movie":
+        if not cfg.dry_run:
+            if item["media_type"] == "movie":
+                add_tag_to_item(cfg.radarr_url, cfg.radarr_key, "movie",
+                                item["arr_id"], streaming_tag_radarr)
+                if is_disputed:
                     add_tag_to_item(cfg.radarr_url, cfg.radarr_key, "movie",
-                                    item["arr_id"], streaming_tag_radarr)
-                else:
+                                    item["arr_id"], kl_tag_radarr)
+                    add_tag_to_item(cfg.radarr_url, cfg.radarr_key, "movie",
+                                    item["arr_id"], disagree_tag_radarr)
+            else:
+                add_tag_to_item(cfg.sonarr_url, cfg.sonarr_key, "series",
+                                item["arr_id"], streaming_tag_sonarr)
+                if is_disputed:
                     add_tag_to_item(cfg.sonarr_url, cfg.sonarr_key, "series",
-                                    item["arr_id"], streaming_tag_sonarr)
+                                    item["arr_id"], kl_tag_sonarr)
+                    add_tag_to_item(cfg.sonarr_url, cfg.sonarr_key, "series",
+                                    item["arr_id"], disagree_tag_sonarr)
+        return is_new
+
+    if cross_validated is not None:
+        # Two buckets: confirmed and disputed
+        for key, buckets in cross_validated.items():
+            item = items_by_key.get(key)
+            if not item:
+                continue
+            for provider in buckets["confirmed"]:
+                if _process_provider(item, provider, is_disputed=False):
+                    new_items.append({
+                        **item,
+                        "provider_name": provider["provider_name"],
+                        "provider_id": provider["provider_id"],
+                    })
+            for provider in buckets["disputed"]:
+                if _process_provider(item, provider, is_disputed=True):
+                    disputed_items.append({
+                        **item,
+                        "provider_name": provider["provider_name"],
+                        "provider_id": provider["provider_id"],
+                    })
+                    log.warning(
+                        "DISPUTED: %s (%s) — tagged keep-local + keep-by-disagree",
+                        item["title"], provider["provider_name"],
+                    )
+    else:
+        # No cross-validation (skip-verify or no API keys) — all confirmed
+        for key, matched_providers in tmdb_results.items():
+            item = items_by_key.get(key)
+            if not item:
+                continue
+            for provider in matched_providers:
+                if _process_provider(item, provider, is_disputed=False):
+                    new_items.append({
+                        **item,
+                        "provider_name": provider["provider_name"],
+                        "provider_id": provider["provider_id"],
+                    })
 
     # 6. Mark left-streaming items
     left_items = mark_left_streaming(cfg.db_path, scan_time)
@@ -341,6 +432,7 @@ def scan(country, providers, dry_run, verbose, db_path, skip_verify):
     click.echo(f"  Series checked:  {len(series)}")
     click.echo(f"  Total matches:   {total_matches}")
     click.echo(f"  Newly streaming: {len(new_items)}")
+    click.echo(f"  Disputed:        {len(disputed_items)}")
     click.echo(f"  Left streaming:  {len(left_items)}")
     if cfg.dry_run:
         click.echo("  (dry-run — no tags modified)")
@@ -1417,6 +1509,138 @@ def check_import_cmd(file_path, media_type, arr_id, db_path, verbose):
             title=title, year=year, media_type=tmdb_media,
             providers=provider_names,
         )
+
+
+@cli.command("verify-disputed")
+@click.option("--dry-run", is_flag=True, help="Check without modifying tags")
+@click.option("--verbose", is_flag=True, help="Enable debug logging")
+@click.option("--db-path", default=None, help="Path to state database")
+def verify_disputed(dry_run, verbose, db_path):
+    """Re-check items tagged keep-by-disagree and resolve if sources now agree."""
+    _setup_logging(verbose)
+    cfg = load_config(dry_run=dry_run, verbose=verbose, db_path=db_path)
+
+    if not cfg.rapidapi_key and not cfg.watchmode_api_key:
+        click.echo("Error: RAPIDAPI_KEY or WATCHMODE_API_KEY required for verify-disputed")
+        sys.exit(1)
+
+    init_db(cfg.db_path)
+
+    # Get keep-by-disagree tag IDs
+    disagree_radarr = get_tag_id(cfg.radarr_url, cfg.radarr_key, TAG_KEEP_BY_DISAGREE)
+    disagree_sonarr = get_tag_id(cfg.sonarr_url, cfg.sonarr_key, TAG_KEEP_BY_DISAGREE)
+
+    if not disagree_radarr and not disagree_sonarr:
+        click.echo("No keep-by-disagree tags found — nothing to verify.")
+        return
+
+    # Collect disputed items from both arrs
+    disputed = []
+    if disagree_radarr:
+        for m in fetch_movies(cfg.radarr_url, cfg.radarr_key):
+            if disagree_radarr in m.get("tags", []):
+                disputed.append(m)
+    if disagree_sonarr:
+        for s in fetch_series(cfg.sonarr_url, cfg.sonarr_key):
+            if disagree_sonarr in s.get("tags", []):
+                disputed.append(s)
+
+    if not disputed:
+        click.echo("No items with keep-by-disagree tag — nothing to verify.")
+        return
+
+    log.info("Verifying %d disputed items", len(disputed))
+
+    # Build items_by_key and tmdb_results from active DB matches
+    items_by_key = {}
+    tmdb_results = {}
+    active = get_active_matches_filtered(cfg.db_path)
+    active_by_key = {}
+    for a in active:
+        k = (a["tmdb_id"], a["media_type"])
+        if k not in active_by_key:
+            active_by_key[k] = []
+        active_by_key[k].append(a)
+
+    for item in disputed:
+        key = (item["tmdb_id"], item["media_type"])
+        items_by_key[key] = item
+        # Use active DB matches as the provider list to re-check
+        if key in active_by_key:
+            tmdb_results[key] = [
+                {"provider_id": a["provider_id"], "provider_name": a.get("provider_name", "")}
+                for a in active_by_key[key]
+            ]
+
+    if not tmdb_results:
+        click.echo("No active matches for disputed items — nothing to re-check.")
+        return
+
+    # Re-validate
+    validated = _cross_validate_matches(cfg, tmdb_results, items_by_key)
+
+    resolved_count = 0
+    still_disputed_count = 0
+
+    kl_radarr = get_tag_id(cfg.radarr_url, cfg.radarr_key, TAG_KEEP_LOCAL)
+    kl_sonarr = get_tag_id(cfg.sonarr_url, cfg.sonarr_key, TAG_KEEP_LOCAL)
+
+    for key, buckets in validated.items():
+        item = items_by_key.get(key)
+        if not item:
+            continue
+
+        if buckets["confirmed"] and not buckets["disputed"]:
+            # All providers now confirmed — resolve
+            resolved_count += 1
+            providers_str = ", ".join(p["provider_name"] for p in buckets["confirmed"])
+            log.info("RESOLVED: %s now confirmed on %s — removing keep-by-disagree",
+                      item["title"], providers_str)
+            if not cfg.dry_run:
+                if item["media_type"] == "movie":
+                    remove_tag_from_item(cfg.radarr_url, cfg.radarr_key, "movie",
+                                         item["arr_id"], disagree_radarr)
+                    # Only remove keep-local if we added it (item has keep-by-disagree)
+                    if kl_radarr:
+                        remove_tag_from_item(cfg.radarr_url, cfg.radarr_key, "movie",
+                                             item["arr_id"], kl_radarr)
+                else:
+                    remove_tag_from_item(cfg.sonarr_url, cfg.sonarr_key, "series",
+                                         item["arr_id"], disagree_sonarr)
+                    if kl_sonarr:
+                        remove_tag_from_item(cfg.sonarr_url, cfg.sonarr_key, "series",
+                                             item["arr_id"], kl_sonarr)
+        else:
+            still_disputed_count += 1
+            log.info("STILL DISPUTED: %s — keeping protection", item["title"])
+
+    click.echo(f"\nVerify-disputed complete")
+    click.echo(f"  Checked:         {len(disputed)}")
+    click.echo(f"  Resolved:        {resolved_count}")
+    click.echo(f"  Still disputed:  {still_disputed_count}")
+    if cfg.dry_run:
+        click.echo("  (dry-run — no tags modified)")
+
+    # Discord notification
+    if cfg.discord_webhook_url and (resolved_count or still_disputed_count):
+        import requests as req
+        payload = {
+            "embeds": [{
+                "title": "🔍 Verify Disputed Streaming Matches",
+                "color": 3066993 if resolved_count else 15105570,
+                "fields": [
+                    {"name": "Checked", "value": str(len(disputed)), "inline": True},
+                    {"name": "Resolved", "value": str(resolved_count), "inline": True},
+                    {"name": "Still Disputed", "value": str(still_disputed_count), "inline": True},
+                ],
+                "footer": {"text": "Streaming Checker — verify-disputed"},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }],
+        }
+        try:
+            req.post(cfg.discord_webhook_url, json=payload, timeout=20)
+        except Exception:
+            log.warning("Discord notification failed for verify-disputed")
 
 
 if __name__ == "__main__":

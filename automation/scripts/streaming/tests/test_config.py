@@ -64,3 +64,12 @@ class TestLoadConfig:
     def test_rapidapi_key_default_empty(self, env_config):
         cfg = load_config()
         assert cfg.rapidapi_key == ""
+
+    def test_watchmode_api_key_from_env(self, env_config, monkeypatch):
+        monkeypatch.setenv("WATCHMODE_API_KEY", "test-wm-key")
+        cfg = load_config()
+        assert cfg.watchmode_api_key == "test-wm-key"
+
+    def test_watchmode_api_key_default_empty(self, env_config):
+        cfg = load_config()
+        assert cfg.watchmode_api_key == ""
