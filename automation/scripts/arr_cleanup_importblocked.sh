@@ -23,6 +23,7 @@ TRANSMISSION_URL="${TRANSMISSION_URL:?TRANSMISSION_URL env var required}"
 TRANSMISSION_USER="${TRANSMISSION_USER:?TRANSMISSION_USER env var required}"
 TRANSMISSION_PASS="${TRANSMISSION_PASS:?TRANSMISSION_PASS env var required}"
 TRANSMISSION_LABELS="${TRANSMISSION_LABELS:-sonarr,radarr}"
+COMPLETED_DIR="${COMPLETED_DIR:-/APPBOX_DATA/apps/transmission.vhscave.appboxes.co/torrents/completed}"
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
 # Cached Transmission session ID — populated on first 409, reused for subsequent calls
@@ -39,6 +40,8 @@ trap 'rm -f "$_TMP_TRANSMISSION_LIST" "$_TMP_TRANSMISSION_RM" "$_TMP_ACTIVE_HASH
 total_candidates=0
 total_removed=0
 transmission_removed=0
+disk_files_removed=0
+disk_bytes_freed=0
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { printf '%s %s\n' "$(ts)" "$*"; }
@@ -87,15 +90,12 @@ cleanup_app() {
     return 0
   fi
 
-  # Extract import-blocked / already-imported candidate IDs
+  # Extract import-blocked candidate IDs — covers "already imported", "series title mismatch",
+  # and any other importBlocked reason where files were deleted from disk
   jq -r '
     .[]
     | select(.status=="completed")
     | select((.trackedDownloadState // "") == "importBlocked")
-    | select(
-        ([.statusMessages[]? | ((.title // "") + " " + ((.messages // []) | join(" ")))] | join(" | "))
-        | test("already imported"; "i")
-      )
     | .id
   ' "$tmp_json" >"$tmp_ids"
 
@@ -167,6 +167,100 @@ cleanup_transmission() {
   done
 }
 
+cleanup_completed_disk() {
+  # Remove orphaned files/dirs from completed download folders that aren't:
+  #   1) Referenced by any active Transmission torrent, AND
+  #   2) Pending import in Sonarr/Radarr queue
+  # Runs AFTER cleanup_app + cleanup_transmission so active hashes are populated.
+
+  local active_names_file pending_names_file
+  active_names_file="$(mktemp /tmp/active_names.XXXXXX.txt)"
+  pending_names_file="$(mktemp /tmp/pending_names.XXXXXX.txt)"
+
+  # Get active torrent names from Transmission (already fetched in cleanup_transmission)
+  if [[ -s "$_TMP_TRANSMISSION_LIST" ]]; then
+    jq -r '.arguments.torrents[].name // empty' "$_TMP_TRANSMISSION_LIST" >"$active_names_file" 2>/dev/null || true
+  fi
+
+  # Get pending import names from Sonarr and Radarr queues — anything in the queue
+  # is either downloading, waiting for import, or has import issues. Don't delete these.
+  local tmp_queue
+  tmp_queue="$(mktemp /tmp/arr_queue.XXXXXX.json)"
+
+  if curl -sS "${SONARR_URL}/api/v3/queue?apikey=${SONARR_KEY}&pageSize=1000&includeUnknownSeriesItems=true" >"$tmp_queue" 2>/dev/null; then
+    jq -r '.records[]? | .title // empty' "$tmp_queue" >>"$pending_names_file" 2>/dev/null || true
+    # Also extract outputPath directory names (matches completed folder names)
+    jq -r '.records[]? | .outputPath // empty' "$tmp_queue" 2>/dev/null | while IFS= read -r p; do
+      [[ -n "$p" ]] && basename "$p"
+    done >>"$pending_names_file" 2>/dev/null || true
+  fi
+
+  if curl -sS "${RADARR_URL}/api/v3/queue?apikey=${RADARR_KEY}&pageSize=1000&includeUnknownMovieItems=true" >"$tmp_queue" 2>/dev/null; then
+    jq -r '.records[]? | .title // empty' "$tmp_queue" >>"$pending_names_file" 2>/dev/null || true
+    jq -r '.records[]? | .outputPath // empty' "$tmp_queue" 2>/dev/null | while IFS= read -r p; do
+      [[ -n "$p" ]] && basename "$p"
+    done >>"$pending_names_file" 2>/dev/null || true
+  fi
+
+  sort -u -o "$pending_names_file" "$pending_names_file"
+  rm -f "$tmp_queue"
+
+  local category
+  for category in sonarr radarr; do
+    local completed_path="${COMPLETED_DIR}/${category}"
+    [[ -d "$completed_path" ]] || continue
+
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] && continue
+      local entry_name entry_size
+      entry_name="$(basename "$entry")"
+
+      # Skip if torrent name matches an active torrent
+      if grep -Fxq "$entry_name" "$active_names_file" 2>/dev/null; then
+        continue
+      fi
+
+      # Skip if name matches a pending arr queue entry (downloading or awaiting import)
+      if grep -Fxq "$entry_name" "$pending_names_file" 2>/dev/null; then
+        log "[disk:${category}] skipping (pending import): ${entry_name}"
+        continue
+      fi
+
+      # Safety: skip entries with media files that are less than 1 hour old
+      # (give Sonarr/Radarr time to detect and import them)
+      local newest_mtime
+      newest_mtime="$(find "$entry" -type f \( -name '*.mkv' -o -name '*.mp4' -o -name '*.avi' \) -printf '%T@\n' 2>/dev/null | sort -rn | head -1)" || newest_mtime=""
+      if [[ -n "$newest_mtime" ]]; then
+        local now age_secs
+        now="$(date +%s)"
+        age_secs="$(( now - ${newest_mtime%%.*} ))"
+        if [[ "$age_secs" -lt 3600 ]]; then
+          log "[disk:${category}] skipping (too new, ${age_secs}s old): ${entry_name}"
+          continue
+        fi
+      fi
+
+      entry_size="$(du -sb "$entry" 2>/dev/null | awk '{print $1}')" || entry_size=0
+
+      if [[ "$DRY_RUN" == true ]]; then
+        log "[disk:${category}] [dry-run] would remove: ${entry_name} ($(( entry_size / 1048576 ))MB)"
+      else
+        rm -rf "$entry"
+        disk_files_removed=$(( disk_files_removed + 1 ))
+        disk_bytes_freed=$(( disk_bytes_freed + entry_size ))
+        log "[disk:${category}] removed: ${entry_name} ($(( entry_size / 1048576 ))MB)"
+      fi
+    done < <(find "$completed_path" -mindepth 1 -maxdepth 1 2>/dev/null)
+  done
+
+  rm -f "$active_names_file" "$pending_names_file"
+
+  if [[ "$disk_bytes_freed" -gt 0 ]] || [[ "$disk_files_removed" -gt 0 ]]; then
+    local freed_mb=$(( disk_bytes_freed / 1048576 ))
+    log "[disk] cleaned ${disk_files_removed} orphan(s), freed ${freed_mb}MB"
+  fi
+}
+
 send_discord_summary() {
   [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
 
@@ -192,15 +286,18 @@ send_discord_summary() {
     --arg candidates "$total_candidates" \
     --arg removed "$total_removed" \
     --arg tx_removed "$transmission_removed" \
+    --arg disk_removed "$disk_files_removed" \
+    --arg disk_freed "$(( disk_bytes_freed / 1048576 ))MB" \
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: $title,
       description: $desc,
       color: $color,
       fields: [
-        {name: "📊 Candidates",           value: $candidates, inline: true},
-        {name: "🗑️ Queue Removed",        value: $removed,    inline: true},
-        {name: "📡 Transmission Removed",  value: $tx_removed, inline: true}
+        {name: "📊 Candidates",           value: $candidates,  inline: true},
+        {name: "🗑️ Queue Removed",        value: $removed,     inline: true},
+        {name: "📡 Transmission Removed",  value: $tx_removed,  inline: true},
+        {name: "💾 Disk Cleaned",          value: ($disk_removed + " (" + $disk_freed + ")"), inline: true}
       ],
       footer: {text: "Import Blocked Cleanup"},
       timestamp: $ts
@@ -211,14 +308,15 @@ send_discord_summary() {
     -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null || true
 }
 
-log "arr_cleanup_importblocked start${DRY_RUN:+ [dry-run]}"
+log "arr_cleanup_importblocked start$( [[ "$DRY_RUN" == true ]] && echo ' [dry-run]' )"
 
 cleanup_app "radarr" "$RADARR_URL" "$RADARR_KEY"
 cleanup_app "sonarr" "$SONARR_URL" "$SONARR_KEY"
 cleanup_transmission
+cleanup_completed_disk
 
-log "arr_cleanup_importblocked done — candidates=${total_candidates} removed=${total_removed} transmission_removed=${transmission_removed}"
+log "arr_cleanup_importblocked done — candidates=${total_candidates} removed=${total_removed} transmission_removed=${transmission_removed} disk_cleaned=${disk_files_removed} disk_freed=$(( disk_bytes_freed / 1048576 ))MB"
 
-if [[ "$total_removed" -gt 0 || "$transmission_removed" -gt 0 ]]; then
+if [[ "$total_removed" -gt 0 || "$transmission_removed" -gt 0 || "$disk_files_removed" -gt 0 ]]; then
   send_discord_summary
 fi
