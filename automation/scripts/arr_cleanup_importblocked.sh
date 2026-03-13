@@ -177,30 +177,48 @@ cleanup_completed_disk() {
   active_names_file="$(mktemp /tmp/active_names.XXXXXX.txt)"
   pending_names_file="$(mktemp /tmp/pending_names.XXXXXX.txt)"
 
+  trap 'rm -f "$active_names_file" "$pending_names_file"' RETURN
+
   # Get active torrent names from Transmission (already fetched in cleanup_transmission)
   if [[ -s "$_TMP_TRANSMISSION_LIST" ]]; then
-    jq -r '.arguments.torrents[].name // empty' "$_TMP_TRANSMISSION_LIST" >"$active_names_file" 2>/dev/null || true
+    if ! jq -e '.arguments.torrents' "$_TMP_TRANSMISSION_LIST" >/dev/null 2>&1; then
+      log "[disk] WARN: Transmission list invalid JSON — aborting disk cleanup"
+      return 0
+    fi
+    jq -r '.arguments.torrents[].name // empty' "$_TMP_TRANSMISSION_LIST" >"$active_names_file"
   fi
 
   # Get pending import names from Sonarr and Radarr queues — anything in the queue
   # is either downloading, waiting for import, or has import issues. Don't delete these.
+  # SAFETY: if either API call fails, abort — we can't guarantee the pending list is complete.
   local tmp_queue
   tmp_queue="$(mktemp /tmp/arr_queue.XXXXXX.json)"
 
-  if curl -sS "${SONARR_URL}/api/v3/queue?apikey=${SONARR_KEY}&pageSize=1000&includeUnknownSeriesItems=true" >"$tmp_queue" 2>/dev/null; then
-    jq -r '.records[]? | .title // empty' "$tmp_queue" >>"$pending_names_file" 2>/dev/null || true
-    # Also extract outputPath directory names (matches completed folder names)
-    jq -r '.records[]? | .outputPath // empty' "$tmp_queue" 2>/dev/null | while IFS= read -r p; do
-      [[ -n "$p" ]] && basename "$p"
-    done >>"$pending_names_file" 2>/dev/null || true
+  if ! curl -sS --fail "${SONARR_URL}/api/v3/queue?apikey=${SONARR_KEY}&pageSize=1000&includeUnknownSeriesItems=true" >"$tmp_queue" 2>/dev/null; then
+    log "[disk] WARN: Sonarr queue fetch failed — aborting disk cleanup"
+    rm -f "$tmp_queue"
+    return 0
   fi
+  if ! jq -e '.records' "$tmp_queue" >/dev/null 2>&1; then
+    log "[disk] WARN: Sonarr queue response invalid — aborting disk cleanup"
+    rm -f "$tmp_queue"
+    return 0
+  fi
+  jq -r '.records[]? | (.title // empty), (.outputPath // empty | split("/")[-1])' \
+    "$tmp_queue" >>"$pending_names_file"
 
-  if curl -sS "${RADARR_URL}/api/v3/queue?apikey=${RADARR_KEY}&pageSize=1000&includeUnknownMovieItems=true" >"$tmp_queue" 2>/dev/null; then
-    jq -r '.records[]? | .title // empty' "$tmp_queue" >>"$pending_names_file" 2>/dev/null || true
-    jq -r '.records[]? | .outputPath // empty' "$tmp_queue" 2>/dev/null | while IFS= read -r p; do
-      [[ -n "$p" ]] && basename "$p"
-    done >>"$pending_names_file" 2>/dev/null || true
+  if ! curl -sS --fail "${RADARR_URL}/api/v3/queue?apikey=${RADARR_KEY}&pageSize=1000&includeUnknownMovieItems=true" >"$tmp_queue" 2>/dev/null; then
+    log "[disk] WARN: Radarr queue fetch failed — aborting disk cleanup"
+    rm -f "$tmp_queue"
+    return 0
   fi
+  if ! jq -e '.records' "$tmp_queue" >/dev/null 2>&1; then
+    log "[disk] WARN: Radarr queue response invalid — aborting disk cleanup"
+    rm -f "$tmp_queue"
+    return 0
+  fi
+  jq -r '.records[]? | (.title // empty), (.outputPath // empty | split("/")[-1])' \
+    "$tmp_queue" >>"$pending_names_file"
 
   sort -u -o "$pending_names_file" "$pending_names_file"
   rm -f "$tmp_queue"
@@ -226,10 +244,13 @@ cleanup_completed_disk() {
         continue
       fi
 
-      # Safety: skip entries with media files that are less than 1 hour old
-      # (give Sonarr/Radarr time to detect and import them)
+      # Safety: skip entries less than 1 hour old (give arr time to import)
+      # Check media files first, fall back to directory mtime if no media files
       local newest_mtime
       newest_mtime="$(find "$entry" -type f \( -name '*.mkv' -o -name '*.mp4' -o -name '*.avi' \) -printf '%T@\n' 2>/dev/null | sort -rn | head -1)" || newest_mtime=""
+      if [[ -z "$newest_mtime" ]]; then
+        newest_mtime="$(stat -c '%Y' "$entry" 2>/dev/null)" || newest_mtime=""
+      fi
       if [[ -n "$newest_mtime" ]]; then
         local now age_secs
         now="$(date +%s)"
@@ -245,19 +266,19 @@ cleanup_completed_disk() {
       if [[ "$DRY_RUN" == true ]]; then
         log "[disk:${category}] [dry-run] would remove: ${entry_name} ($(( entry_size / 1048576 ))MB)"
       else
-        rm -rf "$entry"
-        disk_files_removed=$(( disk_files_removed + 1 ))
-        disk_bytes_freed=$(( disk_bytes_freed + entry_size ))
-        log "[disk:${category}] removed: ${entry_name} ($(( entry_size / 1048576 ))MB)"
+        if rm -rf "$entry"; then
+          disk_files_removed=$(( disk_files_removed + 1 ))
+          disk_bytes_freed=$(( disk_bytes_freed + entry_size ))
+          log "[disk:${category}] removed: ${entry_name} ($(( entry_size / 1048576 ))MB)"
+        else
+          log "[disk:${category}] WARN: failed to remove: ${entry_name}"
+        fi
       fi
     done < <(find "$completed_path" -mindepth 1 -maxdepth 1 2>/dev/null)
   done
 
-  rm -f "$active_names_file" "$pending_names_file"
-
-  if [[ "$disk_bytes_freed" -gt 0 ]] || [[ "$disk_files_removed" -gt 0 ]]; then
-    local freed_mb=$(( disk_bytes_freed / 1048576 ))
-    log "[disk] cleaned ${disk_files_removed} orphan(s), freed ${freed_mb}MB"
+  if [[ "$disk_bytes_freed" -gt 0 || "$disk_files_removed" -gt 0 ]]; then
+    log "[disk] cleaned ${disk_files_removed} orphan(s), freed $(( disk_bytes_freed / 1048576 ))MB"
   fi
 }
 
@@ -308,7 +329,7 @@ send_discord_summary() {
     -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null || true
 }
 
-log "arr_cleanup_importblocked start$( [[ "$DRY_RUN" == true ]] && echo ' [dry-run]' )"
+log "arr_cleanup_importblocked start (dry_run=$DRY_RUN)"
 
 cleanup_app "radarr" "$RADARR_URL" "$RADARR_KEY"
 cleanup_app "sonarr" "$SONARR_URL" "$SONARR_KEY"

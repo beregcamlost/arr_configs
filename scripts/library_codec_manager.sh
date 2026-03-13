@@ -1425,7 +1425,7 @@ verify_converted_file_standalone() {
   fi
 
   duration="$(jq -r '.format.duration // "0"' <<<"$probe_json")"
-  if [[ -z "$duration" ]] || awk "BEGIN{exit ($duration <= 0) ? 0 : 1}" 2>/dev/null; then
+  if [[ -z "$duration" ]] || ! [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]] || awk "BEGIN{exit ($duration > 0) ? 0 : 1}"; then
     VERIFY_FAIL_REASON="invalid_duration=$duration"
     return 1
   fi
@@ -1822,10 +1822,7 @@ prune_backups_cmd() {
 }
 
 verify_and_clean_cmd() {
-  local grace_days="$GRACE_DAYS"
-  local dry_run="$DRY_RUN"
-
-  log "info" "Verifying swapped conversions and cleaning validated backups (grace=$grace_days days, dry_run=$dry_run)"
+  log "info" "Verifying swapped conversions and cleaning validated backups (grace=$GRACE_DAYS days, dry_run=$DRY_RUN)"
 
   local verified_ok=0 verified_fail=0 backup_missing=0 backups_deleted=0 bytes_freed=0
 
@@ -1833,9 +1830,15 @@ verify_and_clean_cmd() {
       FROM artifacts a
       JOIN conversion_runs cr ON cr.media_id = a.media_id AND cr.status = 'swapped'
       WHERE a.backup_path IS NOT NULL AND a.backup_path <> ''
-      AND a.swapped_ts < datetime('now', '-${grace_days} days')
+      AND a.swapped_ts < datetime('now', '-${GRACE_DAYS} days')
       GROUP BY a.media_id
       ORDER BY a.swapped_ts;"
+
+  local db_out
+  db_out="$(db -separator $'\t' "$query" </dev/null 2>&1)" || {
+    log "error" "verify-and-clean: DB query failed — is the database locked?"
+    return 1
+  }
 
   while IFS=$'\t' read -r media_id new_path backup_path swapped_ts; do
     [[ -z "$media_id" ]] && continue
@@ -1853,21 +1856,24 @@ verify_and_clean_cmd() {
     # Verify converted file
     if verify_converted_file_standalone "$new_path"; then
       verified_ok=$(( verified_ok + 1 ))
-      if (( dry_run )); then
+      if (( DRY_RUN )); then
         log "info" "[DRY-RUN] Would delete backup: $backup_path ($(( backup_size / BYTES_PER_MB ))MB)"
       else
-        rm -f "$backup_path"
-        backups_deleted=$(( backups_deleted + 1 ))
-        bytes_freed=$(( bytes_freed + backup_size ))
-        insert_event "info" "verify-clean" "$media_id" "backup_deleted" \
-          "backup=$backup_path freed=$(( backup_size / BYTES_PER_MB ))MB new=$new_path"
-        log "info" "Deleted verified backup: $backup_path ($(( backup_size / BYTES_PER_MB ))MB)"
+        if rm -f "$backup_path"; then
+          backups_deleted=$(( backups_deleted + 1 ))
+          bytes_freed=$(( bytes_freed + backup_size ))
+          insert_event "info" "verify-clean" "$media_id" "backup_deleted" \
+            "backup=$backup_path freed=$(( backup_size / BYTES_PER_MB ))MB new=$new_path"
+          log "info" "Deleted verified backup: $backup_path ($(( backup_size / BYTES_PER_MB ))MB)"
+        else
+          log "warn" "Failed to delete backup (permissions?): $backup_path"
+        fi
       fi
     else
       verified_fail=$(( verified_fail + 1 ))
       log "warn" "Verification FAILED for media_id=$media_id ($VERIFY_FAIL_REASON) — keeping backup: $backup_path"
     fi
-  done < <(db -separator $'\t' "$query" </dev/null)
+  done <<<"$db_out"
 
   # Clean empty backup dirs
   find "$BACKUP_DIR" -type d -empty -delete 2>/dev/null || true
@@ -1877,7 +1883,7 @@ verify_and_clean_cmd() {
 
   log "info" "verify-and-clean complete: verified_ok=$verified_ok verified_fail=$verified_fail backup_missing=$backup_missing deleted=$backups_deleted freed=${freed_gb}GB"
 
-  if (( dry_run )); then
+  if (( DRY_RUN )); then
     echo "[DRY-RUN] Would delete $verified_ok backups"
   else
     echo "Deleted $backups_deleted backups, freed ${freed_gb}GB"

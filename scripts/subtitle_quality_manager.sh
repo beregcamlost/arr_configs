@@ -1005,11 +1005,12 @@ try_translate_inline() {
 # ---------------------------------------------------------------------------
 
 check_deepl_quota() {
-  [[ -z "${DEEPL_API_KEY:-}" ]] && return 1
+  # Returns: 0 = credits available, 1 = confirmed exhausted, 2 = unreachable/unknown
+  [[ -z "${DEEPL_API_KEY:-}" ]] && return 2
   local usage_json
   usage_json="$(curl -sS -m 10 --connect-timeout 5 \
     -H "Authorization: DeepL-Auth-Key ${DEEPL_API_KEY}" \
-    "https://api-free.deepl.com/v2/usage" </dev/null 2>/dev/null)" || return 1
+    "https://api-free.deepl.com/v2/usage" </dev/null 2>/dev/null)" || return 2
   local char_count char_limit
   char_count="$(jq -r '.character_count // 0' <<<"$usage_json")"
   char_limit="$(jq -r '.character_limit // 0' <<<"$usage_json")"
@@ -1048,11 +1049,15 @@ _arr_delete_and_search() {
     search_key="movieIds"
   fi
 
-  # Check if already in download queue
+  # Check if already in download queue — abort if check fails (don't assume safe)
   local in_queue
   in_queue="$(curl -sS -m 15 --connect-timeout 8 \
     "$arr_url/api/v3/queue?page=1&pageSize=200&apikey=$api_key" </dev/null 2>/dev/null \
-    | jq -r "[.records[] | select(.$id_field == $arr_id)] | length" 2>/dev/null)" || in_queue="0"
+    | jq -r "[.records[] | select(.$id_field == $arr_id)] | length" 2>/dev/null)"
+  if [[ -z "$in_queue" ]]; then
+    log "NUCLEAR: queue check failed for $media_type=$arr_id, aborting: $basename_nuc"
+    return 1
+  fi
   if [[ "${in_queue:-0}" -gt 0 ]]; then
     log "NUCLEAR: $media_type already in download queue, skipping: $basename_nuc"
     return 1
@@ -1075,13 +1080,22 @@ _arr_delete_and_search() {
 
   del_http="$(curl -sS -m 15 --connect-timeout 8 -o /dev/null -w '%{http_code}' \
     -X DELETE "$arr_url/api/v3/$file_endpoint/$file_id?apikey=$api_key" </dev/null 2>/dev/null)" || del_http="000"
+
+  if [[ "$del_http" != "2"* ]]; then
+    log "NUCLEAR: DELETE failed (http=$del_http) for fileId=$file_id, aborting search: $basename_nuc"
+    return 1
+  fi
   log "NUCLEAR: deleted $media_type file fileId=$file_id http=$del_http: $basename_nuc"
 
   # Trigger fresh search
-  curl -sS -m 15 --connect-timeout 8 -o /dev/null \
+  local search_http
+  search_http="$(curl -sS -m 15 --connect-timeout 8 -o /dev/null -w '%{http_code}' \
     -X POST -H "Content-Type: application/json" \
     -d "$(jq -nc --argjson ids "[$arr_id]" --arg name "$search_name" --arg key "$search_key" '{name:$name, ($key):$ids}')" \
-    "$arr_url/api/v3/command?apikey=$api_key" </dev/null 2>/dev/null || true
+    "$arr_url/api/v3/command?apikey=$api_key" </dev/null 2>/dev/null)" || search_http="000"
+  if [[ "$search_http" != "2"* ]]; then
+    log "NUCLEAR: WARN: search trigger failed (http=$search_http) for $media_type=$arr_id: $basename_nuc"
+  fi
   log "NUCLEAR: triggered $search_name for $media_type=$arr_id: $basename_nuc"
   return 0
 }
@@ -1111,24 +1125,33 @@ nuclear_redownload() {
   fi
 
   # Cooldown: skip if last attempt was less than NUCLEAR_COOLDOWN_SECS ago
-  local now_nuc
+  local now_nuc remaining
   now_nuc="$(date +%s)"
   if [[ "$last_ts" -gt 0 ]] && [[ $((now_nuc - last_ts)) -lt "$NUCLEAR_COOLDOWN_SECS" ]]; then
-    local remaining=$(( NUCLEAR_COOLDOWN_SECS - (now_nuc - last_ts) ))
+    remaining=$(( NUCLEAR_COOLDOWN_SECS - (now_nuc - last_ts) ))
     log "NUCLEAR: cooldown active (${remaining}s remaining) for lang=$lang: $basename_nuc"
     return 1
   fi
 
   # 2. Check DeepL quota (cached per run) — if credits available, skip nuclear
+  #    If API unreachable, also skip — don't nuke files when we can't confirm quota state
   if [[ -z "$_DEEPL_QUOTA_CACHED" ]]; then
-    if check_deepl_quota; then
+    check_deepl_quota
+    local _dql_rc=$?
+    if [[ $_dql_rc -eq 0 ]]; then
       _DEEPL_QUOTA_CACHED="available"
-    else
+    elif [[ $_dql_rc -eq 1 ]]; then
       _DEEPL_QUOTA_CACHED="exhausted"
+    else
+      _DEEPL_QUOTA_CACHED="unreachable"
     fi
   fi
   if [[ "$_DEEPL_QUOTA_CACHED" == "available" ]]; then
     log "NUCLEAR: skipped, DeepL credits available for lang=$lang: $basename_nuc"
+    return 1
+  fi
+  if [[ "$_DEEPL_QUOTA_CACHED" == "unreachable" ]]; then
+    log "NUCLEAR: skipped, DeepL API unreachable — cannot confirm quota for lang=$lang: $basename_nuc"
     return 1
   fi
 
@@ -1138,13 +1161,13 @@ nuclear_redownload() {
     media_type="episode"
     arr_url="$SONARR_URL"; api_key="$SONARR_KEY"
     [[ -z "$api_key" ]] && { log "NUCLEAR: no Sonarr API key, skipping: $basename_nuc"; return 1; }
-    arr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrEpisodeId FROM table_episodes WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || arr_id=""
+    arr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrEpisodeId FROM table_episodes WHERE path GLOB '*$(sql_escape "$(basename "${mkv_file%.*}")")*' LIMIT 1;" </dev/null 2>/dev/null | tail -1)" || arr_id=""
     [[ -z "$arr_id" ]] && { log "NUCLEAR: no Bazarr episode ID for $basename_nuc"; return 1; }
   elif is_movie_path "$mkv_file"; then
     media_type="movie"
     arr_url="$RADARR_URL"; api_key="$RADARR_KEY"
     [[ -z "$api_key" ]] && { log "NUCLEAR: no Radarr API key, skipping: $basename_nuc"; return 1; }
-    arr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || arr_id=""
+    arr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT radarrId FROM table_movies WHERE path GLOB '*$(sql_escape "$(basename "${mkv_file%.*}")")*' LIMIT 1;" </dev/null 2>/dev/null | tail -1)" || arr_id=""
     [[ -z "$arr_id" ]] && { log "NUCLEAR: no Bazarr movie ID for $basename_nuc"; return 1; }
   else
     log "NUCLEAR: unknown media type for path: $basename_nuc"
@@ -1155,9 +1178,11 @@ nuclear_redownload() {
   _arr_delete_and_search "$media_type" "$arr_id" "$arr_url" "$api_key" "$basename_nuc" "$lang" || return 1
 
   # 5. Increment attempt count (reuse $now_nuc from cooldown check)
-  sqm_db "$state_db" "INSERT INTO nuclear_attempts (file_path, language, attempt, last_ts)
+  if ! sqm_db "$state_db" "INSERT INTO nuclear_attempts (file_path, language, attempt, last_ts)
     VALUES ('$(sql_escape "$mkv_file")', '$(sql_escape "$lang")', 1, $now_nuc)
-    ON CONFLICT(file_path, language) DO UPDATE SET attempt = attempt + 1, last_ts = $now_nuc;" 2>/dev/null || true
+    ON CONFLICT(file_path, language) DO UPDATE SET attempt = attempt + 1, last_ts = $now_nuc;" 2>/dev/null; then
+    log "NUCLEAR: WARN: failed to record attempt in DB for $basename_nuc — may retry next run"
+  fi
 
   # 6. Discord notification
   if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]] && [[ "$DRY_RUN" -eq 0 ]]; then
@@ -1715,36 +1740,37 @@ cmd_auto_maintain() {
 
     # --- Phase 3: Nuclear redownload for completely missing profile languages ---
     if [[ -n "$am_profile_set" ]]; then
-      # Re-read current state after Phase 1 + Phase 1.5
-      local emb_json_p3
-      emb_json_p3="$(get_embedded_subs "$mkv_file")"
+      # Re-read current state — necessary because Phase 1/1.5 may have muxed/stripped tracks
+      local emb_json_now
+      emb_json_now="$(get_embedded_subs "$mkv_file")"
 
-      declare -A emb_langs_p3=()
+      declare -A emb_langs_now=()
       while IFS= read -r el; do
         [[ -z "$el" ]] && continue
         el="$(normalize_track_lang "$el")"
-        emb_langs_p3["$el"]=1
-      done < <(jq -r '.[].tags.language // "und"' <<<"$emb_json_p3")
+        emb_langs_now["$el"]=1
+      done < <(jq -r '.[].tags.language // "und"' <<<"$emb_json_now")
 
-      declare -A ext_langs_p3=()
+      # Re-find external SRTs — necessary because Phase 1.5 may have deleted some (muxed them in)
+      declare -A ext_langs_now=()
       while IFS= read -r remaining_srt; do
         [[ -z "$remaining_srt" ]] && continue
-        local rb_p3 el_p3
-        rb_p3="$(basename "$remaining_srt")"
-        el_p3="$(extract_srt_lang "$rb_p3" "$name_stem")"
-        [[ -z "$el_p3" ]] && el_p3="und"
-        el_p3="$(normalize_track_lang "$el_p3")"
-        ext_langs_p3["$el_p3"]=1
+        local rb_now el_now
+        rb_now="$(basename "$remaining_srt")"
+        el_now="$(extract_srt_lang "$rb_now" "$name_stem")"
+        [[ -z "$el_now" ]] && el_now="und"
+        el_now="$(normalize_track_lang "$el_now")"
+        ext_langs_now["$el_now"]=1
       done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null)
 
-      IFS=',' read -ra _profile_codes_p3 <<< "$am_profile_langs"
-      for pc in "${_profile_codes_p3[@]}"; do
-        local pc_norm_p3
-        pc_norm_p3="$(normalize_track_lang "$pc")"
-        if [[ -z "${emb_langs_p3[$pc_norm_p3]:-}" ]] && [[ -z "${ext_langs_p3[$pc_norm_p3]:-}" ]]; then
+      local pc_norm
+      IFS=',' read -ra _profile_codes <<< "$am_profile_langs"
+      for pc in "${_profile_codes[@]}"; do
+        pc_norm="$(normalize_track_lang "$pc")"
+        if [[ -z "${emb_langs_now[$pc_norm]:-}" ]] && [[ -z "${ext_langs_now[$pc_norm]:-}" ]]; then
           # This profile language is completely missing — try nuclear
-          if nuclear_redownload "$mkv_file" "$pc_norm_p3" "$state_db"; then
-            log "NUCLEAR: triggered redownload for missing profile lang=$pc_norm_p3: $basename"
+          if nuclear_redownload "$mkv_file" "$pc_norm" "$state_db"; then
+            log "NUCLEAR: triggered redownload for missing profile lang=$pc_norm: $basename"
             nuclear_redownloads=$((nuclear_redownloads + 1))
             break  # File will be deleted, no point checking more languages
           fi
