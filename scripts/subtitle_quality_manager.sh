@@ -28,8 +28,7 @@ SONARR_KEY="${SONARR_KEY:-}"
 RADARR_URL="${RADARR_URL:-http://127.0.0.1:7878/radarr}"
 RADARR_KEY="${RADARR_KEY:-}"
 DEEPL_API_KEY="${DEEPL_API_KEY:-}"
-NUCLEAR_MAX_ATTEMPTS=3
-NUCLEAR_COOLDOWN_SECS=86400
+BAZARR_MIN_SCORE="${BAZARR_MIN_SCORE:-80}"
 
 WATERMARK_PATTERNS="galaxytv|yify|yts|opensubtitles|addic7ed|subscene|podnapisi|sub[sz]cene"
 
@@ -109,13 +108,6 @@ init_state_db() {
       enqueued_at INTEGER NOT NULL,
       source TEXT DEFAULT 'unknown'
     );
-    CREATE TABLE IF NOT EXISTS nuclear_attempts (
-      file_path TEXT NOT NULL,
-      language TEXT NOT NULL,
-      attempt INTEGER DEFAULT 0,
-      last_ts INTEGER DEFAULT 0,
-      PRIMARY KEY (file_path, language)
-    );
     PRAGMA journal_mode=WAL;
     PRAGMA busy_timeout=30000;
   " </dev/null >/dev/null 2>&1
@@ -194,7 +186,7 @@ load_streaming_candidates() {
   while IFS= read -r spath; do
     [[ -n "$spath" ]] && _STREAMING_PATHS["$spath"]=1
   done < <(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
-    "SELECT path FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL;" 2>/dev/null)
+    "SELECT path FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL AND COALESCE(keep_local,0) = 0;" 2>/dev/null)
 }
 
 # Pure bash lookup — safe inside pipelines (no subprocess spawning)
@@ -842,7 +834,7 @@ try_providers_for_lang() {
   local target_lang3
   target_lang3="$(lang_to_iso639_2 "$lang")"
   local filtered
-  filtered="$(jq -c --arg lang2 "$lang" --arg lang3 "$target_lang3" '
+  filtered="$(jq -c --arg lang2 "$lang" --arg lang3 "$target_lang3" --argjson min_score "$BAZARR_MIN_SCORE" '
     [.data // . | if type == "array" then .[] else empty end
      | select(
          (.language // "" | ascii_downcase) == ($lang2 | ascii_downcase) or
@@ -851,12 +843,30 @@ try_providers_for_lang() {
          (.code3 // "" | ascii_downcase) == ($lang3 | ascii_downcase)
        )]
     | sort_by(-.score)
+    | [.[] | select(.score >= $min_score)]
     | .[:'"$max_attempts"']
   ' <<<"$search_json" 2>/dev/null)" || filtered="[]"
 
+  local total_before_filter
+  total_before_filter="$(jq -c --arg lang2 "$lang" --arg lang3 "$target_lang3" '
+    [.data // . | if type == "array" then .[] else empty end
+     | select(
+         (.language // "" | ascii_downcase) == ($lang2 | ascii_downcase) or
+         (.language // "" | ascii_downcase) == ($lang3 | ascii_downcase) or
+         (.code2 // "" | ascii_downcase) == ($lang2 | ascii_downcase) or
+         (.code3 // "" | ascii_downcase) == ($lang3 | ascii_downcase)
+       )] | length
+  ' <<<"$search_json" 2>/dev/null)" || total_before_filter=0
+
   local result_count
   result_count="$(jq 'length' <<<"$filtered")"
-  [[ "$result_count" -eq 0 ]] && { log "PROVIDER_CYCLE: 0 results for lang=$lang: $(basename "$mkv_file")"; return 1; }
+  if [[ "$result_count" -eq 0 ]]; then
+    log "PROVIDER_CYCLE: 0 results for lang=$lang: $(basename "$mkv_file")"
+    return 1
+  fi
+  if [[ "$total_before_filter" -gt 0 && "$result_count" -lt "$total_before_filter" ]]; then
+    log "PROVIDER_CYCLE: filtered ${total_before_filter} → ${result_count} results (min_score=${BAZARR_MIN_SCORE}) for lang=$lang: $(basename "$mkv_file")"
+  fi
 
   log "PROVIDER_CYCLE: trying $result_count result(s) for lang=$lang: $(basename "$mkv_file")"
 
@@ -1007,10 +1017,12 @@ try_translate_inline() {
 check_deepl_quota() {
   # Returns: 0 = credits available, 1 = confirmed exhausted, 2 = unreachable/unknown
   [[ -z "${DEEPL_API_KEY:-}" ]] && return 2
+  local api_host="api.deepl.com"
+  [[ "${DEEPL_API_KEY}" == *":fx" ]] && api_host="api-free.deepl.com"
   local usage_json
   usage_json="$(curl -sS -m 10 --connect-timeout 5 \
     -H "Authorization: DeepL-Auth-Key ${DEEPL_API_KEY}" \
-    "https://api-free.deepl.com/v2/usage" </dev/null 2>/dev/null)" || return 2
+    "https://${api_host}/v2/usage" </dev/null 2>/dev/null)" || return 2
   local char_count char_limit
   char_count="$(jq -r '.character_count // 0' <<<"$usage_json")"
   char_limit="$(jq -r '.character_limit // 0' <<<"$usage_json")"
@@ -1026,187 +1038,6 @@ check_deepl_quota() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# Nuclear redownload: delete video file + trigger fresh search via arr API
-# ---------------------------------------------------------------------------
-
-# Unified arr delete + search helper (eliminates Sonarr/Radarr duplication)
-_arr_delete_and_search() {
-  local media_type="$1" arr_id="$2" arr_url="$3" api_key="$4" basename_nuc="$5" lang="$6"
-
-  local id_field file_id_jq file_endpoint search_name search_key
-  if [[ "$media_type" == "episode" ]]; then
-    id_field="episodeId"
-    file_id_jq='.episodeFileId // 0'
-    file_endpoint="episodefile"
-    search_name="EpisodeSearch"
-    search_key="episodeIds"
-  else
-    id_field="movieId"
-    file_id_jq='.movieFile.id // 0'
-    file_endpoint="moviefile"
-    search_name="MoviesSearch"
-    search_key="movieIds"
-  fi
-
-  # Check if already in download queue — abort if check fails (don't assume safe)
-  local in_queue
-  in_queue="$(curl -sS -m 15 --connect-timeout 8 \
-    "$arr_url/api/v3/queue?page=1&pageSize=200&apikey=$api_key" </dev/null 2>/dev/null \
-    | jq -r "[.records[] | select(.$id_field == $arr_id)] | length" 2>/dev/null)"
-  if [[ -z "$in_queue" ]]; then
-    log "NUCLEAR: queue check failed for $media_type=$arr_id, aborting: $basename_nuc"
-    return 1
-  fi
-  if [[ "${in_queue:-0}" -gt 0 ]]; then
-    log "NUCLEAR: $media_type already in download queue, skipping: $basename_nuc"
-    return 1
-  fi
-
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] NUCLEAR: would delete + search $media_type=$arr_id for lang=$lang: $basename_nuc"
-    return 0
-  fi
-
-  # Get file ID and delete
-  local item_json file_id del_http
-  item_json="$(curl -sS -m 15 --connect-timeout 8 \
-    "$arr_url/api/v3/${media_type}/$arr_id?apikey=$api_key" </dev/null 2>/dev/null)"
-  file_id="$(printf '%s' "$item_json" | jq -r "$file_id_jq")"
-  if [[ -z "$file_id" || "$file_id" == "0" || "$file_id" == "null" ]]; then
-    log "NUCLEAR: no $media_type file found for $media_type=$arr_id: $basename_nuc"
-    return 1
-  fi
-
-  del_http="$(curl -sS -m 15 --connect-timeout 8 -o /dev/null -w '%{http_code}' \
-    -X DELETE "$arr_url/api/v3/$file_endpoint/$file_id?apikey=$api_key" </dev/null 2>/dev/null)" || del_http="000"
-
-  if [[ "$del_http" != "2"* ]]; then
-    log "NUCLEAR: DELETE failed (http=$del_http) for fileId=$file_id, aborting search: $basename_nuc"
-    return 1
-  fi
-  log "NUCLEAR: deleted $media_type file fileId=$file_id http=$del_http: $basename_nuc"
-
-  # Trigger fresh search
-  local search_http
-  search_http="$(curl -sS -m 15 --connect-timeout 8 -o /dev/null -w '%{http_code}' \
-    -X POST -H "Content-Type: application/json" \
-    -d "$(jq -nc --argjson ids "[$arr_id]" --arg name "$search_name" --arg key "$search_key" '{name:$name, ($key):$ids}')" \
-    "$arr_url/api/v3/command?apikey=$api_key" </dev/null 2>/dev/null)" || search_http="000"
-  if [[ "$search_http" != "2"* ]]; then
-    log "NUCLEAR: WARN: search trigger failed (http=$search_http) for $media_type=$arr_id: $basename_nuc"
-  fi
-  log "NUCLEAR: triggered $search_name for $media_type=$arr_id: $basename_nuc"
-  return 0
-}
-
-# Cached DeepL quota state — set once per auto-maintain run, avoids redundant API calls
-_DEEPL_QUOTA_CACHED=""  # "available" | "exhausted" | "" (not yet checked)
-
-nuclear_redownload() {
-  local mkv_file="$1" lang="$2" state_db="$3"
-  local basename_nuc
-  basename_nuc="$(basename "$mkv_file")"
-
-  # 1. Check attempt count + cooldown
-  local attempt_row attempt_count last_ts
-  attempt_row="$(sqm_db "$state_db" -separator $'\t' \
-    "SELECT attempt, last_ts FROM nuclear_attempts WHERE file_path='$(sql_escape "$mkv_file")' AND language='$(sql_escape "$lang")';" 2>/dev/null)" || attempt_row=""
-  if [[ -n "$attempt_row" ]]; then
-    IFS=$'\t' read -r attempt_count last_ts <<<"$attempt_row"
-  else
-    attempt_count=0
-    last_ts=0
-  fi
-
-  if [[ "$attempt_count" -ge "$NUCLEAR_MAX_ATTEMPTS" ]]; then
-    log "NUCLEAR: max attempts reached ($attempt_count/$NUCLEAR_MAX_ATTEMPTS) for lang=$lang: $basename_nuc"
-    return 1
-  fi
-
-  # Cooldown: skip if last attempt was less than NUCLEAR_COOLDOWN_SECS ago
-  local now_nuc remaining
-  now_nuc="$(date +%s)"
-  if [[ "$last_ts" -gt 0 ]] && [[ $((now_nuc - last_ts)) -lt "$NUCLEAR_COOLDOWN_SECS" ]]; then
-    remaining=$(( NUCLEAR_COOLDOWN_SECS - (now_nuc - last_ts) ))
-    log "NUCLEAR: cooldown active (${remaining}s remaining) for lang=$lang: $basename_nuc"
-    return 1
-  fi
-
-  # 2. Check DeepL quota (cached per run) — if credits available, skip nuclear
-  #    If API unreachable, also skip — don't nuke files when we can't confirm quota state
-  if [[ -z "$_DEEPL_QUOTA_CACHED" ]]; then
-    check_deepl_quota
-    local _dql_rc=$?
-    if [[ $_dql_rc -eq 0 ]]; then
-      _DEEPL_QUOTA_CACHED="available"
-    elif [[ $_dql_rc -eq 1 ]]; then
-      _DEEPL_QUOTA_CACHED="exhausted"
-    else
-      _DEEPL_QUOTA_CACHED="unreachable"
-    fi
-  fi
-  if [[ "$_DEEPL_QUOTA_CACHED" == "available" ]]; then
-    log "NUCLEAR: skipped, DeepL credits available for lang=$lang: $basename_nuc"
-    return 1
-  fi
-  if [[ "$_DEEPL_QUOTA_CACHED" == "unreachable" ]]; then
-    log "NUCLEAR: skipped, DeepL API unreachable — cannot confirm quota for lang=$lang: $basename_nuc"
-    return 1
-  fi
-
-  # 3. Resolve media type and arr IDs
-  local media_type arr_id arr_url api_key
-  if is_tv_path "$mkv_file"; then
-    media_type="episode"
-    arr_url="$SONARR_URL"; api_key="$SONARR_KEY"
-    [[ -z "$api_key" ]] && { log "NUCLEAR: no Sonarr API key, skipping: $basename_nuc"; return 1; }
-    arr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrEpisodeId FROM table_episodes WHERE path GLOB '*$(sql_escape "$(basename "${mkv_file%.*}")")*' LIMIT 1;" </dev/null 2>/dev/null | tail -1)" || arr_id=""
-    [[ -z "$arr_id" ]] && { log "NUCLEAR: no Bazarr episode ID for $basename_nuc"; return 1; }
-  elif is_movie_path "$mkv_file"; then
-    media_type="movie"
-    arr_url="$RADARR_URL"; api_key="$RADARR_KEY"
-    [[ -z "$api_key" ]] && { log "NUCLEAR: no Radarr API key, skipping: $basename_nuc"; return 1; }
-    arr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT radarrId FROM table_movies WHERE path GLOB '*$(sql_escape "$(basename "${mkv_file%.*}")")*' LIMIT 1;" </dev/null 2>/dev/null | tail -1)" || arr_id=""
-    [[ -z "$arr_id" ]] && { log "NUCLEAR: no Bazarr movie ID for $basename_nuc"; return 1; }
-  else
-    log "NUCLEAR: unknown media type for path: $basename_nuc"
-    return 1
-  fi
-
-  # 4. Delete file + trigger search via unified helper
-  _arr_delete_and_search "$media_type" "$arr_id" "$arr_url" "$api_key" "$basename_nuc" "$lang" || return 1
-
-  # 5. Increment attempt count (reuse $now_nuc from cooldown check)
-  if ! sqm_db "$state_db" "INSERT INTO nuclear_attempts (file_path, language, attempt, last_ts)
-    VALUES ('$(sql_escape "$mkv_file")', '$(sql_escape "$lang")', 1, $now_nuc)
-    ON CONFLICT(file_path, language) DO UPDATE SET attempt = attempt + 1, last_ts = $now_nuc;" 2>/dev/null; then
-    log "NUCLEAR: WARN: failed to record attempt in DB for $basename_nuc — may retry next run"
-  fi
-
-  # 6. Discord notification
-  if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]] && [[ "$DRY_RUN" -eq 0 ]]; then
-    local new_attempt=$((attempt_count + 1))
-    local _nuc_fields
-    _nuc_fields="$(jq -nc \
-      --arg file "$basename_nuc" \
-      --arg lang "$lang" \
-      --arg attempt "${new_attempt}/${NUCLEAR_MAX_ATTEMPTS}" \
-      --arg type "$media_type" \
-      '[
-        {name: "File", value: $file, inline: false},
-        {name: "Missing Language", value: $lang, inline: true},
-        {name: "Attempt", value: $attempt, inline: true},
-        {name: "Media Type", value: $type, inline: true}
-      ]')"
-    notify_discord_embed "☢️ Nuclear Redownload" \
-      "Deleted video + triggered fresh search for missing subtitle" \
-      15548997 "Subtitle Quality Manager" "$_nuc_fields" \
-      || log "WARN: Discord notification failed (non-fatal)"
-  fi
-
-  return 0
-}
 
 cmd_auto_maintain() {
   load_streaming_candidates
@@ -1228,7 +1059,7 @@ cmd_auto_maintain() {
   [[ "$pending_count" -gt 0 ]] && log "auto-maintain: drained $pending_count file(s) from pending queue"
 
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
-  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0 bad_deleted=0 nuclear_redownloads=0
+  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0 bad_deleted=0
   local -a modified_dirs=()
   local -A bazarr_rescanned=()
 
@@ -1306,13 +1137,27 @@ cmd_auto_maintain() {
 
     # Full mode: skip files that haven't changed since last audit
     if [[ "$SINCE_MINUTES" -eq 0 ]]; then
-      local current_mtime stored_mtime
+      local current_mtime stored_mtime stored_audit_ts
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
-      stored_mtime="$(sqm_db "$state_db" "SELECT mtime FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null || true)"
+      local stored_row
+      stored_row="$(sqm_db "$state_db" -separator '|' "SELECT mtime, last_audit_ts FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null || true)"
+      stored_mtime="${stored_row%%|*}"
+      stored_audit_ts="${stored_row##*|}"
       [[ -z "$stored_mtime" ]] && stored_mtime=0
+      [[ -z "$stored_audit_ts" ]] && stored_audit_ts=0
       if [[ "$current_mtime" -eq "$stored_mtime" ]] && [[ "$stored_mtime" -gt 0 ]]; then
-        debug "SKIP (unchanged): $basename"
-        continue
+        # MKV unchanged — but check if any SRT next to it is newer than last audit
+        local srt_max_mtime=0 _srt_mt
+        while IFS= read -r _srt_f; do
+          [[ -z "$_srt_f" ]] && continue
+          _srt_mt="$(stat -c %Y "$_srt_f" 2>/dev/null || echo 0)"
+          [[ "$_srt_mt" -gt "$srt_max_mtime" ]] && srt_max_mtime="$_srt_mt"
+        done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null)
+        if [[ "$srt_max_mtime" -le "$stored_audit_ts" ]]; then
+          debug "SKIP (unchanged): $basename"
+          continue
+        fi
+        debug "RE-AUDIT (new SRT since last audit): $basename"
       fi
     fi
 
@@ -1466,15 +1311,22 @@ cmd_auto_maintain() {
             debug "SKIP mux (translation source extraction): $srt_basename"
             continue
           fi
-          # Check for .deepl marker (DeepL-translated SRT grace period)
+          # Check for translation marker (.deepl or .gtranslate grace period)
+          local translation_marker=""
           if [[ -f "${srt_file}.deepl" ]]; then
-            local marker_mtime srt_mtime
-            marker_mtime="$(stat -c %Y "${srt_file}.deepl" 2>/dev/null || echo 0)"
+            translation_marker="${srt_file}.deepl"
+          elif [[ -f "${srt_file}.gtranslate" ]]; then
+            translation_marker="${srt_file}.gtranslate"
+          fi
+          if [[ -n "$translation_marker" ]]; then
+            local marker_mtime srt_mtime marker_name
+            marker_name="${translation_marker##*.}"
+            marker_mtime="$(stat -c %Y "$translation_marker" 2>/dev/null || echo 0)"
             srt_mtime="$(stat -c %Y "$srt_file" 2>/dev/null || echo 0)"
             # If SRT was replaced after marker created, human sub found — delete marker and mux
             if [[ "$srt_mtime" -gt "$marker_mtime" ]]; then
-              rm -f "${srt_file}.deepl"
-              log "DeepL marker removed (SRT replaced by human sub): $srt_basename"
+              rm -f "$translation_marker"
+              log "${marker_name} marker removed (SRT replaced by human sub): $srt_basename"
             else
               # Grace period: 7 days (604800 seconds)
               local now marker_age
@@ -1482,13 +1334,13 @@ cmd_auto_maintain() {
               marker_age=$(( now - marker_mtime ))
               if [[ "$marker_age" -lt 604800 ]]; then
                 local days_left=$(( (604800 - marker_age) / 86400 ))
-                debug "SKIP mux (DeepL grace ${days_left}d remaining): $srt_basename"
+                debug "SKIP mux (${marker_name} grace ${days_left}d remaining): $srt_basename"
                 deepl_deferred=$((deepl_deferred + 1))
                 continue
               else
-                # Grace expired — mux the DeepL translation
-                rm -f "${srt_file}.deepl"
-                log "DeepL grace expired, muxing: $srt_basename"
+                # Grace expired — mux the translation
+                rm -f "$translation_marker"
+                log "${marker_name} grace expired, muxing: $srt_basename"
               fi
             fi
           fi
@@ -1572,14 +1424,7 @@ cmd_auto_maintain() {
                 log "TRANSLATE_INLINE: resolved via DeepL for lang=$ext_lang_norm: $basename"
                 file_modified=1
               else
-                # Phase 3: Nuclear redownload — all providers + DeepL failed
-                if nuclear_redownload "$mkv_file" "$ext_lang_norm" "$state_db"; then
-                  log "NUCLEAR: triggered redownload for lang=$ext_lang_norm: $basename"
-                  nuclear_redownloads=$((nuclear_redownloads + 1))
-                  break  # File will be deleted, no point processing more SRTs
-                else
-                  log "EXHAUSTED: no provider, translation, or nuclear option for lang=$ext_lang_norm: $basename"
-                fi
+                log "EXHAUSTED: no provider or translation for lang=$ext_lang_norm: $basename"
               fi
             fi
           fi
@@ -1719,7 +1564,7 @@ cmd_auto_maintain() {
           el_norm_p15="$(normalize_track_lang "$el_p15")"
           if ! lang_in_set "$el_norm_p15" "$am_profile_set"; then
             if [[ "$DRY_RUN" -eq 0 ]]; then
-              rm -f "$remaining_srt" "${remaining_srt}.deepl"
+              rm -f "$remaining_srt" "${remaining_srt}.deepl" "${remaining_srt}.gtranslate"
             fi
             log "CLEANUP non-profile external SRT: $rb (lang=$el_norm_p15, profile=$am_profile_langs)"
             cleaned_nonprofile=$((cleaned_nonprofile + 1))
@@ -1738,7 +1583,7 @@ cmd_auto_maintain() {
       fi
     fi
 
-    # --- Phase 3: Nuclear redownload for completely missing profile languages ---
+    # --- Phase 3: Provider cycle + DeepL translation for completely missing profile languages ---
     if [[ -n "$am_profile_set" ]]; then
       # Re-read current state — necessary because Phase 1/1.5 may have muxed/stripped tracks
       local emb_json_now
@@ -1768,12 +1613,17 @@ cmd_auto_maintain() {
       for pc in "${_profile_codes[@]}"; do
         pc_norm="$(normalize_track_lang "$pc")"
         if [[ -z "${emb_langs_now[$pc_norm]:-}" ]] && [[ -z "${ext_langs_now[$pc_norm]:-}" ]]; then
-          # This profile language is completely missing — try nuclear
-          if nuclear_redownload "$mkv_file" "$pc_norm" "$state_db"; then
-            log "NUCLEAR: triggered redownload for missing profile lang=$pc_norm: $basename"
-            nuclear_redownloads=$((nuclear_redownloads + 1))
-            break  # File will be deleted, no point checking more languages
+          # This profile language is completely missing — try providers first
+          if try_providers_for_lang "$mkv_file" "$pc_norm" "$duration"; then
+            log "PROVIDER_CYCLE: found sub for missing profile lang=$pc_norm: $basename"
+            continue
           fi
+          # Providers failed — try DeepL translation from any available profile-language sub
+          if try_translate_inline "$mkv_file" "$pc_norm"; then
+            log "TRANSLATE: filled missing profile lang=$pc_norm via DeepL: $basename"
+            continue
+          fi
+          log "EXHAUSTED: no provider or translation for missing profile lang=$pc_norm: $basename"
         fi
       done
     fi
@@ -1955,10 +1805,10 @@ cmd_auto_maintain() {
     done
   fi
 
-  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) bad_deleted=$bad_deleted nuclear=$nuclear_redownloads extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
+  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) bad_deleted=$bad_deleted extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
 
   # Discord notification (non-fatal, only when actions taken)
-  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files + extracted_nonprofile + cleaned_nonprofile + bad_deleted + nuclear_redownloads)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files + extracted_nonprofile + cleaned_nonprofile + bad_deleted)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
     local mode="quick"
     [[ "$SINCE_MINUTES" -eq 0 ]] && mode="full"
 
@@ -1980,7 +1830,6 @@ cmd_auto_maintain() {
     [[ "$cleaned_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"🧹 Cleaned\",\"value\":\"${cleaned_nonprofile} SRT(s)\",\"inline\":true}"
     [[ "$bad_deleted" -gt 0 ]] && _am_fields+=",{\"name\":\"🗑️ BAD Deleted\",\"value\":\"${bad_deleted} SRT(s)\",\"inline\":true}"
     [[ "$deepl_deferred" -gt 0 ]] && _am_fields+=",{\"name\":\"⏳ DeepL Deferred\",\"value\":\"${deepl_deferred}\",\"inline\":true}"
-    [[ "$nuclear_redownloads" -gt 0 ]] && _am_fields+=",{\"name\":\"☢️ Nuclear\",\"value\":\"${nuclear_redownloads}\",\"inline\":true}"
     [[ "$warned" -gt 0 ]] && _am_fields+=",{\"name\":\"⚠️ Manual Review\",\"value\":\"${warned}\",\"inline\":true}"
     local _skips=""
     [[ "$skipped_converter" -gt 0 ]] && _skips+="🔄 converter: ${skipped_converter}  "

@@ -34,7 +34,7 @@
 
 [![Cron Jobs](https://img.shields.io/badge/cron%20jobs-18%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
 [![Tests](https://img.shields.io/badge/tests-417%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--03--09-informational?style=flat-square&logo=calendar&logoColor=white)]()
+[![Updated](https://img.shields.io/badge/last%20updated-2026--03--13-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -176,7 +176,7 @@ graph TB
 |--------|-------|
 | 📜 Total cron jobs | 18 |
 | 🧪 Total tests | 417 passing |
-| 🌐 DeepL quota | 500K chars/month (free tier) |
+| 🌐 DeepL budget | 400K chars/month (Pro, Google fallback after) |
 | 💾 State databases | 4 (codec, streaming, translation, bazarr) |
 | 🔌 External APIs | 6 (Sonarr, Radarr, Bazarr, Emby, TMDB, DeepL) |
 | 📡 Discord webhooks | All systems |
@@ -402,14 +402,16 @@ Import Hook (background, async)
         runs detached (</dev/null & disown)
 ```
 
-### 📊 Quota Management
+### 📊 Budget & Quota Management
 
 | Metric | Value |
 |--------|-------|
-| Plan | Free tier |
-| Monthly limit | 500,000 characters |
+| Plan | Pro API ($5.49/mo + $25/M chars) |
+| Monthly budget | 400,000 characters (~$15.50/mo cap) |
+| Over-budget | Falls back to Google Translate (free) |
 | Cooldown | 24h per (file, language) |
 | Discord alert | Quota warning webhook on low balance |
+| Override | `--monthly-budget 0` for unlimited (manual only) |
 
 ### 🧪 Test Coverage
 
@@ -499,7 +501,7 @@ gantt
 | `*/5 * * * *` | 🎬 Subtitle dedupe quick | Subtitles | `--since 10` min |
 | `*/10 * * * *` | 🎬 Subtitle auto-maintain quick | Subtitles | `--since 15` min |
 | `*/15 * * * *` | 🎬 Bazarr subtitle recovery | Subtitles | `--since 30` min |
-| `0 1 * * *` | 🎬 Subtitle auto-maintain full | Subtitles | Full library scan |
+| `0 1 * * *` | 🎬 Subtitle auto-maintain full | Subtitles | Full library scan (checks SRT mtimes) |
 | `0 4 * * 0` | 🎬 Subtitle dedupe full | Subtitles | Weekly, Sunday 4 AM |
 | `*/15 * * * *` | 🔄 Codec manager resume | Codec | Batch size 1 |
 | `0 3 * * *` | 🔄 Codec audit + plan | Codec | Incremental, ~7 min |
@@ -618,7 +620,7 @@ sequenceDiagram
 | 🧲 Torrents | Transmission | Download client |
 | 🎬 Metadata | TMDB API | Streaming availability data |
 | 🌙 Streaming | Movie of the Night (RapidAPI) | Per-season availability |
-| 🌐 Translation | DeepL Free API | Subtitle translation |
+| 🌐 Translation | DeepL Pro API + Google Translate | Subtitle translation (DeepL primary, Google fallback) |
 | 🔔 Alerts | Discord Webhooks | All system notifications |
 | 🔒 Concurrency | `flock` | Cron job mutual exclusion |
 | 🔍 Indexers | Prowlarr (23 indexers) | Torrent search |
@@ -642,7 +644,7 @@ EMBY_API_KEY=...
 PROWLARR_API_KEY=...
 
 # External APIs
-DEEPL_API_KEY=...fx          # Free tier
+DEEPL_API_KEY=...             # Pro tier (no :fx suffix)
 TMDB_API_KEY=...
 RAPIDAPI_KEY=...             # Movie of the Night
 
@@ -749,7 +751,7 @@ Caused `analyze_srt_file()` failures in full scan mode.
 ╚════════════════════════════════════════════════╝
 ```
 
-**🤖 Maintained by Beren** · Last updated: **2026-03-09** · Running on an appbox near you
+**🤖 Maintained by Beren** · Last updated: **2026-03-13** · Running on an appbox near you
 
 [![GitHub](https://img.shields.io/badge/GitHub-beregcamlost%2Farr__configs-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/beregcamlost/arr_configs)
 

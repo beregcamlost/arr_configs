@@ -289,9 +289,11 @@ def cli():
               help="Translate a single file")
 @click.option("--max-chars", type=int, default=None,
               help="Maximum characters to translate in this run")
+@click.option("--monthly-budget", type=int, default=400_000,
+              help="Monthly character budget (default: 400000)")
 @click.option("--state-dir", type=str, default=None)
 @click.option("--bazarr-db", type=str, default=None)
-def translate(since, file_path, max_chars, state_dir, bazarr_db):
+def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db):
     """Translate missing subtitles via DeepL with Google fallback."""
     global _deepl_quota_exceeded
     _deepl_quota_exceeded = False  # Reset per invocation
@@ -300,11 +302,31 @@ def translate(since, file_path, max_chars, state_dir, bazarr_db):
     db = _db_path(cfg.state_dir)
     init_db(db)
 
+    # Enforce monthly budget — DeepL only, Google fallback stays available
+    monthly_used = get_monthly_chars(db)
+    _budget_exceeded = False
+    if monthly_budget and monthly_used >= monthly_budget:
+        log.warning(
+            "Monthly DeepL budget reached: %s / %s chars — using Google Translate only",
+            f"{monthly_used:,}", f"{monthly_budget:,}",
+        )
+        _budget_exceeded = True
+
+    # Cap max_chars to remaining budget (DeepL portion)
+    if not _budget_exceeded and monthly_budget:
+        budget_remaining = monthly_budget - monthly_used
+        if max_chars is None or max_chars > budget_remaining:
+            max_chars = budget_remaining
+            log.info("Capped to %d chars (monthly budget remaining)", max_chars)
+
     # Create DeepL translator if key available
     deepl_translator = None
     google_translator = None
 
-    if cfg.deepl_api_key:
+    if _budget_exceeded:
+        # Budget hit — skip DeepL entirely, use Google only
+        _deepl_quota_exceeded = True
+    elif cfg.deepl_api_key:
         deepl_translator = create_deepl_translator(cfg.deepl_api_key)
         # Check DeepL quota at start
         try:
@@ -318,11 +340,12 @@ def translate(since, file_path, max_chars, state_dir, bazarr_db):
         log.info("No DeepL API key, using Google Translate only")
         _deepl_quota_exceeded = True
 
-    if not cfg.deepl_api_key and not cfg.google_translate_enabled:
+    if not cfg.deepl_api_key and not cfg.google_translate_enabled and not _budget_exceeded:
         click.echo("Error: No translation provider available")
         return
 
-    chars_remaining = max_chars
+    # When budget-exceeded and using Google only, don't cap chars
+    chars_remaining = None if _budget_exceeded else max_chars
     all_translated = []
     all_failed = []
 
@@ -364,7 +387,7 @@ def translate(since, file_path, max_chars, state_dir, bazarr_db):
                     if not _has_google(cfg):
                         log.error("Quota exceeded and Google disabled, stopping")
                         monthly = get_monthly_chars(db)
-                        notify_quota_warning(cfg.discord_webhook_url, monthly, 500000)
+                        notify_quota_warning(cfg.discord_webhook_url, monthly, monthly_budget or 400_000)
                         break
                     log.error("All providers failed, stopping")
                     break
@@ -405,7 +428,8 @@ def status(state_dir):
 
     provider_breakdown = get_monthly_chars_by_provider(db)
     monthly = sum(provider_breakdown.values())
-    click.echo(f"Monthly usage: {monthly:,} / 500,000 chars ({monthly/5000:.1f}%)")
+    budget = 400_000
+    click.echo(f"Monthly usage: {monthly:,} / {budget:,} chars ({monthly/budget*100:.1f}%)")
     if provider_breakdown:
         for provider, chars in sorted(provider_breakdown.items()):
             click.echo(f"  {provider}: {chars:,} chars")
