@@ -9,6 +9,10 @@ LOG_DEFAULT="${STATE_DIR_DEFAULT}/manager.log"
 BACKUP_DIR_DEFAULT="${STATE_DIR_DEFAULT}/backups"
 TMP_DIR_DEFAULT="${STATE_DIR_DEFAULT}/work"
 RETENTION_DAYS_DEFAULT=7
+GRACE_DAYS_DEFAULT=3
+MIN_VERIFIED_FILE_SIZE=$((10 * 1024 * 1024))  # 10MB
+BYTES_PER_MB=$((1024 * 1024))
+BYTES_PER_GB=$((1024 * 1024 * 1024))
 
 STATE_DIR="$STATE_DIR_DEFAULT"
 DB_PATH="$DB_DEFAULT"
@@ -38,6 +42,7 @@ DEFAULT_TARGET_CONTAINER="mkv"
 MAX_ATTEMPTS_DEFAULT=30
 MAX_ATTEMPTS="$MAX_ATTEMPTS_DEFAULT"
 RETENTION_DAYS="$RETENTION_DAYS_DEFAULT"
+GRACE_DAYS="$GRACE_DAYS_DEFAULT"
 
 comma_fmt() {
   local n="$1"
@@ -72,6 +77,9 @@ Commands:
   convert         Convert planned eligible files (single-file sequential)
   resume          Alias for convert
   prune-backups   Remove backups older than retention window
+  verify-and-clean  Verify swapped conversions and delete validated backups
+    --grace-days N      Min days since swap before cleanup (default: $GRACE_DAYS_DEFAULT)
+    --dry-run           Show what would be deleted without acting
   enqueue-import  Fast-path: probe one file and enqueue at highest priority
 
 Options:
@@ -528,6 +536,8 @@ parse_args() {
         MAX_ATTEMPTS="$2"; shift 2 ;;
       --retention-days)
         RETENTION_DAYS="$2"; shift 2 ;;
+      --grace-days)
+        GRACE_DAYS="$2"; shift 2 ;;
       --log-level)
         LOG_LEVEL="$2"; shift 2 ;;
       --file)
@@ -1349,7 +1359,7 @@ verify_transcoded_file() {
   dst_dur="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$dst" 2>/dev/null | awk '{printf("%.3f",$1)}' || echo 0)"
   dur_delta="$(awk -v a="$src_dur" -v b="$dst_dur" 'BEGIN{d=a-b; if(d<0)d=-d; printf "%.3f", d}')"
 
-  v_ok="$(ffprobe -v error -select_streams v -show_entries stream=codec_name -of csv=p=0 "$dst" 2>/dev/null | awk '{if($1!="h264") bad=1} END{if(bad) print 0; else print 1}')"
+  v_ok="$(ffprobe -v error -select_streams v -show_entries stream=codec_name -of csv=p=0 "$dst" 2>/dev/null | awk -F',' '{if($1!="h264") bad=1} END{if(bad) print 0; else print 1}')"
   a_ok="$(ffprobe -v error -select_streams a -show_entries stream=codec_name,channels -of csv=p=0 "$dst" 2>/dev/null | awk -F',' '{if($1!="aac" || $2>2) bad=1} END{if(NR==0||bad) print 0; else print 1}')"
 
   if awk -v d="$dur_delta" 'BEGIN{exit (d<=2.5)?0:1}'; then
@@ -1370,6 +1380,53 @@ verify_transcoded_file() {
     -of csv=p=0 "$dst" </dev/null 2>/dev/null | wc -l)"
   if [[ "$src_subs" -gt 0 && "$dst_subs" -lt "$src_subs" ]]; then
     echo "subtitle_stream_loss:src=${src_subs},dst=${dst_subs}"
+    return 1
+  fi
+
+  return 0
+}
+
+# Verify a converted file is valid (exists, h264 video, aac audio, duration > 0)
+# Usage: verify_converted_file_standalone "/path/to/file.mkv"
+# Returns: 0 if valid, 1 if invalid. Sets VERIFY_FAIL_REASON on failure.
+verify_converted_file_standalone() {
+  local file="$1"
+  VERIFY_FAIL_REASON=""
+
+  if [[ ! -f "$file" ]]; then
+    VERIFY_FAIL_REASON="file_missing"
+    return 1
+  fi
+
+  local fsize
+  fsize="$(stat -c '%s' "$file" 2>/dev/null)" || { VERIFY_FAIL_REASON="stat_failed"; return 1; }
+  if (( fsize < MIN_VERIFIED_FILE_SIZE )); then  # < 10MB suspicious
+    VERIFY_FAIL_REASON="file_too_small (${fsize} bytes)"
+    return 1
+  fi
+
+  local probe_json
+  probe_json="$(ffprobe -v error -show_entries stream=codec_type,codec_name -show_entries format=duration -of json "$file" </dev/null 2>/dev/null)" || {
+    VERIFY_FAIL_REASON="ffprobe_failed"
+    return 1
+  }
+
+  local vcodec acodec duration
+  vcodec="$(jq -r '[.streams[] | select(.codec_type=="video")][0].codec_name // ""' <<<"$probe_json")"
+  if [[ "$vcodec" != "h264" ]]; then
+    VERIFY_FAIL_REASON="video_codec=$vcodec (expected h264)"
+    return 1
+  fi
+
+  acodec="$(jq -r '[.streams[] | select(.codec_type=="audio")][0].codec_name // ""' <<<"$probe_json")"
+  if [[ "$acodec" != "aac" ]]; then
+    VERIFY_FAIL_REASON="audio_codec=$acodec (expected aac)"
+    return 1
+  fi
+
+  duration="$(jq -r '.format.duration // "0"' <<<"$probe_json")"
+  if [[ -z "$duration" ]] || awk "BEGIN{exit ($duration <= 0) ? 0 : 1}" 2>/dev/null; then
+    VERIFY_FAIL_REASON="invalid_duration=$duration"
     return 1
   fi
 
@@ -1598,7 +1655,7 @@ run_convert_for_media() {
     audio_copy=1
   fi
 
-  ff_cmd=(ffmpeg -hide_banner -nostdin -y -i "$src" -map 0:v?)
+  ff_cmd=(ffmpeg -hide_banner -nostdin -y -i "$src" -map 0:V?)
   ff_cmd+=( "${audio_map_args[@]}" )
   ff_cmd+=( -map 0:s? )
   if [[ "$video_copy" -eq 1 ]]; then
@@ -1762,6 +1819,69 @@ prune_backups_cmd() {
 
   find "$BACKUP_DIR" -type d -empty -delete || true
   log "info" "Prune backups complete"
+}
+
+verify_and_clean_cmd() {
+  local grace_days="$GRACE_DAYS"
+  local dry_run="$DRY_RUN"
+
+  log "info" "Verifying swapped conversions and cleaning validated backups (grace=$grace_days days, dry_run=$dry_run)"
+
+  local verified_ok=0 verified_fail=0 backup_missing=0 backups_deleted=0 bytes_freed=0
+
+  local query="SELECT a.media_id, a.new_path, a.backup_path, a.swapped_ts
+      FROM artifacts a
+      JOIN conversion_runs cr ON cr.media_id = a.media_id AND cr.status = 'swapped'
+      WHERE a.backup_path IS NOT NULL AND a.backup_path <> ''
+      AND a.swapped_ts < datetime('now', '-${grace_days} days')
+      GROUP BY a.media_id
+      ORDER BY a.swapped_ts;"
+
+  while IFS=$'\t' read -r media_id new_path backup_path swapped_ts; do
+    [[ -z "$media_id" ]] && continue
+
+    # Check if backup exists
+    if [[ ! -f "$backup_path" ]]; then
+      backup_missing=$(( backup_missing + 1 ))
+      log "debug" "Backup already absent for media_id=$media_id: $backup_path"
+      continue
+    fi
+
+    local backup_size
+    backup_size="$(stat -c '%s' "$backup_path" 2>/dev/null)" || backup_size=0
+
+    # Verify converted file
+    if verify_converted_file_standalone "$new_path"; then
+      verified_ok=$(( verified_ok + 1 ))
+      if (( dry_run )); then
+        log "info" "[DRY-RUN] Would delete backup: $backup_path ($(( backup_size / BYTES_PER_MB ))MB)"
+      else
+        rm -f "$backup_path"
+        backups_deleted=$(( backups_deleted + 1 ))
+        bytes_freed=$(( bytes_freed + backup_size ))
+        insert_event "info" "verify-clean" "$media_id" "backup_deleted" \
+          "backup=$backup_path freed=$(( backup_size / BYTES_PER_MB ))MB new=$new_path"
+        log "info" "Deleted verified backup: $backup_path ($(( backup_size / BYTES_PER_MB ))MB)"
+      fi
+    else
+      verified_fail=$(( verified_fail + 1 ))
+      log "warn" "Verification FAILED for media_id=$media_id ($VERIFY_FAIL_REASON) — keeping backup: $backup_path"
+    fi
+  done < <(db -separator $'\t' "$query" </dev/null)
+
+  # Clean empty backup dirs
+  find "$BACKUP_DIR" -type d -empty -delete 2>/dev/null || true
+
+  local freed_gb
+  freed_gb="$(awk "BEGIN{printf \"%.2f\", $bytes_freed / $BYTES_PER_GB}")"
+
+  log "info" "verify-and-clean complete: verified_ok=$verified_ok verified_fail=$verified_fail backup_missing=$backup_missing deleted=$backups_deleted freed=${freed_gb}GB"
+
+  if (( dry_run )); then
+    echo "[DRY-RUN] Would delete $verified_ok backups"
+  else
+    echo "Deleted $backups_deleted backups, freed ${freed_gb}GB"
+  fi
 }
 
 daily_status_cmd() {
@@ -1948,6 +2068,9 @@ main() {
       ;;
     prune-backups)
       prune_backups_cmd
+      ;;
+    verify-and-clean)
+      verify_and_clean_cmd
       ;;
     enqueue-import)
       enqueue_import_cmd
