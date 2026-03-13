@@ -35,17 +35,28 @@ def init_db(db_path):
             CREATE INDEX IF NOT EXISTS idx_translation_cooldown
                 ON translation_log (media_path, target_lang, created_at);
         """)
+        # Migration: add provider column if missing
+        cursor = conn.execute("PRAGMA table_info(translation_log)")
+        columns = {row["name"] for row in cursor.fetchall()}
+        if "provider" not in columns:
+            conn.execute(
+                "ALTER TABLE translation_log "
+                "ADD COLUMN provider TEXT NOT NULL DEFAULT 'deepl'"
+            )
+            conn.commit()
 
 
 def record_translation(db_path, media_path, source_lang, target_lang,
-                        chars_used, status):
+                        chars_used, status, provider="deepl"):
     """Record a translation attempt."""
     with contextlib.closing(_connect(db_path)) as conn:
         conn.execute(
             """INSERT INTO translation_log
-               (media_path, source_lang, target_lang, chars_used, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (media_path, source_lang, target_lang, chars_used, status, _now_iso()),
+               (media_path, source_lang, target_lang, chars_used, status,
+                created_at, provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (media_path, source_lang, target_lang, chars_used, status,
+             _now_iso(), provider),
         )
         conn.commit()
 
@@ -74,6 +85,18 @@ def get_monthly_chars(db_path):
         )
         total = cursor.fetchone()["total"]
     return total
+
+
+def get_monthly_chars_by_provider(db_path):
+    """Get characters used this month grouped by provider."""
+    with contextlib.closing(_connect(db_path)) as conn:
+        cursor = conn.execute(
+            """SELECT provider, COALESCE(SUM(chars_used), 0) as total
+               FROM translation_log
+               WHERE created_at >= date('now', 'start of month')
+               GROUP BY provider"""
+        )
+        return {row["provider"]: row["total"] for row in cursor.fetchall()}
 
 
 def get_recent_translations(db_path, limit=20):

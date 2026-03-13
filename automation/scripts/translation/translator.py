@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # automation/scripts/translation/translator.py
-"""DeepL subtitle translator CLI."""
+"""Subtitle translator CLI with DeepL + Google Translate fallback."""
 
 import logging
 import os
@@ -9,13 +9,19 @@ import sys
 import click
 
 from translation.config import (
-    Config, load_config, DEEPL_LANG_MAP, DEEPL_SOURCE_LANG_MAP,
+    Config, load_config,
+    DEEPL_LANG_MAP, DEEPL_SOURCE_LANG_MAP,
+    GOOGLE_LANG_MAP,
+    PROVIDER_DEEPL, PROVIDER_GOOGLE,
 )
 from translation.db import (
     init_db, record_translation, is_on_cooldown, get_monthly_chars,
-    get_recent_translations,
+    get_monthly_chars_by_provider, get_recent_translations,
 )
-from translation.deepl_client import create_translator, translate_srt_cues
+from translation.deepl_client import (
+    create_translator as create_deepl_translator,
+    translate_srt_cues as deepl_translate_srt_cues,
+)
 from translation.discord import notify_translations, notify_quota_warning
 from translation.srt_parser import parse_srt, write_srt
 from translation.subtitle_scanner import (
@@ -30,19 +36,80 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+# Session-level flag: once DeepL quota is exceeded, skip straight to Google
+_deepl_quota_exceeded = False
+
+MARKER_EXTENSIONS = {
+    PROVIDER_DEEPL: ".deepl",
+    PROVIDER_GOOGLE: ".gtranslate",
+}
+
 
 def _db_path(state_dir: str) -> str:
     return os.path.join(state_dir, "translation_state.db")
 
 
-def translate_file(cfg: Config, translator, media_path: str, chars_remaining=None):
+def _has_deepl(cfg: Config) -> bool:
+    """Check if DeepL is available (has API key and quota not exceeded)."""
+    return bool(cfg.deepl_api_key) and not _deepl_quota_exceeded
+
+
+def _has_google(cfg: Config) -> bool:
+    """Check if Google Translate is available."""
+    return cfg.google_translate_enabled
+
+
+def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
+                                   deepl_translator, google_translator):
+    """Translate cues trying DeepL first, falling back to Google.
+
+    Returns (translated_cues, chars_used, provider).
+    Raises on non-quota errors.
+    """
+    global _deepl_quota_exceeded
+
+    # Try DeepL first
+    if _has_deepl(cfg) and base_lang in DEEPL_LANG_MAP and source_lang_code in DEEPL_SOURCE_LANG_MAP:
+        deepl_source = DEEPL_SOURCE_LANG_MAP[source_lang_code]
+        deepl_target = DEEPL_LANG_MAP[base_lang]
+        try:
+            translated_cues, chars_used = deepl_translate_srt_cues(
+                deepl_translator, cues, deepl_source, deepl_target
+            )
+            return translated_cues, chars_used, PROVIDER_DEEPL
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "quota" in error_msg or "456" in str(e):
+                log.warning("DeepL quota exceeded, switching to Google Translate")
+                _deepl_quota_exceeded = True
+            else:
+                raise
+
+    # Fall back to Google
+    if _has_google(cfg) and base_lang in GOOGLE_LANG_MAP and source_lang_code in GOOGLE_LANG_MAP:
+        from translation.google_client import translate_srt_cues as google_translate_srt_cues
+        google_source = GOOGLE_LANG_MAP[source_lang_code]
+        google_target = GOOGLE_LANG_MAP[base_lang]
+        if google_translator is None:
+            from translation.google_client import create_translator as create_google
+            google_translator = create_google()
+        translated_cues, chars_used = google_translate_srt_cues(
+            google_translator, cues, google_source, google_target
+        )
+        return translated_cues, chars_used, PROVIDER_GOOGLE
+
+    raise ValueError(f"No translation provider available for {source_lang_code} -> {base_lang}")
+
+
+def translate_file(cfg: Config, deepl_translator, media_path: str,
+                   chars_remaining=None, google_translator=None):
     """Translate missing subtitle languages for a single media file.
 
     Args:
         chars_remaining: If set, stop after consuming this many chars.
-            Returns updated remaining count via the chars field in results.
+        google_translator: Optional pre-created Google translator instance.
 
-    Returns (list of {file, target, chars}, list of {file, target, error}).
+    Returns (list of {file, target, chars, provider}, list of {file, target, error}).
     """
     db_path = _db_path(cfg.state_dir)
     basename = os.path.basename(media_path)
@@ -72,8 +139,9 @@ def translate_file(cfg: Config, translator, media_path: str, chars_remaining=Non
         # Skip forced/hi variants for translation
         base_lang = target_lang.split(":")[0]
 
-        if base_lang not in DEEPL_LANG_MAP:
-            log.info("No DeepL mapping for '%s', skipping", base_lang)
+        # Check if any provider supports this language
+        if base_lang not in DEEPL_LANG_MAP and base_lang not in GOOGLE_LANG_MAP:
+            log.info("No translation mapping for '%s', skipping", base_lang)
             continue
 
         if is_on_cooldown(db_path, media_path, base_lang):
@@ -93,11 +161,9 @@ def translate_file(cfg: Config, translator, media_path: str, chars_remaining=Non
         # Detect source language from filename
         source_basename = os.path.basename(source_srt)
         source_lang_code = source_basename[len(stem) + 1:].split(".")[0].lower()
-        deepl_source = DEEPL_SOURCE_LANG_MAP.get(source_lang_code)
-        deepl_target = DEEPL_LANG_MAP[base_lang]
 
-        if not deepl_source:
-            log.info("No DeepL source mapping for '%s'", source_lang_code)
+        if source_lang_code not in DEEPL_SOURCE_LANG_MAP and source_lang_code not in GOOGLE_LANG_MAP:
+            log.info("No source mapping for '%s'", source_lang_code)
             continue
 
         try:
@@ -109,35 +175,37 @@ def translate_file(cfg: Config, translator, media_path: str, chars_remaining=Non
                 log.warning("Empty SRT: %s", source_srt)
                 continue
 
-            # Translate
+            # Translate with fallback
             log.info("Translating %s: %s -> %s (%d cues)",
                      basename, source_lang_code, base_lang, len(cues))
-            translated_cues, chars_used = translate_srt_cues(
-                translator, cues, deepl_source, deepl_target
+            translated_cues, chars_used, provider = _translate_cues_with_fallback(
+                cfg, cues, source_lang_code, base_lang,
+                deepl_translator, google_translator,
             )
 
             # Write translated SRT + marker for deferred muxing
             output_path = os.path.join(directory, f"{stem}.{base_lang}.srt")
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(write_srt(translated_cues))
-            # Create .deepl marker so auto-maintain defers muxing
-            open(output_path + ".deepl", "w").close()
+            marker_ext = MARKER_EXTENSIONS[provider]
+            open(output_path + marker_ext, "w").close()
 
             record_translation(db_path, media_path, source_lang_code,
-                               base_lang, chars_used, "success")
+                               base_lang, chars_used, "success", provider)
             translated.append({
-                "file": basename, "target": base_lang, "chars": chars_used
+                "file": basename, "target": base_lang,
+                "chars": chars_used, "provider": provider,
             })
             if chars_remaining is not None:
                 chars_remaining -= chars_used
-            log.info("Wrote %s (%d chars)", output_path, chars_used)
+            log.info("Wrote %s (%d chars, %s)", output_path, chars_used, provider)
 
         except Exception as e:
             error_msg = str(e)
-            # Check for quota exceeded
+            # Check for quota exceeded (DeepL-only, Google has no quota)
             if "quota" in error_msg.lower() or "456" in error_msg:
                 record_translation(db_path, media_path, source_lang_code,
-                                   base_lang, 0, "quota_exceeded")
+                                   base_lang, 0, "quota_exceeded", PROVIDER_DEEPL)
                 failed.append({"file": basename, "target": base_lang,
                                "error": "quota exceeded"})
                 raise  # Re-raise to stop all processing
@@ -210,7 +278,7 @@ def _resolve_profile_for_path(bazarr_db: str, media_path: str):
 
 @click.group()
 def cli():
-    """DeepL subtitle translator."""
+    """Subtitle translator with DeepL + Google Translate fallback."""
     pass
 
 
@@ -224,11 +292,35 @@ def cli():
 @click.option("--state-dir", type=str, default=None)
 @click.option("--bazarr-db", type=str, default=None)
 def translate(since, file_path, max_chars, state_dir, bazarr_db):
-    """Translate missing subtitles via DeepL."""
+    """Translate missing subtitles via DeepL with Google fallback."""
+    global _deepl_quota_exceeded
+    _deepl_quota_exceeded = False  # Reset per invocation
+
     cfg = load_config(bazarr_db=bazarr_db, state_dir=state_dir)
     db = _db_path(cfg.state_dir)
     init_db(db)
-    translator = create_translator(cfg.deepl_api_key)
+
+    # Create DeepL translator if key available
+    deepl_translator = None
+    google_translator = None
+
+    if cfg.deepl_api_key:
+        deepl_translator = create_deepl_translator(cfg.deepl_api_key)
+        # Check DeepL quota at start
+        try:
+            usage = deepl_translator.get_usage()
+            if usage.character and usage.character.count >= usage.character.limit:
+                log.warning("DeepL quota already exhausted, using Google Translate")
+                _deepl_quota_exceeded = True
+        except Exception as e:
+            log.warning("Could not check DeepL usage: %s", e)
+    else:
+        log.info("No DeepL API key, using Google Translate only")
+        _deepl_quota_exceeded = True
+
+    if not cfg.deepl_api_key and not cfg.google_translate_enabled:
+        click.echo("Error: No translation provider available")
+        return
 
     chars_remaining = max_chars
     all_translated = []
@@ -239,7 +331,8 @@ def translate(since, file_path, max_chars, state_dir, bazarr_db):
         if not os.path.isfile(file_path):
             log.error("File not found: %s", file_path)
             return
-        t, f = translate_file(cfg, translator, file_path, chars_remaining)
+        t, f = translate_file(cfg, deepl_translator, file_path,
+                              chars_remaining, google_translator)
         all_translated.extend(t)
         all_failed.extend(f)
 
@@ -258,7 +351,8 @@ def translate(since, file_path, max_chars, state_dir, bazarr_db):
                 log.info("Max chars reached, stopping batch")
                 break
             try:
-                t, f = translate_file(cfg, translator, item["path"], chars_remaining)
+                t, f = translate_file(cfg, deepl_translator, item["path"],
+                                      chars_remaining, google_translator)
                 all_translated.extend(t)
                 all_failed.extend(f)
                 if chars_remaining is not None:
@@ -267,9 +361,12 @@ def translate(since, file_path, max_chars, state_dir, bazarr_db):
                     _trigger_bazarr_rescan(cfg, item["path"])
             except Exception as e:
                 if "quota" in str(e).lower():
-                    log.error("Quota exceeded, stopping")
-                    monthly = get_monthly_chars(db)
-                    notify_quota_warning(cfg.discord_webhook_url, monthly, 500000)
+                    if not _has_google(cfg):
+                        log.error("Quota exceeded and Google disabled, stopping")
+                        monthly = get_monthly_chars(db)
+                        notify_quota_warning(cfg.discord_webhook_url, monthly, 500000)
+                        break
+                    log.error("All providers failed, stopping")
                     break
                 log.error("Error processing %s: %s", item["path"], e)
     else:
@@ -278,10 +375,15 @@ def translate(since, file_path, max_chars, state_dir, bazarr_db):
 
     # Summary
     total_chars = sum(t["chars"] for t in all_translated)
-    monthly_chars = get_monthly_chars(db)
+    provider_breakdown = get_monthly_chars_by_provider(db)
+    monthly_chars = sum(provider_breakdown.values())
+    provider_str = ", ".join(
+        f"{p}: {c:,}" for p, c in sorted(provider_breakdown.items())
+    )
     click.echo(
         f"Done: {len(all_translated)} translated, {len(all_failed)} failed, "
-        f"{total_chars:,} chars used ({monthly_chars:,} this month)"
+        f"{total_chars:,} chars used ({monthly_chars:,} this month"
+        f"{' — ' + provider_str if provider_str else ''})"
     )
 
     # Discord notification
@@ -301,17 +403,23 @@ def status(state_dir):
     db = _db_path(cfg.state_dir)
     init_db(db)
 
-    monthly = get_monthly_chars(db)
+    provider_breakdown = get_monthly_chars_by_provider(db)
+    monthly = sum(provider_breakdown.values())
     click.echo(f"Monthly usage: {monthly:,} / 500,000 chars ({monthly/5000:.1f}%)")
+    if provider_breakdown:
+        for provider, chars in sorted(provider_breakdown.items()):
+            click.echo(f"  {provider}: {chars:,} chars")
 
     recent = get_recent_translations(db, limit=10)
     if recent:
         click.echo(f"\nRecent translations ({len(recent)}):")
         for r in recent:
+            provider = r.get("provider", PROVIDER_DEEPL)
             click.echo(
                 f"  {r['created_at']} | {r['status']:15s} | "
                 f"{r['source_lang']}->{r['target_lang']} | "
-                f"{r['chars_used']:>6,} chars | {os.path.basename(r['media_path'])}"
+                f"{r['chars_used']:>6,} chars | {provider:6s} | "
+                f"{os.path.basename(r['media_path'])}"
             )
     else:
         click.echo("\nNo translations recorded yet.")
@@ -321,7 +429,10 @@ def status(state_dir):
 def usage():
     """Query DeepL API for remaining quota."""
     cfg = load_config()
-    translator = create_translator(cfg.deepl_api_key)
+    if not cfg.deepl_api_key:
+        click.echo("No DeepL API key configured")
+        return
+    translator = create_deepl_translator(cfg.deepl_api_key)
     usage_data = translator.get_usage()
     if usage_data.character:
         count = usage_data.character.count

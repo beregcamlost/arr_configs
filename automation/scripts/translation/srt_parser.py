@@ -70,3 +70,27 @@ def write_srt(cues: List[Cue]) -> str:
     for i, cue in enumerate(cues, 1):
         blocks.append(f"{i}\n{cue.start} --> {cue.end}\n{cue.text}")
     return "\n\n".join(blocks) + "\n"
+
+
+def batch_cues(cues: List[Cue], batch_size: int = 4000) -> List[List[Cue]]:
+    """Split cues into batches by total character count.
+
+    Each batch stays under batch_size characters (text only).
+    Used by both DeepL and Google translation clients.
+    """
+    if not cues:
+        return []
+    batches = []
+    current_batch = []
+    current_size = 0
+    for cue in cues:
+        text_len = len(cue.text)
+        if current_batch and current_size + text_len > batch_size:
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+        current_batch.append(cue)
+        current_size += text_len
+    if current_batch:
+        batches.append(current_batch)
+    return batches

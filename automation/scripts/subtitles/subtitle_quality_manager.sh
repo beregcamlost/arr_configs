@@ -1466,15 +1466,22 @@ cmd_auto_maintain() {
             debug "SKIP mux (translation source extraction): $srt_basename"
             continue
           fi
-          # Check for .deepl marker (DeepL-translated SRT grace period)
+          # Check for translation marker (.deepl or .gtranslate grace period)
+          local translation_marker=""
           if [[ -f "${srt_file}.deepl" ]]; then
-            local marker_mtime srt_mtime
-            marker_mtime="$(stat -c %Y "${srt_file}.deepl" 2>/dev/null || echo 0)"
+            translation_marker="${srt_file}.deepl"
+          elif [[ -f "${srt_file}.gtranslate" ]]; then
+            translation_marker="${srt_file}.gtranslate"
+          fi
+          if [[ -n "$translation_marker" ]]; then
+            local marker_mtime srt_mtime marker_name
+            marker_name="${translation_marker##*.}"
+            marker_mtime="$(stat -c %Y "$translation_marker" 2>/dev/null || echo 0)"
             srt_mtime="$(stat -c %Y "$srt_file" 2>/dev/null || echo 0)"
             # If SRT was replaced after marker created, human sub found — delete marker and mux
             if [[ "$srt_mtime" -gt "$marker_mtime" ]]; then
-              rm -f "${srt_file}.deepl"
-              log "DeepL marker removed (SRT replaced by human sub): $srt_basename"
+              rm -f "$translation_marker"
+              log "${marker_name} marker removed (SRT replaced by human sub): $srt_basename"
             else
               # Grace period: 7 days (604800 seconds)
               local now marker_age
@@ -1482,13 +1489,13 @@ cmd_auto_maintain() {
               marker_age=$(( now - marker_mtime ))
               if [[ "$marker_age" -lt 604800 ]]; then
                 local days_left=$(( (604800 - marker_age) / 86400 ))
-                debug "SKIP mux (DeepL grace ${days_left}d remaining): $srt_basename"
+                debug "SKIP mux (${marker_name} grace ${days_left}d remaining): $srt_basename"
                 deepl_deferred=$((deepl_deferred + 1))
                 continue
               else
-                # Grace expired — mux the DeepL translation
-                rm -f "${srt_file}.deepl"
-                log "DeepL grace expired, muxing: $srt_basename"
+                # Grace expired — mux the translation
+                rm -f "$translation_marker"
+                log "${marker_name} grace expired, muxing: $srt_basename"
               fi
             fi
           fi
@@ -1719,7 +1726,7 @@ cmd_auto_maintain() {
           el_norm_p15="$(normalize_track_lang "$el_p15")"
           if ! lang_in_set "$el_norm_p15" "$am_profile_set"; then
             if [[ "$DRY_RUN" -eq 0 ]]; then
-              rm -f "$remaining_srt" "${remaining_srt}.deepl"
+              rm -f "$remaining_srt" "${remaining_srt}.deepl" "${remaining_srt}.gtranslate"
             fi
             log "CLEANUP non-profile external SRT: $rb (lang=$el_norm_p15, profile=$am_profile_langs)"
             cleaned_nonprofile=$((cleaned_nonprofile + 1))

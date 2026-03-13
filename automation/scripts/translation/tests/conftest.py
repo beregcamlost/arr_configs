@@ -15,15 +15,27 @@ from translation.db import init_db
 
 @pytest.fixture
 def tmp_db(tmp_path):
-    """Create a temporary SQLite database for testing."""
-    db_path = str(tmp_path / "test_translation.db")
+    """Create a temporary SQLite database for testing.
+
+    Uses 'translation_state.db' name to match translator._db_path().
+    """
+    db_path = str(tmp_path / "translation_state.db")
     init_db(db_path)
     return db_path
 
 
 @pytest.fixture
 def env_config(monkeypatch):
-    """Set up environment variables for Config loading."""
+    """Set up environment variables for Config loading (DeepL available)."""
     monkeypatch.setenv("DEEPL_API_KEY", "test-deepl-key:fx")
+    monkeypatch.setenv("BAZARR_API_KEY", "test-bazarr-key")
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/test")
+
+
+@pytest.fixture
+def env_config_google_only(monkeypatch):
+    """Set up environment variables for Google-only mode (no DeepL key)."""
+    monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "1")
     monkeypatch.setenv("BAZARR_API_KEY", "test-bazarr-key")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/test")

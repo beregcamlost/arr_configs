@@ -235,15 +235,38 @@ except:
 
   # Method 2: DeepL API (sends first 500 chars to detect source language)
   if [[ -n "$deepl_key" ]]; then
-    detected="$(curl -sS -m 10 -X POST 'https://api-free.deepl.com/v2/translate' \
+    local deepl_response
+    deepl_response="$(curl -sS -m 10 -w '\n%{http_code}' -X POST 'https://api-free.deepl.com/v2/translate' \
       -d "auth_key=${deepl_key}" \
       --data-urlencode "text=${text:0:500}" \
-      -d "target_lang=EN" 2>/dev/null \
-      | jq -r '.translations[0].detected_source_language // empty' 2>/dev/null)" || true
-    if [[ -n "$detected" ]]; then
-      printf '%s' "${detected,,}"
-      return 0
+      -d "target_lang=EN" 2>/dev/null)" || true
+    local http_code="${deepl_response##*$'\n'}"
+    local body="${deepl_response%$'\n'*}"
+    if [[ "$http_code" != "456" && -n "$body" ]]; then
+      detected="$(printf '%s' "$body" | jq -r '.translations[0].detected_source_language // empty' 2>/dev/null)" || true
+      if [[ -n "$detected" ]]; then
+        printf '%s' "${detected,,}"
+        return 0
+      fi
     fi
+  fi
+
+  # Method 3: Google Translate API (fallback when DeepL unavailable/quota exceeded)
+  detected="$(python3 -c "
+from googletrans import Translator
+import sys
+try:
+    t = Translator()
+    result = t.detect(sys.argv[1])
+    if result.lang and len(result.lang) <= 5:
+        print(result.lang)
+except:
+    pass
+" "$text" 2>/dev/null)" || true
+
+  if [[ -n "$detected" && ${#detected} -le 5 ]]; then
+    printf '%s' "${detected,,}"
+    return 0
   fi
 
   return 1

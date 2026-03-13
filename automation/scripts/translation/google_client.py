@@ -1,56 +1,45 @@
-"""DeepL API client for subtitle translation."""
+"""Google Translate client for subtitle translation (fallback provider)."""
 
 import logging
 from typing import List, Tuple
 
-import deepl
+from googletrans import Translator
 
 from translation.srt_parser import Cue, batch_cues
 
 log = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZE = 4000  # chars per batch (~4KB)
+DEFAULT_BATCH_SIZE = 4000  # chars per batch
 
 
-def create_translator(api_key: str) -> deepl.Translator:
-    """Create a DeepL Translator instance."""
-    return deepl.Translator(api_key)
-
-
-def get_usage(translator: deepl.Translator) -> dict:
-    """Get current API usage stats."""
-    usage = translator.get_usage()
-    return {
-        "character_count": usage.character.count if usage.character else 0,
-        "character_limit": usage.character.limit if usage.character else 0,
-    }
+def create_translator() -> Translator:
+    """Create a Google Translator instance (no API key needed)."""
+    return Translator()
 
 
 def translate_texts(
-    translator: deepl.Translator,
+    translator: Translator,
     texts: List[str],
     source_lang: str,
     target_lang: str,
 ) -> List[str]:
-    """Translate a list of texts via DeepL API. Returns translated strings."""
+    """Translate a list of texts via Google Translate. Returns translated strings."""
     if not texts:
         return []
-    results = translator.translate_text(
-        texts,
-        source_lang=source_lang,
-        target_lang=target_lang,
-    )
-    return [r.text for r in results]
+    results = translator.translate(texts, src=source_lang, dest=target_lang)
+    if isinstance(results, list):
+        return [r.text for r in results]
+    return [results.text]
 
 
 def translate_srt_cues(
-    translator: deepl.Translator,
+    translator: Translator,
     cues: List[Cue],
     source_lang: str,
     target_lang: str,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> Tuple[List[Cue], int]:
-    """Translate SRT cues via DeepL, batching to stay under size limits.
+    """Translate SRT cues via Google Translate, batching to stay under size limits.
 
     Returns (translated_cues, total_chars_used).
     """
