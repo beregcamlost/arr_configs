@@ -4,6 +4,7 @@ import pytest
 
 from streaming.db import (
     add_exclusion,
+    clear_keep_local_flag,
     flag_stale_item,
     get_active_matches,
     get_active_matches_filtered,
@@ -287,6 +288,59 @@ class TestTouchKeepLocal:
 
         touched = touch_keep_local_items(tmp_db, [(42, "movie")], "2026-03-01T00:00:00Z")
         assert touched == 0
+
+    def test_sets_keep_local_flag(self, tmp_db):
+        """Touch should set keep_local=1 on matched items."""
+        upsert_streaming_item(tmp_db, 550, "movie", 8, "Netflix", "Fight Club",
+                              arr_id=42)
+        touch_keep_local_items(tmp_db, [(42, "movie")], "2026-02-01T00:00:00Z")
+        item = get_streaming_item(tmp_db, 550, "movie", 8)
+        assert item["keep_local"] == 1
+
+
+class TestClearKeepLocalFlag:
+    def test_clears_removed_items(self, tmp_db):
+        """Flag should be cleared for items no longer tagged keep-local."""
+        upsert_streaming_item(tmp_db, 550, "movie", 8, "Netflix", "Fight Club",
+                              arr_id=42)
+        upsert_streaming_item(tmp_db, 862, "movie", 337, "Disney Plus", "Toy Story",
+                              arr_id=43)
+        # Mark both as keep-local
+        touch_keep_local_items(tmp_db, [(42, "movie"), (43, "movie")], "2026-02-01T00:00:00Z")
+        # Now only 42 is still keep-local
+        cleared = clear_keep_local_flag(tmp_db, [(42, "movie")])
+        assert cleared == 1
+        # 42 retains flag
+        assert get_streaming_item(tmp_db, 550, "movie", 8)["keep_local"] == 1
+        # 43 lost flag
+        assert get_streaming_item(tmp_db, 862, "movie", 337)["keep_local"] == 0
+
+    def test_retains_current_items(self, tmp_db):
+        """Items still tagged keep-local should retain flag."""
+        upsert_streaming_item(tmp_db, 550, "movie", 8, "Netflix", "Fight Club",
+                              arr_id=42)
+        touch_keep_local_items(tmp_db, [(42, "movie")], "2026-02-01T00:00:00Z")
+        cleared = clear_keep_local_flag(tmp_db, [(42, "movie")])
+        assert cleared == 0
+        assert get_streaming_item(tmp_db, 550, "movie", 8)["keep_local"] == 1
+
+    def test_handles_empty_set(self, tmp_db):
+        """Empty current set clears all keep-local flags."""
+        upsert_streaming_item(tmp_db, 550, "movie", 8, "Netflix", "Fight Club",
+                              arr_id=42)
+        touch_keep_local_items(tmp_db, [(42, "movie")], "2026-02-01T00:00:00Z")
+        cleared = clear_keep_local_flag(tmp_db, [])
+        assert cleared == 1
+        assert get_streaming_item(tmp_db, 550, "movie", 8)["keep_local"] == 0
+
+    def test_skips_deleted_items(self, tmp_db):
+        """Deleted items should not be affected."""
+        upsert_streaming_item(tmp_db, 550, "movie", 8, "Netflix", "Fight Club",
+                              arr_id=42)
+        touch_keep_local_items(tmp_db, [(42, "movie")], "2026-02-01T00:00:00Z")
+        mark_deleted(tmp_db, 550, "movie", 8)
+        cleared = clear_keep_local_flag(tmp_db, [])
+        assert cleared == 0
 
 
 class TestActiveMatches:

@@ -131,6 +131,32 @@ class TestScan:
         assert result.exit_code == 0, result.output
         assert "Movies checked:  0" in result.output
 
+    @patch("streaming.streaming_checker.clear_keep_local_flag", return_value=0)
+    @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.batch_check")
+    @patch("streaming.streaming_checker.ensure_tag", return_value=4)
+    @patch("streaming.streaming_checker.fetch_series", return_value=[{
+        "tmdb_id": 1399, "arr_id": 20, "title": "Grey's Anatomy", "year": 2005,
+        "path": "/media/tv/Grey's Anatomy", "size_bytes": 50_000_000_000,
+        "tags": [4], "library": "tv", "media_type": "tv",
+        "season_count": 21, "season_numbers": list(range(1, 22)),
+    }])
+    @patch("streaming.streaming_checker.fetch_movies", return_value=[])
+    def test_scan_calls_clear_keep_local(self, mock_movies, mock_series,
+                                          mock_tag, mock_batch, mock_notify,
+                                          mock_clear, runner, env_config, tmp_path):
+        """Scan should call clear_keep_local_flag after touching keep-local items."""
+        db = str(tmp_path / "test.db")
+        mock_batch.return_value = {}
+
+        result = runner.invoke(cli, ["scan", "--db-path", db])
+        assert result.exit_code == 0, result.output
+        mock_clear.assert_called_once()
+        # The call should pass the keep-local IDs
+        args = mock_clear.call_args[0]
+        assert args[0] == db  # db_path
+        assert (20, "tv") in args[1]  # keep_local_ids
+
 
 class TestReport:
     def test_report_empty(self, runner, env_config, tmp_path):

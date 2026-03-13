@@ -82,6 +82,10 @@ def init_db(db_path):
             conn.execute("ALTER TABLE streaming_status ADD COLUMN stale_flagged_at TEXT")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE streaming_status ADD COLUMN keep_local INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
 
 
 def upsert_streaming_item(db_path, tmdb_id, media_type, provider_id, provider_name,
@@ -194,9 +198,37 @@ def touch_keep_local_items(db_path, arr_id_types, timestamp):
         return 0
     with contextlib.closing(_connect(db_path)) as conn:
         cursor = conn.executemany(
-            "UPDATE streaming_status SET last_seen=?, left_at=NULL "
+            "UPDATE streaming_status SET last_seen=?, left_at=NULL, keep_local=1 "
             "WHERE arr_id=? AND media_type=? AND deleted_at IS NULL",
             [(timestamp, arr_id, media_type) for arr_id, media_type in arr_id_types],
+        )
+        count = cursor.rowcount
+        conn.commit()
+    return count
+
+
+def clear_keep_local_flag(db_path, current_keep_local_ids):
+    """Reset keep_local=0 for items no longer tagged keep-local.
+
+    Args:
+        current_keep_local_ids: list of (arr_id, media_type) tuples currently tagged.
+
+    Returns:
+        Number of DB rows cleared.
+    """
+    current_set = set(current_keep_local_ids) if current_keep_local_ids else set()
+    with contextlib.closing(_connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT arr_id, media_type FROM streaming_status "
+            "WHERE keep_local = 1 AND deleted_at IS NULL"
+        ).fetchall()
+        to_clear = [(r[0], r[1]) for r in rows if (r[0], r[1]) not in current_set]
+        if not to_clear:
+            return 0
+        cursor = conn.executemany(
+            "UPDATE streaming_status SET keep_local=0 "
+            "WHERE arr_id=? AND media_type=? AND deleted_at IS NULL",
+            to_clear,
         )
         count = cursor.rowcount
         conn.commit()

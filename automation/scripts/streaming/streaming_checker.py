@@ -28,6 +28,7 @@ from streaming.arr_client import (
 from streaming.config import PROVIDER_MAP, Config, load_config
 from streaming.db import (
     add_exclusion,
+    clear_keep_local_flag,
     flag_stale_item,
     get_active_matches,
     get_active_matches_filtered,
@@ -271,6 +272,11 @@ def scan(country, providers, dry_run, verbose, db_path, skip_verify):
         touched = touch_keep_local_items(cfg.db_path, keep_local_ids, scan_time)
         if touched:
             log.info("Touched %d keep-local DB records", touched)
+
+    # Clear keep_local flag for items that lost the tag
+    cleared = clear_keep_local_flag(cfg.db_path, keep_local_ids)
+    if cleared:
+        log.info("Cleared keep_local flag from %d DB records", cleared)
 
     # 3b. Filter out manually excluded items
     exclusion_set = get_exclusions(cfg.db_path)

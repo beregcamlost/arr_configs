@@ -194,7 +194,7 @@ load_streaming_candidates() {
   while IFS= read -r spath; do
     [[ -n "$spath" ]] && _STREAMING_PATHS["$spath"]=1
   done < <(sqlite3 -cmd ".timeout 5000" "$STREAMING_STATE_DB" \
-    "SELECT path FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL;" 2>/dev/null)
+    "SELECT path FROM streaming_status WHERE left_at IS NULL AND deleted_at IS NULL AND COALESCE(keep_local,0) = 0;" 2>/dev/null)
 }
 
 # Pure bash lookup — safe inside pipelines (no subprocess spawning)
