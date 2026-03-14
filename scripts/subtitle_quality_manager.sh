@@ -29,6 +29,8 @@ RADARR_URL="${RADARR_URL:-http://127.0.0.1:7878/radarr}"
 RADARR_KEY="${RADARR_KEY:-}"
 DEEPL_API_KEY="${DEEPL_API_KEY:-}"
 BAZARR_MIN_SCORE="${BAZARR_MIN_SCORE:-80}"
+COMPLIANCE_FORMAT="text"
+COMPLIANCE_VERBOSE=0
 
 WATERMARK_PATTERNS="galaxytv|yify|yts|opensubtitles|addic7ed|subscene|podnapisi|sub[sz]cene"
 
@@ -42,6 +44,7 @@ Commands:
   strip          Remove specific embedded subtitle tracks from MKV/MP4/M4V
   auto-maintain  Automated mux/strip with safety checks (quick + full mode)
   enqueue        Add file path(s) to pending work queue for next auto-maintain run
+  compliance     Report subtitle compliance against Bazarr profiles for all media
 
 Common options:
   --path DIR            Media directory to process (required for audit/mux/strip)
@@ -78,6 +81,14 @@ Examples:
   subtitle_quality_manager.sh auto-maintain --path-prefix /media --since 15 --dry-run
   subtitle_quality_manager.sh auto-maintain --path-prefix /media --keep-profile-langs
   subtitle_quality_manager.sh enqueue /path/to/file.mkv [/path/to/file2.mkv ...]
+  subtitle_quality_manager.sh compliance --path-prefix /media
+  subtitle_quality_manager.sh compliance --path-prefix /media --format json
+  subtitle_quality_manager.sh compliance --path-prefix /media --verbose
+
+Compliance options:
+  --path-prefix DIR   Root media directory to scan (required)
+  --format FORMAT     Output format: text or json (default: text)
+  --verbose           Include OK files in text output
 EOF
 }
 
@@ -108,6 +119,21 @@ init_state_db() {
       enqueued_at INTEGER NOT NULL,
       source TEXT DEFAULT 'unknown'
     );
+    CREATE TABLE IF NOT EXISTS needs_upgrade (
+      file_path      TEXT    NOT NULL,
+      lang           TEXT    NOT NULL,
+      forced         INTEGER NOT NULL DEFAULT 0,
+      current_rating TEXT    NOT NULL DEFAULT 'BAD',
+      current_score  INTEGER NOT NULL DEFAULT 0,
+      source         TEXT    NOT NULL DEFAULT 'external',
+      first_seen_ts  INTEGER NOT NULL,
+      last_retry_ts  INTEGER NOT NULL DEFAULT 0,
+      retry_count    INTEGER NOT NULL DEFAULT 0,
+      resolved_ts    INTEGER,
+      PRIMARY KEY (file_path, lang, forced)
+    );
+    CREATE INDEX IF NOT EXISTS idx_nu_last_retry ON needs_upgrade(last_retry_ts);
+    CREATE INDEX IF NOT EXISTS idx_nu_resolved   ON needs_upgrade(resolved_ts);
     PRAGMA journal_mode=WAL;
     PRAGMA busy_timeout=30000;
   " </dev/null >/dev/null 2>&1
@@ -1039,6 +1065,55 @@ check_deepl_quota() {
 }
 
 
+run_upgrade_retries() {
+  local state_db="$1"
+  local retried=0 resolved=0 abandoned=0
+
+  while IFS=$'\t' read -r nu_path nu_lang nu_forced nu_rating nu_score nu_retries; do
+    [[ -z "$nu_path" ]] && continue
+    [[ ! -f "$nu_path" ]] && { resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"; continue; }
+
+    # Check if file already has a good sub for this lang now
+    local nu_stem nu_dir
+    nu_dir="$(dirname "$nu_path")"
+    nu_stem="$(basename "${nu_path%.*}")"
+    local nu_duration
+    nu_duration="$(get_video_duration "$nu_path")"
+
+    touch_upgrade_retry "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
+
+    # Check if retry count exceeded
+    if [[ "$nu_retries" -ge 29 ]]; then
+      log "UPGRADE_ABANDONED: max retries reached lang=$nu_lang forced=$nu_forced: $(basename "$nu_path")"
+      # Mark as resolved with special timestamp to indicate abandonment
+      resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
+      abandoned=$((abandoned + 1))
+      continue
+    fi
+
+    # Try providers
+    if [[ -n "$BAZARR_API_KEY" ]] && try_providers_for_lang "$nu_path" "$nu_lang" "$nu_duration"; then
+      log "UPGRADE_RESOLVED: via providers lang=$nu_lang: $(basename "$nu_path")"
+      resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
+      resolved=$((resolved + 1))
+      continue
+    fi
+
+    # Try translation
+    if try_translate_inline "$nu_path" "$nu_lang"; then
+      log "UPGRADE_RESOLVED: via translation lang=$nu_lang: $(basename "$nu_path")"
+      resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
+      resolved=$((resolved + 1))
+      continue
+    fi
+
+    retried=$((retried + 1))
+    log "UPGRADE_RETRY: still no replacement lang=$nu_lang retry=$((nu_retries + 1)): $(basename "$nu_path")"
+  done < <(drain_upgrade_candidates "$state_db" 86400 30 500)
+
+  [[ $((retried + resolved + abandoned)) -gt 0 ]] && log "upgrade-retries: retried=$retried resolved=$resolved abandoned=$abandoned"
+}
+
 cmd_auto_maintain() {
   load_streaming_candidates
   log "auto-maintain: path=$PATH_PREFIX_ROOT since=$SINCE_MINUTES keep_profile_langs=$KEEP_PROFILE_LANGS bloat_threshold=$BLOAT_THRESHOLD dry_run=$DRY_RUN"
@@ -1046,6 +1121,11 @@ cmd_auto_maintain() {
   local state_db="$STATE_DIR/subtitle_quality_state.db"
   init_state_db "$state_db"
   _DEEPL_QUOTA_CACHED=""  # Reset per-run cache
+
+  # Run upgrade retries in full mode only (daily 1 AM)
+  if [[ "$SINCE_MINUTES" -eq 0 ]]; then
+    run_upgrade_retries "$state_db"
+  fi
 
   # Drain pending work queue (files enqueued by import hook / dedupe)
   local -A pending_set=()
@@ -1284,6 +1364,23 @@ cmd_auto_maintain() {
       fi
     fi
 
+    # --- Phase 0.5: Consolidated 1-best-per-lang enforcement ---
+    local -a eopl_strip_indices=()
+    declare -A eopl_kept_langs=()
+    if enforce_one_per_lang "$mkv_file" "${duration%.*}" "$DRY_RUN" eopl_strip_indices eopl_kept_langs; then
+      if [[ ${#eopl_strip_indices[@]} -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
+        if strip_embedded_by_indices "$mkv_file" eopl_strip_indices; then
+          stripped_tracks=$((stripped_tracks + ${#eopl_strip_indices[@]}))
+          stripped_files=$((stripped_files + 1))
+          file_modified=1
+          log "PHASE_0.5: stripped ${#eopl_strip_indices[@]} loser embedded track(s): $basename"
+        fi
+      elif [[ ${#eopl_strip_indices[@]} -gt 0 ]]; then
+        log "[DRY-RUN] PHASE_0.5: would strip ${#eopl_strip_indices[@]} loser embedded track(s): $basename"
+        stripped_tracks=$((stripped_tracks + ${#eopl_strip_indices[@]}))
+      fi
+    fi
+
     # --- Phase 1: Audit & mux external SRTs ---
     # Build embedded language map for collision detection
     declare -A embedded_lang_idx_p1=()
@@ -1304,6 +1401,11 @@ cmd_auto_maintain() {
       read -r cues first_sec last_sec mojibake watermarks <<<"$analysis"
       rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
 
+      # Normalize once for all branches
+      local ext_lang_norm ext_forced_num=0
+      ext_lang_norm="$(normalize_track_lang "$ext_lang")"
+      [[ "$srt_basename" == *.forced.srt ]] && ext_forced_num=1
+
       case "$rating" in
         GOOD)
           # Skip translation-source extractions (embedded original stays intact)
@@ -1311,10 +1413,12 @@ cmd_auto_maintain() {
             debug "SKIP mux (translation source extraction): $srt_basename"
             continue
           fi
-          # Check for translation marker (.deepl or .gtranslate grace period)
+          # Check for translation marker (.deepl, .gemini, or .gtranslate grace period)
           local translation_marker=""
           if [[ -f "${srt_file}.deepl" ]]; then
             translation_marker="${srt_file}.deepl"
+          elif [[ -f "${srt_file}.gemini" ]]; then
+            translation_marker="${srt_file}.gemini"
           elif [[ -f "${srt_file}.gtranslate" ]]; then
             translation_marker="${srt_file}.gtranslate"
           fi
@@ -1345,22 +1449,20 @@ cmd_auto_maintain() {
             fi
           fi
           # Profile filter: skip non-profile languages (they're kept as DeepL sources, not muxed)
-          local srt_norm_p1
-          srt_norm_p1="$(normalize_track_lang "$ext_lang")"
-          if [[ -n "$am_profile_set" ]] && ! lang_in_set "$srt_norm_p1" "$am_profile_set"; then
-            debug "SKIP non-profile external SRT: $srt_basename (lang=$srt_norm_p1, profile=$am_profile_langs)"
+          if [[ -n "$am_profile_set" ]] && ! lang_in_set "$ext_lang_norm" "$am_profile_set"; then
+            debug "SKIP non-profile external SRT: $srt_basename (lang=$ext_lang_norm, profile=$am_profile_langs)"
             continue
           fi
 
           # Pre-mux collision check: only strip embedded if external is actually better
-          if [[ -n "${embedded_lang_idx_p1[$srt_norm_p1]:-}" ]]; then
-            if check_embedded_collision "$mkv_file" "$srt_norm_p1" \
-                 "${embedded_lang_idx_p1[$srt_norm_p1]}" "${embedded_lang_codec_p1[$srt_norm_p1]:-unknown}" \
+          if [[ -n "${embedded_lang_idx_p1[$ext_lang_norm]:-}" ]]; then
+            if check_embedded_collision "$mkv_file" "$ext_lang_norm" \
+                 "${embedded_lang_idx_p1[$ext_lang_norm]}" "${embedded_lang_codec_p1[$ext_lang_norm]:-unknown}" \
                  "$rating" "$cues" "$duration" "$srt_basename"; then
-              premux_strip_indices_p1+=("${embedded_lang_idx_p1[$srt_norm_p1]}")
-              log "COLLISION lang=$srt_norm_p1: will replace embedded idx=${embedded_lang_idx_p1[$srt_norm_p1]} with external SRT: $srt_basename"
+              premux_strip_indices_p1+=("${embedded_lang_idx_p1[$ext_lang_norm]}")
+              log "COLLISION lang=$ext_lang_norm: will replace embedded idx=${embedded_lang_idx_p1[$ext_lang_norm]} with external SRT: $srt_basename"
             fi
-            unset "embedded_lang_idx_p1[$srt_norm_p1]"
+            unset "embedded_lang_idx_p1[$ext_lang_norm]"
           fi
 
           good_srts+=("$srt_file")
@@ -1368,6 +1470,13 @@ cmd_auto_maintain() {
           ;;
         WARN)
           warned=$((warned + 1))
+          # Mark WARN subs for upgrade — usable but subpar
+          if [[ "$DRY_RUN" -eq 0 ]]; then
+            local warn_score
+            warn_score="$(subtitle_quality_score "$srt_file" "${duration%.*}" "$ext_forced_num")"
+            upsert_needs_upgrade "$state_db" "$mkv_file" "$ext_lang_norm" "$ext_forced_num" "WARN" "$warn_score" "external"
+            log "MARK_WARN: usable but subpar, marked for upgrade lang=$ext_lang_norm: $basename"
+          fi
           ;;
         BAD)
           if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -1376,17 +1485,13 @@ cmd_auto_maintain() {
             rm -f "$srt_file"
             log "DELETED BAD external: $srt_basename (starting provider cycle)"
             bad_deleted=$((bad_deleted + 1))
-            file_modified=1
-
-            local ext_lang_norm
-            ext_lang_norm="$(normalize_track_lang "$ext_lang")"
+            file_modified=1  # Deletion itself triggers Emby refresh + Bazarr rescan
 
             if [[ -n "$BAZARR_API_KEY" ]] && try_providers_for_lang "$mkv_file" "$ext_lang_norm" "$duration"; then
               log "PROVIDER_CYCLE: resolved via providers for lang=$ext_lang_norm: $basename"
             else
-              # All providers failed or no API key — try DeepL translation
+              # Providers failed — try embedded extraction + DeepL translation
               log "PROVIDER_CYCLE: falling back to DeepL translation for lang=$ext_lang_norm: $basename"
-              # Extract embedded sub as translation source if available
               if [[ -n "$am_profile_set" ]]; then
                 local emb_json_bad emb_count_bad
                 emb_json_bad="$(get_embedded_subs "$mkv_file")"
@@ -1406,7 +1511,6 @@ cmd_auto_maintain() {
                   bi_forced="${_bad_forced[$bi]}"
                   local bi_norm
                   bi_norm="$(normalize_track_lang "$bi_lang")"
-                  # Extract a profile-language embedded track as translation source
                   if lang_in_set "$bi_norm" "$am_profile_set" && is_text_sub_codec "$bi_codec" && [[ "$bi_forced" -ne 1 ]]; then
                     local src_srt="${dir}/${name_stem}.${bi_norm}.srt"
                     if [[ ! -f "$src_srt" ]]; then
@@ -1512,6 +1616,70 @@ cmd_auto_maintain() {
       fi
     fi
 
+    # --- Phase 1.75: Translate from non-profile sources before cleanup ---
+    # For each profile language still missing, find best non-profile external SRT
+    # as translation source and run DeepL synchronously (before Phase 1.5 deletes them)
+    if [[ -n "$am_profile_set" ]]; then
+      # Re-check which profile langs are still missing
+      local emb_json_p175
+      emb_json_p175="$(get_embedded_subs "$mkv_file")"
+      declare -A emb_langs_p175=()
+      while IFS= read -r el; do
+        [[ -z "$el" ]] && continue
+        el="$(normalize_track_lang "$el")"
+        emb_langs_p175["$el"]=1
+      done < <(jq -r '.[].tags.language // "und"' <<<"$emb_json_p175")
+
+      declare -A ext_langs_p175=()
+      while IFS= read -r remaining_srt; do
+        [[ -z "$remaining_srt" ]] && continue
+        local rb_p175 el_p175
+        rb_p175="$(basename "$remaining_srt")"
+        el_p175="$(extract_srt_lang "$rb_p175" "$name_stem")"
+        [[ -z "$el_p175" ]] && el_p175="und"
+        el_p175="$(normalize_track_lang "$el_p175")"
+        ext_langs_p175["$el_p175"]=1
+      done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null)
+
+      IFS=',' read -ra _profile_codes_p175 <<< "$am_profile_langs"
+      for pc in "${_profile_codes_p175[@]}"; do
+        local pc_norm_p175
+        pc_norm_p175="$(normalize_track_lang "$pc")"
+        # Skip if already have this lang (embedded or external)
+        [[ -n "${emb_langs_p175[$pc_norm_p175]:-}" ]] && continue
+        [[ -n "${ext_langs_p175[$pc_norm_p175]:-}" ]] && continue
+
+        # Find best non-profile external SRT as translation source
+        local best_np_srt="" best_np_score=-999999
+        while IFS= read -r np_srt; do
+          [[ -z "$np_srt" ]] && continue
+          local np_base np_lang_p175
+          np_base="$(basename "$np_srt")"
+          np_lang_p175="$(extract_srt_lang "$np_base" "$name_stem")"
+          [[ -z "$np_lang_p175" ]] && np_lang_p175="und"
+          np_lang_p175="$(normalize_track_lang "$np_lang_p175")"
+          # Only use non-profile SRTs as source
+          lang_in_set "$np_lang_p175" "$am_profile_set" && continue
+          local np_score
+          np_score="$(subtitle_quality_score "$np_srt" "${duration%.*}" 0)"
+          if [[ "$np_score" -gt "$best_np_score" ]]; then
+            best_np_score="$np_score"
+            best_np_srt="$np_srt"
+          fi
+        done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null)
+
+        if [[ -n "$best_np_srt" ]] && [[ "$DRY_RUN" -eq 0 ]]; then
+          log "PHASE_1.75: translating from non-profile source $(basename "$best_np_srt") for missing lang=$pc_norm_p175: $basename"
+          if try_translate_inline "$mkv_file" "$pc_norm_p175"; then
+            log "PHASE_1.75: SUCCESS translated lang=$pc_norm_p175: $basename"
+            file_modified=1
+          fi
+        elif [[ -n "$best_np_srt" ]]; then
+          log "[DRY-RUN] PHASE_1.75: would translate from $(basename "$best_np_srt") for lang=$pc_norm_p175: $basename"
+        fi
+      done
+    fi
+
     # --- Phase 1.5: Clean up non-profile external SRTs ---
     # Once all profile languages are satisfied (embedded or external), non-profile
     # SRTs are no longer needed as DeepL translation sources — safe to remove.
@@ -1564,7 +1732,7 @@ cmd_auto_maintain() {
           el_norm_p15="$(normalize_track_lang "$el_p15")"
           if ! lang_in_set "$el_norm_p15" "$am_profile_set"; then
             if [[ "$DRY_RUN" -eq 0 ]]; then
-              rm -f "$remaining_srt" "${remaining_srt}.deepl" "${remaining_srt}.gtranslate"
+              rm -f "$remaining_srt" "${remaining_srt}.deepl" "${remaining_srt}.gemini" "${remaining_srt}.gtranslate"
             fi
             log "CLEANUP non-profile external SRT: $rb (lang=$el_norm_p15, profile=$am_profile_langs)"
             cleaned_nonprofile=$((cleaned_nonprofile + 1))
@@ -1829,8 +1997,8 @@ cmd_auto_maintain() {
     [[ "$extracted_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"📤 Extracted\",\"value\":\"${extracted_nonprofile} track(s)\",\"inline\":true}"
     [[ "$cleaned_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"🧹 Cleaned\",\"value\":\"${cleaned_nonprofile} SRT(s)\",\"inline\":true}"
     [[ "$bad_deleted" -gt 0 ]] && _am_fields+=",{\"name\":\"🗑️ BAD Deleted\",\"value\":\"${bad_deleted} SRT(s)\",\"inline\":true}"
+    [[ "$warned" -gt 0 ]] && _am_fields+=",{\"name\":\"⚠️ WARN Upgrade\",\"value\":\"${warned} SRT(s)\",\"inline\":true}"
     [[ "$deepl_deferred" -gt 0 ]] && _am_fields+=",{\"name\":\"⏳ DeepL Deferred\",\"value\":\"${deepl_deferred}\",\"inline\":true}"
-    [[ "$warned" -gt 0 ]] && _am_fields+=",{\"name\":\"⚠️ Manual Review\",\"value\":\"${warned}\",\"inline\":true}"
     local _skips=""
     [[ "$skipped_converter" -gt 0 ]] && _skips+="🔄 converter: ${skipped_converter}  "
     [[ "$skipped_playback" -gt 0 ]] && _skips+="▶️ playback: ${skipped_playback}  "
@@ -1867,6 +2035,117 @@ cmd_auto_maintain() {
   fi
 }
 
+cmd_compliance() {
+  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  init_state_db "$state_db"
+
+  local format="${COMPLIANCE_FORMAT:-text}"
+  local verbose="${COMPLIANCE_VERBOSE:-0}"
+  local total=0 compliant=0 missing=0 needs_upg=0 no_profile=0
+  local -a results=()
+
+  log "compliance: scanning path=$PATH_PREFIX_ROOT format=$format verbose=$verbose"
+
+  while IFS= read -r mkv_file; do
+    [[ -z "$mkv_file" ]] && continue
+    total=$((total + 1))
+
+    local basename dir name_stem
+    basename="$(basename "$mkv_file")"
+    dir="$(dirname "$mkv_file")"
+    name_stem="${basename%.*}"
+
+    # Resolve Bazarr profile
+    local profile_langs=""
+    profile_langs="$(resolve_bazarr_profile_langs "$mkv_file" "$BAZARR_DB")" || profile_langs=""
+    if [[ -z "$profile_langs" ]]; then
+      results+=("[NO_PROFILE] $basename")
+      no_profile=$((no_profile + 1))
+      continue
+    fi
+    local profile_set
+    profile_set="$(expand_lang_codes "$profile_langs")"
+
+    # Get embedded subs
+    local emb_json
+    emb_json="$(get_embedded_subs "$mkv_file")"
+    declare -A comp_emb_langs=()
+    while IFS= read -r el; do
+      [[ -z "$el" ]] && continue
+      el="$(normalize_track_lang "$el")"
+      comp_emb_langs["$el"]=1
+    done < <(jq -r '.[].tags.language // "und"' <<<"$emb_json")
+
+    # Get external SRTs
+    declare -A comp_ext_langs=()
+    while IFS= read -r srt; do
+      [[ -z "$srt" ]] && continue
+      local sb sl
+      sb="$(basename "$srt")"
+      sl="$(extract_srt_lang "$sb" "$name_stem")"
+      [[ -z "$sl" ]] && sl="und"
+      sl="$(normalize_track_lang "$sl")"
+      comp_ext_langs["$sl"]=1
+    done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null)
+
+    # Check each profile language
+    local file_status="OK" file_missing="" file_upgrade=""
+    IFS=',' read -ra _pc <<< "$profile_langs"
+    for pc in "${_pc[@]}"; do
+      local pcn
+      pcn="$(normalize_track_lang "$pc")"
+      if [[ -n "${comp_emb_langs[$pcn]:-}" ]] || [[ -n "${comp_ext_langs[$pcn]:-}" ]]; then
+        # Has sub — check if it's in needs_upgrade
+        local nu_row
+        nu_row="$(sqm_db "$state_db" "SELECT current_rating FROM needs_upgrade WHERE file_path='$(sql_escape "$mkv_file")' AND lang='$(sql_escape "$pcn")' AND resolved_ts IS NULL LIMIT 1;" 2>/dev/null || true)"
+        if [[ -n "$nu_row" ]]; then
+          file_status="UPGRADE"
+          file_upgrade="${file_upgrade:+$file_upgrade,}$pcn"
+        fi
+      else
+        file_status="MISSING"
+        file_missing="${file_missing:+$file_missing,}$pcn"
+      fi
+    done
+
+    case "$file_status" in
+      OK)      compliant=$((compliant + 1)); [[ "$verbose" -eq 1 ]] && results+=("[OK] $basename") ;;
+      MISSING) missing=$((missing + 1));     results+=("[MISSING:$file_missing] $basename") ;;
+      UPGRADE) needs_upg=$((needs_upg + 1)); results+=("[UPGRADE:$file_upgrade] $basename") ;;
+    esac
+
+  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" 2>/dev/null | sort)
+
+  # Output
+  local rate=0
+  [[ "$total" -gt 0 ]] && rate="$(awk "BEGIN { printf \"%.1f\", ($compliant / $total) * 100 }")"
+
+  if [[ "$format" == "json" ]]; then
+    jq -nc \
+      --argjson total "$total" \
+      --argjson compliant "$compliant" \
+      --argjson missing "$missing" \
+      --argjson needs_upgrade "$needs_upg" \
+      --argjson no_profile "$no_profile" \
+      --arg rate "$rate" \
+      '{total: $total, compliant: $compliant, missing: $missing, needs_upgrade: $needs_upgrade, no_profile: $no_profile, compliance_rate: $rate}'
+  else
+    printf '\n=== Subtitle Compliance Report ===\n'
+    printf 'Total files:     %d\n' "$total"
+    printf 'Compliant:       %d\n' "$compliant"
+    printf 'Missing:         %d\n' "$missing"
+    printf 'Needs upgrade:   %d\n' "$needs_upg"
+    printf 'No profile:      %d\n' "$no_profile"
+    printf 'Compliance rate: %s%%\n\n' "$rate"
+
+    if [[ ${#results[@]} -gt 0 ]]; then
+      for r in "${results[@]}"; do
+        printf '%s\n' "$r"
+      done
+    fi
+  fi
+}
+
 cmd_enqueue() {
   local state_db="$STATE_DIR/subtitle_quality_state.db"
   local count=0
@@ -1890,7 +2169,7 @@ COMMAND="${1:-}"
 shift
 
 case "$COMMAND" in
-  audit|mux|strip|auto-maintain|enqueue) ;;
+  audit|mux|strip|auto-maintain|enqueue|compliance) ;;
   --help|-h) usage; exit 0 ;;
   *) echo "Unknown command: $COMMAND" >&2; usage; exit 1 ;;
 esac
@@ -1926,18 +2205,24 @@ else
       --since)       SINCE_MINUTES="${2:-0}"; shift 2 ;;
       --emby-url)    EMBY_URL="${2:-}"; shift 2 ;;
       --emby-api-key) EMBY_API_KEY="${2:-}"; shift 2 ;;
+      --format)      COMPLIANCE_FORMAT="${2:-text}"; shift 2 ;;
+      --verbose)     COMPLIANCE_VERBOSE=1; shift ;;
       --help|-h)    usage; exit 0 ;;
       *)            echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
   done
 fi
 
-if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]] && [[ "$COMMAND" != "enqueue" ]]; then
+if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]] && [[ "$COMMAND" != "enqueue" ]] && [[ "$COMMAND" != "compliance" ]]; then
   echo "--path is required." >&2; exit 1
 fi
 
 if [[ "$COMMAND" == "auto-maintain" ]] && [[ -z "$PATH_PREFIX_ROOT" ]]; then
   echo "--path-prefix is required for auto-maintain." >&2; exit 1
+fi
+
+if [[ "$COMMAND" == "compliance" ]] && [[ -z "$PATH_PREFIX_ROOT" ]]; then
+  echo "--path-prefix is required for compliance." >&2; exit 1
 fi
 
 if [[ "$COMMAND" == "strip" ]] && [[ -z "$TRACK_TARGET" ]] && [[ -z "$KEEP_ONLY" ]]; then
@@ -1956,6 +2241,7 @@ case "$COMMAND" in
   strip)        cmd_strip ;;
   auto-maintain) cmd_auto_maintain ;;
   enqueue)      cmd_enqueue ;;
+  compliance)   cmd_compliance ;;
 esac
 
 fi

@@ -33,7 +33,7 @@
 [![Transmission](https://img.shields.io/badge/Transmission-✓-C00?style=flat-square)](https://transmissionbt.com)
 
 [![Cron Jobs](https://img.shields.io/badge/cron%20jobs-21%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/tests-417%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
+[![Tests](https://img.shields.io/badge/tests-496%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
 [![Updated](https://img.shields.io/badge/last%20updated-2026--03--14-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
@@ -159,10 +159,10 @@ graph TB
 
 | System | Language | Tests | Cron Freq | Notifications |
 |--------|----------|-------|-----------|---------------|
-| 🎬 Subtitle Manager | Bash | 143 ✅ | 5 min / 10 min / daily | ✅ Discord |
+| 🎬 Subtitle Manager | Bash | 159 ✅ | 5 min / 10 min / daily | ✅ Discord |
 | 🔄 Codec Manager | Bash | — | 15 min / 3 AM daily | ✅ Discord |
-| 📺 Streaming Checker | Python | 233 ✅ | Weekly / Monthly | ✅ Discord |
-| 🌐 DeepL Translator | Python | 41 ✅ | 30 min | ✅ Discord |
+| 📺 Streaming Checker | Python | 239 ✅ | Weekly / Monthly | ✅ Discord |
+| 🌐 DeepL Translator | Python | 98 ✅ | 30 min | ✅ Discord |
 | 👻 Zombie Reaper | Bash | — | 2 min | ✅ Discord |
 | 🧹 Arr Cleanup | Bash | — | 30 min | — |
 | 📈 Trending Auto-Add | Python | 21 ✅ | Weekly (DISABLED) | — |
@@ -175,9 +175,9 @@ graph TB
 | Metric | Value |
 |--------|-------|
 | 📜 Total cron jobs | 21 |
-| 🧪 Total tests | 417 passing |
+| 🧪 Total tests | 496 passing |
 | 🌐 DeepL budget | 400K chars/month (Pro, Google fallback after) |
-| 💾 State databases | 4 (codec, streaming, translation, bazarr) |
+| 💾 State databases | 5 (codec, streaming, translation, subtitle-quality, bazarr) |
 | 🔌 External APIs | 6 (Sonarr, Radarr, Bazarr, Emby, TMDB, DeepL) |
 | 📡 Discord webhooks | All systems |
 | 🎞️ Target codec | H.264 CRF19 + AAC 192k stereo |
@@ -195,7 +195,7 @@ graph TB
 
 | File | Purpose |
 |------|---------|
-| `subtitle_quality_manager.sh` | Main entry point — `audit`, `mux`, `strip`, `auto-maintain` subcommands |
+| `subtitle_quality_manager.sh` | Main entry point — `audit`, `mux`, `strip`, `auto-maintain`, `compliance` subcommands |
 | `lib_subtitle_common.sh` | Shared library — language helpers, codec helpers, path classifiers |
 | `arr_profile_extract_on_import.sh` | Unified Sonarr + Radarr import hook |
 | `library_subtitle_dedupe.sh` | Removes duplicate/low-quality external subs |
@@ -212,8 +212,16 @@ flowchart LR
         B2["Strip non-profile\nembedded tracks"]
     end
 
-    subgraph P1["🛡️ Phase 1 — Collision Detection"]
-        C["Pre-mux check:\nstrip tracks that would\ncollide with better externals"]
+    subgraph P05["⚖️ Phase 0.5 — Enforce 1-Best"]
+        B3["enforce_one_per_lang:\nscore all sources per lang\nkeep best, strip/delete losers"]
+    end
+
+    subgraph P1["🛡️ Phase 1 — Collision + Quality"]
+        C["Pre-mux collision check\nWARN → mark for upgrade\nBAD → delete + provider cycle"]
+    end
+
+    subgraph P175["🌐 Phase 1.75 — Translate Sources"]
+        C2["Translate from non-profile\nSRTs before cleanup"]
     end
 
     subgraph P15["🗑️ Phase 1.5 — Source Cleanup"]
@@ -226,18 +234,23 @@ flowchart LR
 
     F([✅ Clean MKV\n+ Quality Subs])
 
-    B --> B2 --> C --> D --> E --> F
+    B --> B2 --> B3 --> C --> C2 --> D --> E --> F
 
     style P0 fill:#1a3a1a,stroke:#22c55e,color:#fff
+    style P05 fill:#2a3a1a,stroke:#84cc16,color:#fff
     style P1 fill:#3a2a1a,stroke:#f59e0b,color:#fff
+    style P175 fill:#1a2a3a,stroke:#818cf8,color:#fff
     style P15 fill:#3a1a1a,stroke:#ef4444,color:#fff
     style P2 fill:#1a2a3a,stroke:#06b6d4,color:#fff
 ```
 
 ### ✨ Features
 
-- 🔍 **Language detection** — Python `langdetect` (offline, fast) → DeepL API fallback; renames `und` tracks to actual language
-- 🏷️ **Quality scoring** — `subtitle_quality_score()` ranks embedded tracks; deduplication keeps the best
+- 🔍 **Language detection** — Python `langdetect` (offline, fast) → DeepL API → Google Translate fallback; renames `und` tracks to actual language
+- 🏷️ **Quality scoring** — `subtitle_quality_score()` ranks all sources; `enforce_one_per_lang()` keeps 1-best per language
+- ⚠️ **WARN/BAD handling** — WARN subs kept but marked for upgrade; BAD subs deleted immediately with provider/translation cycle
+- 🔄 **Upgrade retries** — `needs_upgrade` SQLite table tracks WARN/MISSING subs for daily retry via providers + DeepL
+- 📊 **Compliance reporting** — `compliance` subcommand audits entire library against Bazarr profiles (text + JSON output)
 - 💧 **Watermark stripping** — removes common watermark lines from SRT files
 - 🎭 **HI/SDH/CC awareness** — `subtitle_group_key()` looks past hearing-impaired qualifiers for dedup grouping
 - 🌊 **Streaming candidate skip** — pre-loaded associative array pattern; zero subprocess calls in hot loops
@@ -359,7 +372,7 @@ flowchart TD
 ### 🧪 Test Coverage
 
 ```
-233 tests passing
+239 tests passing
 ├── 96  streaming core tests
 ├── 33  keep-local filtering tests
 ├── 21  trending auto-add tests
@@ -369,7 +382,7 @@ flowchart TD
 ├── 12  Discord notification tests
 ├── 10  stale flag/delete tests
 ├──  8  CLI argument tests
-└──  6  miscellaneous utility tests
+└── 12  miscellaneous utility tests
 ```
 
 ---
@@ -416,11 +429,12 @@ Import Hook (background, async)
 ### 🧪 Test Coverage
 
 ```
-41 tests passing
+98 tests passing
 ├── CLI argument handling
 ├── Source SRT selection logic
 ├── State DB cooldown enforcement
 ├── Bazarr DB profile + missing_subtitles parsing
+├── Gemini provider tests
 └── Language code mapping validation
 ```
 
@@ -616,7 +630,7 @@ sequenceDiagram
 |-------|-----------|---------|
 | 🐚 Shell | Bash 5+ (`set -euo pipefail`) | Core automation scripts |
 | 🐍 Python | Python 3 + Click | Streaming checker + translator |
-| 🗄️ State | SQLite (4 databases) | Codec plans, streaming index, translation state |
+| 🗄️ State | SQLite (5 databases) | Codec plans, streaming index, translation, subtitle quality state |
 | 🎞️ Media | ffprobe / ffmpeg | Media analysis and conversion |
 | 🔗 *arr APIs | Sonarr · Radarr · Bazarr | Library management |
 | 📺 Server | Emby | Media server |

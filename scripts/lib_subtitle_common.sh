@@ -191,6 +191,19 @@ normalize_track_lang() {
   esac
 }
 
+# Extract language code from SRT filename: "stem.en.forced.srt" → "en"
+# Usage: extract_srt_lang "stem.en.forced.srt" "stem"
+extract_srt_lang() {
+  local filename="$1" stem="$2"
+  local lang="${filename#"${stem}".}"
+  lang="${lang%.srt}"
+  lang="${lang%.forced}"
+  lang="${lang%.hi}"
+  lang="${lang%.cc}"
+  lang="${lang%.sdh}"
+  echo "$lang"
+}
+
 # Detect the language of an SRT file.
 # Tries langdetect (offline, fast) first, falls back to DeepL API detection.
 # Returns 2-letter language code on stdout, or returns 1 if detection fails.
@@ -222,15 +235,38 @@ except:
 
   # Method 2: DeepL API (sends first 500 chars to detect source language)
   if [[ -n "$deepl_key" ]]; then
-    detected="$(curl -sS -m 10 -X POST 'https://api-free.deepl.com/v2/translate' \
+    local deepl_response
+    deepl_response="$(curl -sS -m 10 -w '\n%{http_code}' -X POST 'https://api-free.deepl.com/v2/translate' \
       -d "auth_key=${deepl_key}" \
       --data-urlencode "text=${text:0:500}" \
-      -d "target_lang=EN" 2>/dev/null \
-      | jq -r '.translations[0].detected_source_language // empty' 2>/dev/null)" || true
-    if [[ -n "$detected" ]]; then
-      printf '%s' "${detected,,}"
-      return 0
+      -d "target_lang=EN" 2>/dev/null)" || true
+    local http_code="${deepl_response##*$'\n'}"
+    local body="${deepl_response%$'\n'*}"
+    if [[ "$http_code" != "456" && -n "$body" ]]; then
+      detected="$(printf '%s' "$body" | jq -r '.translations[0].detected_source_language // empty' 2>/dev/null)" || true
+      if [[ -n "$detected" ]]; then
+        printf '%s' "${detected,,}"
+        return 0
+      fi
     fi
+  fi
+
+  # Method 3: Google Translate API (fallback when DeepL unavailable/quota exceeded)
+  detected="$(python3 -c "
+from googletrans import Translator
+import sys
+try:
+    t = Translator()
+    result = t.detect(sys.argv[1])
+    if result.lang and len(result.lang) <= 5:
+        print(result.lang)
+except:
+    pass
+" "$text" 2>/dev/null)" || true
+
+  if [[ -n "$detected" && ${#detected} -le 5 ]]; then
+    printf '%s' "${detected,,}"
+    return 0
   fi
 
   return 1
@@ -978,6 +1014,309 @@ strip_all_embedded_subs() {
   else
     rm -f "$tmp_out" 2>/dev/null
     log "WARN: strip_all_embedded_subs ffmpeg failed for $(basename "$file")"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# needs_upgrade DB helpers (shared by import hook + auto-maintain)
+# ---------------------------------------------------------------------------
+
+# State DB path — callers may override before calling these functions
+: "${SUBTITLE_STATE_DIR:=/APPBOX_DATA/storage/.subtitle-quality-state}"
+
+# Upsert a needs-upgrade entry for a file/lang/forced tuple.
+# $1=state_db  $2=file_path  $3=lang  $4=forced(0|1)  $5=rating  $6=score  $7=source(embedded|external)
+upsert_needs_upgrade() {
+  local db="$1" fp="$2" lang="$3" forced="$4" rating="$5" score="$6" src="${7:-external}"
+  local now
+  now="$(date +%s)"
+  sqlite3 -cmd ".timeout 30000" "$db" "
+    INSERT INTO needs_upgrade (file_path, lang, forced, current_rating, current_score, source, first_seen_ts, last_retry_ts, retry_count, resolved_ts)
+    VALUES ('$(sql_escape "$fp")', '$(sql_escape "$lang")', $forced, '$rating', $score, '$src', $now, 0, 0, NULL)
+    ON CONFLICT(file_path, lang, forced) DO UPDATE SET
+      current_rating = '$rating',
+      current_score  = $score,
+      source         = '$src',
+      resolved_ts    = NULL;
+  " </dev/null 2>/dev/null || true
+}
+
+# Mark a needs-upgrade entry as resolved.
+# $1=state_db  $2=file_path  $3=lang  $4=forced(0|1)
+resolve_needs_upgrade() {
+  local db="$1" fp="$2" lang="$3" forced="$4"
+  local now
+  now="$(date +%s)"
+  sqlite3 -cmd ".timeout 30000" "$db" "
+    UPDATE needs_upgrade SET resolved_ts = $now
+    WHERE file_path = '$(sql_escape "$fp")' AND lang = '$(sql_escape "$lang")' AND forced = $forced AND resolved_ts IS NULL;
+  " </dev/null 2>/dev/null || true
+}
+
+# Query entries due for retry: unresolved, last_retry older than threshold, retry_count < max.
+# $1=state_db  $2=retry_threshold_seconds(default 86400)  $3=max_retries(default 30)  $4=limit(default 500)
+# Output: tab-separated lines: file_path\tlang\tforced\tcurrent_rating\tcurrent_score\tretry_count
+drain_upgrade_candidates() {
+  local db="$1"
+  local threshold="${2:-86400}"
+  local max_retries="${3:-30}"
+  local limit="${4:-500}"
+  local cutoff
+  cutoff="$(( $(date +%s) - threshold ))"
+  sqlite3 -separator $'\t' -cmd ".timeout 30000" "$db" "
+    SELECT file_path, lang, forced, current_rating, current_score, retry_count
+    FROM needs_upgrade
+    WHERE resolved_ts IS NULL
+      AND last_retry_ts < $cutoff
+      AND retry_count < $max_retries
+    ORDER BY last_retry_ts ASC
+    LIMIT $limit;
+  " </dev/null 2>/dev/null || true
+}
+
+# Update last_retry_ts and increment retry_count for a needs-upgrade entry.
+# $1=state_db  $2=file_path  $3=lang  $4=forced(0|1)
+touch_upgrade_retry() {
+  local db="$1" fp="$2" lang="$3" forced="$4"
+  local now
+  now="$(date +%s)"
+  sqlite3 -cmd ".timeout 30000" "$db" "
+    UPDATE needs_upgrade SET last_retry_ts = $now, retry_count = retry_count + 1
+    WHERE file_path = '$(sql_escape "$fp")' AND lang = '$(sql_escape "$lang")' AND forced = $forced;
+  " </dev/null 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# enforce_one_per_lang — unified 1-best-per-lang consolidation
+# ---------------------------------------------------------------------------
+
+# enforce_one_per_lang FILE_PATH MEDIA_SECONDS DRY_RUN STRIP_INDICES_NAMEREF KEPT_LANGS_NAMEREF
+#
+# Scores all subtitle sources (embedded + external) for a media file,
+# groups by (normalized_lang, forced), keeps only the best per group.
+# Losers: external → rm -f (unless dry_run); embedded → append index to STRIP_INDICES_NAMEREF.
+# Populates KEPT_LANGS_NAMEREF["lang|forced"] = "embedded" or "external".
+#
+# Returns 0 on success, 1 if ffprobe fails.
+enforce_one_per_lang() {
+  local file_path="$1"
+  local media_seconds="$2"
+  local dry_run="${3:-0}"
+  declare -n _strip_indices="$4"
+  declare -n _kept_langs="$5"
+
+  [[ -f "$file_path" ]] || return 1
+
+  local dir stem
+  dir="$(dirname "$file_path")"
+  stem="$(basename "${file_path%.*}")"
+
+  # --- Collect all candidates ---
+  # Each candidate: key="lang|forced"  value entries with score, size, source, path/index
+  declare -A group_best_score=()
+  declare -A group_best_size=()
+  declare -A group_best_source=()   # "embedded" or "external"
+  declare -A group_best_ref=()      # stream index (embedded) or file path (external)
+  # Track all losers
+  local -a ext_losers=()
+  local -a emb_loser_indices=()
+
+  # Temp files for embedded extraction
+  local -a tmp_files=()
+  trap 'rm -f "${tmp_files[@]}" 2>/dev/null' RETURN
+
+  # 1. Probe all embedded sub streams
+  local emb_json
+  emb_json="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$file_path" 2>/dev/null)" || return 1
+  local emb_count
+  emb_count="$(jq '.streams | length' <<<"$emb_json" 2>/dev/null)" || emb_count=0
+
+  local -a emb_indices=() emb_langs=() emb_codecs=() emb_forceds=() emb_scores=() emb_sizes=()
+
+  for ((i=0; i<emb_count; i++)); do
+    local ei_idx ei_lang ei_codec ei_forced
+    ei_idx="$(jq -r ".streams[$i].index" <<<"$emb_json")"
+    ei_lang="$(jq -r ".streams[$i].tags.language // \"und\"" <<<"$emb_json")"
+    ei_codec="$(jq -r ".streams[$i].codec_name" <<<"$emb_json")"
+    ei_forced="$(jq -r "if .streams[$i].disposition.forced == 1 then 1 else 0 end" <<<"$emb_json")"
+
+    local ei_norm
+    ei_norm="$(normalize_track_lang "$ei_lang")"
+    emb_indices+=("$ei_idx")
+    emb_langs+=("$ei_norm")
+    emb_codecs+=("$ei_codec")
+    emb_forceds+=("$ei_forced")
+
+    # Score: text codec → extract to temp SRT and score; bitmap → score = -1
+    local ei_score=-1 ei_size=0
+    if is_text_sub_codec "$ei_codec"; then
+      local tmp_srt="${dir}/.eopl_emb_${$}_${ei_idx}.srt"
+      tmp_files+=("$tmp_srt")
+      if ffmpeg -nostdin -loglevel error -y -i "$file_path" -map "0:${ei_idx}" -c:s srt "$tmp_srt" </dev/null 2>/dev/null && [[ -s "$tmp_srt" ]]; then
+        ei_score="$(subtitle_quality_score "$tmp_srt" "$media_seconds" "$ei_forced")"
+        ei_size="$(file_size_bytes "$tmp_srt")"
+      fi
+    fi
+    emb_scores+=("$ei_score")
+    emb_sizes+=("$ei_size")
+  done
+
+  # 2. Glob all external SRTs
+  local -a ext_paths=() ext_langs=() ext_forceds=() ext_scores=() ext_sizes=()
+  shopt -s nullglob
+  local -a srt_files=("${dir}/${stem}".*.srt)
+  shopt -u nullglob
+
+  for srt_file in "${srt_files[@]}"; do
+    [[ -f "$srt_file" ]] || continue
+    local srt_base ext_lang ext_forced_num=0
+    srt_base="$(basename "$srt_file")"
+    ext_lang="$(extract_srt_lang "$srt_base" "$stem")"
+    [[ -z "$ext_lang" ]] && ext_lang="und"
+
+    # Detect forced from filename
+    [[ "$srt_base" == *".forced."* ]] && ext_forced_num=1
+
+    local ext_norm
+    ext_norm="$(normalize_track_lang "$ext_lang")"
+
+    local ext_score ext_size
+    ext_score="$(subtitle_quality_score "$srt_file" "$media_seconds" "$ext_forced_num")"
+    ext_size="$(file_size_bytes "$srt_file")"
+
+    ext_paths+=("$srt_file")
+    ext_langs+=("$ext_norm")
+    ext_forceds+=("$ext_forced_num")
+    ext_scores+=("$ext_score")
+    ext_sizes+=("$ext_size")
+  done
+
+  # 3. Group by (lang, forced) key — find best per group
+  # Process embedded candidates
+  for ((i=0; i<emb_count; i++)); do
+    local key="${emb_langs[$i]}|${emb_forceds[$i]}"
+    local score="${emb_scores[$i]}" size="${emb_sizes[$i]}"
+
+    if [[ -z "${group_best_score[$key]:-}" ]]; then
+      group_best_score["$key"]="$score"
+      group_best_size["$key"]="$size"
+      group_best_source["$key"]="embedded"
+      group_best_ref["$key"]="${emb_indices[$i]}"
+    else
+      local prev_score="${group_best_score[$key]}"
+      local prev_size="${group_best_size[$key]}"
+      # New candidate wins if: higher score, or same score + larger size, or same score+size + external preferred
+      if [[ "$score" -gt "$prev_score" ]] || { [[ "$score" -eq "$prev_score" ]] && [[ "$size" -gt "$prev_size" ]]; }; then
+        # Current wins — previous becomes loser
+        if [[ "${group_best_source[$key]}" == "embedded" ]]; then
+          emb_loser_indices+=("${group_best_ref[$key]}")
+        else
+          ext_losers+=("${group_best_ref[$key]}")
+        fi
+        group_best_score["$key"]="$score"
+        group_best_size["$key"]="$size"
+        group_best_source["$key"]="embedded"
+        group_best_ref["$key"]="${emb_indices[$i]}"
+      else
+        # Current loses
+        emb_loser_indices+=("${emb_indices[$i]}")
+      fi
+    fi
+  done
+
+  # Process external candidates
+  for ((i=0; i<${#ext_paths[@]}; i++)); do
+    local key="${ext_langs[$i]}|${ext_forceds[$i]}"
+    local score="${ext_scores[$i]}" size="${ext_sizes[$i]}"
+
+    if [[ -z "${group_best_score[$key]:-}" ]]; then
+      group_best_score["$key"]="$score"
+      group_best_size["$key"]="$size"
+      group_best_source["$key"]="external"
+      group_best_ref["$key"]="${ext_paths[$i]}"
+    else
+      local prev_score="${group_best_score[$key]}"
+      local prev_size="${group_best_size[$key]}"
+      # External wins over embedded at same score+size (tiebreak: prefer external)
+      if [[ "$score" -gt "$prev_score" ]] || { [[ "$score" -eq "$prev_score" ]] && [[ "$size" -gt "$prev_size" ]]; } || { [[ "$score" -eq "$prev_score" ]] && [[ "$size" -eq "$prev_size" ]] && [[ "${group_best_source[$key]}" == "embedded" ]]; }; then
+        # Current wins — previous becomes loser
+        if [[ "${group_best_source[$key]}" == "embedded" ]]; then
+          emb_loser_indices+=("${group_best_ref[$key]}")
+        else
+          ext_losers+=("${group_best_ref[$key]}")
+        fi
+        group_best_score["$key"]="$score"
+        group_best_size["$key"]="$size"
+        group_best_source["$key"]="external"
+        group_best_ref["$key"]="${ext_paths[$i]}"
+      else
+        # Current loses
+        ext_losers+=("${ext_paths[$i]}")
+      fi
+    fi
+  done
+
+  # 4. Apply: remove losers, populate output refs
+  for path in "${ext_losers[@]}"; do
+    if [[ "$dry_run" -eq 0 ]]; then
+      rm -f "$path"
+      log "ENFORCE_ONE_PER_LANG: removed loser external: $(basename "$path")"
+    else
+      log "[DRY-RUN] ENFORCE_ONE_PER_LANG: would remove loser external: $(basename "$path")"
+    fi
+  done
+
+  for idx in "${emb_loser_indices[@]}"; do
+    _strip_indices+=("$idx")
+    log "ENFORCE_ONE_PER_LANG: marking loser embedded idx=$idx for strip"
+  done
+
+  # 5. Populate kept langs
+  for key in "${!group_best_source[@]}"; do
+    _kept_langs["$key"]="${group_best_source[$key]}"
+  done
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selective embedded strip (strip specific indices, keep everything else)
+# ---------------------------------------------------------------------------
+
+# strip_embedded_by_indices FILE_PATH INDEX_ARRAY_NAMEREF
+# Returns 0 on success, 1 on failure/no-op.
+strip_embedded_by_indices() {
+  local file="$1"
+  declare -n _indices="$2"
+
+  [[ -f "$file" ]] || return 1
+  [[ ${#_indices[@]} -eq 0 ]] && return 1
+
+  local -a strip_cmd=(ffmpeg -y -v quiet -i "$file" -map 0)
+  for idx in "${_indices[@]}"; do
+    strip_cmd+=(-map "-0:${idx}")
+  done
+  strip_cmd+=(-c copy)
+
+  local ext="${file##*.}"
+  local tmp_out="${file%.*}.striptmp.${ext}"
+  if "${strip_cmd[@]}" "$tmp_out" </dev/null 2>/dev/null; then
+    local orig_size new_size
+    orig_size="$(stat -c '%s' "$file" 2>/dev/null || echo 0)"
+    new_size="$(stat -c '%s' "$tmp_out" 2>/dev/null || echo 0)"
+    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]]; then
+      mv -f "$tmp_out" "$file"
+      log "SELECTIVE_STRIP: removed ${#_indices[@]} embedded track(s) from $(basename "$file")"
+      return 0
+    else
+      rm -f "$tmp_out"
+      log "WARN: selective strip produced suspicious output (orig=${orig_size} new=${new_size}), skipping"
+      return 1
+    fi
+  else
+    rm -f "$tmp_out" 2>/dev/null
+    log "WARN: selective strip ffmpeg failed for $(basename "$file")"
     return 1
   fi
 }

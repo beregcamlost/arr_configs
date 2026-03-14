@@ -260,10 +260,60 @@ main() {
     done
   fi
 
-  # Strip ALL embedded subtitle tracks — after extraction, external SRTs are
-  # the source of truth.  Removing embedded tracks eliminates Bazarr seeing
-  # duplicates (e.g. "two en files") and keeps containers clean.
-  strip_all_embedded_subs "$MEDIA_PATH" || log "WARN: strip_all_embedded_subs failed (non-fatal)"
+  # --- enforce_one_per_lang: consolidate to 1-best per language ---
+  local media_secs
+  media_secs="$(media_duration_seconds "$MEDIA_PATH")"
+  [[ -z "$media_secs" ]] && media_secs=0
+  local -a eopl_strip_indices=()
+  declare -A eopl_kept_langs=()
+  enforce_one_per_lang "$MEDIA_PATH" "$media_secs" 0 eopl_strip_indices eopl_kept_langs
+
+  # Selective strip: remove embedded tracks that lost in enforce_one_per_lang
+  # AND remaining non-profile embedded tracks (after translation in 4C)
+  # KEEP profile-lang embedded tracks that won their group
+  local emb_json_sel emb_count_sel
+  emb_json_sel="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$MEDIA_PATH" 2>/dev/null \
+    | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und")}, forced: (.disposition.forced // 0)}]')"
+  emb_count_sel="$(jq 'length' <<<"$emb_json_sel")"
+  local -a selective_strip_indices=()
+
+  # Add enforce_one_per_lang losers
+  for idx in "${eopl_strip_indices[@]}"; do
+    selective_strip_indices+=("$idx")
+  done
+
+  # Add remaining non-profile embedded tracks
+  if [[ -n "$profile_set" ]] && [[ "$emb_count_sel" -gt 0 ]]; then
+    for ((i=0; i<emb_count_sel; i++)); do
+      local sel_idx sel_lang sel_forced
+      sel_idx="$(jq -r ".[$i].index" <<<"$emb_json_sel")"
+      sel_lang="$(jq -r ".[$i].tags.language" <<<"$emb_json_sel")"
+      sel_forced="$(jq -r ".[$i].forced" <<<"$emb_json_sel")"
+      local sel_norm
+      sel_norm="$(normalize_track_lang "$sel_lang")"
+      local sel_key="${sel_norm}|${sel_forced}"
+
+      # Skip if this track won its group in enforce_one_per_lang AND is a profile lang
+      if [[ "${eopl_kept_langs[$sel_key]:-}" == "embedded" ]] && lang_in_set "$sel_norm" "$profile_set"; then
+        log "KEEP embedded winner: idx=$sel_idx lang=$sel_norm (profile language)"
+        continue
+      fi
+
+      # Check if already in the strip list (from eopl losers)
+      local already_listed=0
+      for existing_idx in "${selective_strip_indices[@]}"; do
+        [[ "$existing_idx" == "$sel_idx" ]] && { already_listed=1; break; }
+      done
+      [[ "$already_listed" -eq 1 ]] && continue
+
+      # Non-profile or non-winning embedded → strip
+      selective_strip_indices+=("$sel_idx")
+    done
+  fi
+
+  if [[ ${#selective_strip_indices[@]} -gt 0 ]]; then
+    strip_embedded_by_indices "$MEDIA_PATH" selective_strip_indices || log "WARN: selective strip failed (non-fatal)"
+  fi
 
   # Trigger Emby refresh for the imported file
   if [[ "$WRITES" -gt 0 ]] && [[ -n "${EMBY_URL:-}" && -n "${EMBY_API_KEY:-}" ]]; then
@@ -316,17 +366,64 @@ main() {
       done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
     fi
 
-    # DeepL translation fallback — for profile languages still missing an
-    # external SRT after Bazarr search, translate via DeepL from best
-    # available source.  Runs in background to not block import.
-    (
-      sleep 10  # let Bazarr search complete + download first
-      source /config/berenstuff/.env
-      PYTHONPATH=/config/berenstuff/automation/scripts \
-        python3 /config/berenstuff/automation/scripts/translation/translator.py \
-        translate --file "$MEDIA_PATH"
-    ) >> /config/berenstuff/automation/logs/deepl_translate.log 2>&1 </dev/null &
-    disown
+    # Synchronous translation — for profile languages still missing after
+    # Bazarr search, translate from best available non-profile external SRT.
+    # Non-profile SRTs are still on disk at this point (not yet cleaned up).
+    local stem_tr dir_tr
+    stem_tr="$(basename "${MEDIA_PATH%.*}")"
+    dir_tr="$(dirname "$MEDIA_PATH")"
+    while IFS='|' read -r tr_lang tr_forced; do
+      [[ -z "$tr_lang" ]] && continue
+      tr_lang="${tr_lang,,}"
+      # Skip if external SRT already exists
+      if [[ -n "$(find "$dir_tr" -maxdepth 1 -name "${stem_tr}.${tr_lang}.srt" -type f 2>/dev/null | head -1)" ]]; then
+        continue
+      fi
+      # Find best non-profile external SRT as translation source
+      local best_src="" best_src_score=-999999
+      while IFS= read -r src_srt; do
+        [[ -z "$src_srt" ]] && continue
+        local src_base src_lang_tr
+        src_base="$(basename "$src_srt")"
+        src_lang_tr="$(extract_srt_lang "$src_base" "$stem_tr")"
+        [[ -z "$src_lang_tr" ]] && src_lang_tr="und"
+        src_lang_tr="$(normalize_track_lang "$src_lang_tr")"
+        # Only non-profile SRTs as source
+        lang_in_set "$src_lang_tr" "$profile_set" && continue
+        local src_score_val
+        src_score_val="$(subtitle_quality_score "$src_srt" "$media_secs" 0)"
+        if [[ "$src_score_val" -gt "$best_src_score" ]]; then
+          best_src_score="$src_score_val"
+          best_src="$src_srt"
+        fi
+      done < <(find "$dir_tr" -maxdepth 1 -name "${stem_tr}.*.srt" -type f 2>/dev/null)
+      if [[ -n "$best_src" ]]; then
+        log "SYNC_TRANSLATE: translating from $(basename "$best_src") for missing lang=$tr_lang"
+        (
+          source /config/berenstuff/.env
+          PYTHONPATH=/config/berenstuff/automation/scripts \
+            python3 /config/berenstuff/automation/scripts/translation/translator.py \
+            translate --file "$MEDIA_PATH"
+        ) >> /config/berenstuff/automation/logs/deepl_translate.log 2>&1 </dev/null
+        # Break after first translation attempt (translator handles all missing langs)
+        break
+      fi
+    done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
+
+    # Mark remaining profile language gaps for upgrade retry
+    local upgrade_state_db="/APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db"
+    while IFS='|' read -r gap_lang gap_forced; do
+      [[ -z "$gap_lang" ]] && continue
+      gap_lang="${gap_lang,,}"
+      local gap_forced_num=0
+      [[ "$gap_forced" == "true" ]] && gap_forced_num=1
+      # Skip if SRT exists
+      if [[ -n "$(find "$dir_tr" -maxdepth 1 -name "${stem_tr}.${gap_lang}*.srt" -type f 2>/dev/null | head -1)" ]]; then
+        continue
+      fi
+      upsert_needs_upgrade "$upgrade_state_db" "$MEDIA_PATH" "$gap_lang" "$gap_forced_num" "MISSING" 0 "none"
+      log "UPGRADE_MARK: missing profile lang=$gap_lang forced=$gap_forced_num for upgrade retry"
+    done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
   fi
 
   # Enqueue for codec conversion at highest priority (background, non-blocking)
