@@ -1311,10 +1311,12 @@ cmd_auto_maintain() {
             debug "SKIP mux (translation source extraction): $srt_basename"
             continue
           fi
-          # Check for translation marker (.deepl or .gtranslate grace period)
+          # Check for translation marker (.deepl, .gemini, or .gtranslate grace period)
           local translation_marker=""
           if [[ -f "${srt_file}.deepl" ]]; then
             translation_marker="${srt_file}.deepl"
+          elif [[ -f "${srt_file}.gemini" ]]; then
+            translation_marker="${srt_file}.gemini"
           elif [[ -f "${srt_file}.gtranslate" ]]; then
             translation_marker="${srt_file}.gtranslate"
           fi
@@ -1564,7 +1566,7 @@ cmd_auto_maintain() {
           el_norm_p15="$(normalize_track_lang "$el_p15")"
           if ! lang_in_set "$el_norm_p15" "$am_profile_set"; then
             if [[ "$DRY_RUN" -eq 0 ]]; then
-              rm -f "$remaining_srt" "${remaining_srt}.deepl" "${remaining_srt}.gtranslate"
+              rm -f "$remaining_srt" "${remaining_srt}.deepl" "${remaining_srt}.gemini" "${remaining_srt}.gtranslate"
             fi
             log "CLEANUP non-profile external SRT: $rb (lang=$el_norm_p15, profile=$am_profile_langs)"
             cleaned_nonprofile=$((cleaned_nonprofile + 1))

@@ -1,19 +1,22 @@
-"""Tests for DeepL → Google Translate fallback logic."""
+"""Tests for DeepL -> Gemini -> Google Translate fallback logic."""
 
 import os
 from unittest.mock import MagicMock, patch, call
+import translation.translator as translator_mod
+# Disable date-based DeepL skip for tests
+translator_mod.DEEPL_SKIP_UNTIL = None
 from translation.translator import (
     _translate_cues_with_fallback, translate_file, _deepl_quota_exceeded,
 )
 from translation.config import Config
 from translation.srt_parser import Cue
-import translation.translator as translator_mod
 
 
-def _make_cfg(deepl_key="test:fx", google_enabled=True):
+def _make_cfg(deepl_key="test:fx", google_enabled=True, gemini_keys=None):
     return Config(
         deepl_api_key=deepl_key,
         google_translate_enabled=google_enabled,
+        gemini_api_keys=gemini_keys or [],
         state_dir="/tmp/test-state",
         bazarr_db="/tmp/test-bazarr.db",
     )
@@ -113,6 +116,77 @@ class TestTranslateCuesWithFallback:
         )
         assert provider == "google"  # skipped DeepL entirely
 
+    @patch("translation.gemini_client.translate_srt_cues")
+    @patch("translation.translator.deepl_translate_srt_cues")
+    def test_deepl_quota_falls_back_to_gemini(self, mock_deepl, mock_gemini):
+        """When DeepL quota exceeded, falls back to Gemini."""
+        translator_mod._deepl_quota_exceeded = False
+        translator_mod._gemini_quota_exceeded = False
+        cfg = _make_cfg(gemini_keys=["key1", "key2"])
+        cues = _make_cues()
+        mock_deepl.side_effect = Exception("Quota exceeded (HTTP 456)")
+        mock_gemini.return_value = (cues, 18)
+
+        result_cues, chars, provider = _translate_cues_with_fallback(
+            cfg, cues, "en", "es", MagicMock(), None
+        )
+        assert provider == "gemini"
+        assert translator_mod._deepl_quota_exceeded is True
+
+    @patch("translation.google_client.create_translator")
+    @patch("translation.google_client.translate_srt_cues")
+    @patch("translation.gemini_client.translate_srt_cues")
+    @patch("translation.translator.deepl_translate_srt_cues")
+    def test_full_chain_deepl_gemini_google(self, mock_deepl, mock_gemini,
+                                             mock_google, mock_create_google):
+        """Full chain: DeepL fails -> Gemini fails -> Google succeeds."""
+        from translation.gemini_client import GeminiQuotaExhausted
+        translator_mod._deepl_quota_exceeded = False
+        translator_mod._gemini_quota_exceeded = False
+        cfg = _make_cfg(gemini_keys=["key1"])
+        cues = _make_cues()
+        mock_deepl.side_effect = Exception("Quota exceeded (HTTP 456)")
+        mock_gemini.side_effect = GeminiQuotaExhausted("all keys exhausted")
+        mock_google.return_value = (cues, 18)
+        mock_create_google.return_value = MagicMock()
+
+        result_cues, chars, provider = _translate_cues_with_fallback(
+            cfg, cues, "en", "es", MagicMock(), None
+        )
+        assert provider == "google"
+        assert translator_mod._deepl_quota_exceeded is True
+        assert translator_mod._gemini_quota_exceeded is True
+
+    @patch("translation.google_client.translate_srt_cues")
+    def test_gemini_quota_flag_skips_gemini(self, mock_google):
+        """Once Gemini quota flag is set, Gemini is skipped."""
+        translator_mod._deepl_quota_exceeded = True
+        translator_mod._gemini_quota_exceeded = True
+        cfg = _make_cfg(deepl_key="", gemini_keys=["key1"])
+        cues = _make_cues()
+        mock_google_translator = MagicMock()
+        mock_google.return_value = (cues, 18)
+
+        result_cues, chars, provider = _translate_cues_with_fallback(
+            cfg, cues, "en", "es", None, mock_google_translator
+        )
+        assert provider == "google"
+
+    @patch("translation.gemini_client.translate_srt_cues")
+    def test_gemini_success_direct(self, mock_gemini):
+        """Gemini succeeds when DeepL has no key."""
+        translator_mod._deepl_quota_exceeded = True
+        translator_mod._gemini_quota_exceeded = False
+        cfg = _make_cfg(deepl_key="", gemini_keys=["key1", "key2"])
+        cues = _make_cues()
+        mock_gemini.return_value = (cues, 18)
+
+        result_cues, chars, provider = _translate_cues_with_fallback(
+            cfg, cues, "en", "es", None, None
+        )
+        assert provider == "gemini"
+        assert chars == 18
+
 
 class TestTranslateFileMarkers:
     """Tests for provider-specific marker files."""
@@ -189,4 +263,43 @@ class TestTranslateFileMarkers:
         assert len(t) == 1
         assert t[0]["provider"] == "deepl"
         assert os.path.exists(str(tmp_path / "Movie.es.srt.deepl"))
+        assert not os.path.exists(str(tmp_path / "Movie.es.srt.gtranslate"))
+
+    @patch("translation.translator._translate_cues_with_fallback")
+    @patch("translation.translator._resolve_profile_for_path")
+    @patch("translation.translator.get_profile_langs")
+    @patch("translation.translator.find_missing_langs_on_disk")
+    @patch("translation.translator.find_best_source_srt")
+    @patch("translation.translator.is_on_cooldown")
+    @patch("translation.translator.record_translation")
+    def test_gemini_marker_file(self, mock_record, mock_cooldown, mock_source,
+                                 mock_missing, mock_profile_langs, mock_profile,
+                                 mock_translate, tmp_path):
+        """Gemini translations create .gemini marker."""
+        translator_mod._deepl_quota_exceeded = False
+        translator_mod._gemini_quota_exceeded = False
+        cfg = _make_cfg(gemini_keys=["key1"])
+        cfg.state_dir = str(tmp_path / "state")
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        from translation.db import init_db
+        init_db(os.path.join(cfg.state_dir, "translation_state.db"))
+
+        video = tmp_path / "Movie.mkv"
+        video.touch()
+        source_srt = tmp_path / "Movie.en.srt"
+        source_srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n\n")
+
+        mock_profile.return_value = 1
+        mock_profile_langs.return_value = ["es"]
+        mock_missing.return_value = ["es"]
+        mock_source.return_value = str(source_srt)
+        mock_cooldown.return_value = False
+        translated_cues = [Cue(1, "00:00:01,000", "00:00:02,000", "Hola")]
+        mock_translate.return_value = (translated_cues, 5, "gemini")
+
+        t, f = translate_file(cfg, None, str(video))
+        assert len(t) == 1
+        assert t[0]["provider"] == "gemini"
+        assert os.path.exists(str(tmp_path / "Movie.es.srt.gemini"))
+        assert not os.path.exists(str(tmp_path / "Movie.es.srt.deepl"))
         assert not os.path.exists(str(tmp_path / "Movie.es.srt.gtranslate"))

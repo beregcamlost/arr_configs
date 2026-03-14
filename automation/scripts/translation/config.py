@@ -1,14 +1,21 @@
 """Configuration for the subtitle translator."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
 
 DEFAULT_BAZARR_URL = "http://127.0.0.1:6767/bazarr"
 DEFAULT_BAZARR_DB = "/opt/bazarr/data/db/bazarr.db"
 DEFAULT_STATE_DIR = "/APPBOX_DATA/storage/.translation-state"
 
+# DeepL quota reset date — skip DeepL until this date (inclusive)
+# Set via DEEPL_SKIP_UNTIL env var (YYYY-MM-DD) or None to disable
+_skip_raw = os.environ.get("DEEPL_SKIP_UNTIL", "2026-04-13").strip()
+DEEPL_SKIP_UNTIL = date.fromisoformat(_skip_raw) if _skip_raw else None
+
 # Provider constants
 PROVIDER_DEEPL = "deepl"
+PROVIDER_GEMINI = "gemini"
 PROVIDER_GOOGLE = "google"
 
 # Bazarr 2-letter code → DeepL target language code
@@ -127,6 +134,56 @@ GOOGLE_LANG_MAP = {
     "tl": "tl",
 }
 
+# Bazarr 2-letter code → full language name for Gemini prompting
+# Gemini uses natural language names (supports all languages via prompting)
+GEMINI_LANG_MAP = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Simplified Chinese",
+    "zt": "Traditional Chinese",
+    "sv": "Swedish",
+    "da": "Danish",
+    "fi": "Finnish",
+    "el": "Greek",
+    "cs": "Czech",
+    "ro": "Romanian",
+    "hu": "Hungarian",
+    "sk": "Slovak",
+    "bg": "Bulgarian",
+    "tr": "Turkish",
+    "id": "Indonesian",
+    "uk": "Ukrainian",
+    "ar": "Arabic",
+    "nb": "Norwegian",
+    "et": "Estonian",
+    "lv": "Latvian",
+    "lt": "Lithuanian",
+    "sl": "Slovenian",
+    "hi": "Hindi",
+    "th": "Thai",
+    "vi": "Vietnamese",
+    "ms": "Malay",
+    "he": "Hebrew",
+    "fa": "Persian",
+    "sr": "Serbian",
+    "hr": "Croatian",
+    "ca": "Catalan",
+    "tl": "Filipino",
+}
+
+# Merged set of all supported target/source language codes (for quick "any provider" checks)
+ALL_SUPPORTED_LANGS = frozenset(DEEPL_LANG_MAP) | frozenset(GEMINI_LANG_MAP) | frozenset(GOOGLE_LANG_MAP)
+ALL_SUPPORTED_SOURCE_LANGS = frozenset(DEEPL_SOURCE_LANG_MAP) | frozenset(GEMINI_LANG_MAP) | frozenset(GOOGLE_LANG_MAP)
+
 
 @dataclass
 class Config:
@@ -137,6 +194,7 @@ class Config:
     bazarr_db: str = DEFAULT_BAZARR_DB
     state_dir: str = DEFAULT_STATE_DIR
     google_translate_enabled: bool = True
+    gemini_api_keys: list = field(default_factory=list)
 
 
 def load_config(
@@ -148,9 +206,16 @@ def load_config(
     deepl_key = os.environ.get("DEEPL_API_KEY", "")
     google_enabled = os.environ.get("GOOGLE_TRANSLATE_ENABLED", "1") != "0"
 
-    if not deepl_key and not google_enabled:
+    gemini_keys = []
+    for var in ("GEMINI_API_KEY_1", "GEMINI_API_KEY_2"):
+        key = os.environ.get(var, "").strip()
+        if key:
+            gemini_keys.append(key)
+
+    if not deepl_key and not gemini_keys and not google_enabled:
         raise ValueError(
-            "DEEPL_API_KEY is required when Google Translate is disabled"
+            "No translation provider available: set DEEPL_API_KEY, "
+            "GEMINI_API_KEY_1/2, or enable Google Translate"
         )
 
     return Config(
@@ -161,4 +226,5 @@ def load_config(
         bazarr_db=bazarr_db or DEFAULT_BAZARR_DB,
         state_dir=state_dir or DEFAULT_STATE_DIR,
         google_translate_enabled=google_enabled,
+        gemini_api_keys=gemini_keys,
     )

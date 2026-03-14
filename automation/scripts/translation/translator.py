@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # automation/scripts/translation/translator.py
-"""Subtitle translator CLI with DeepL + Google Translate fallback."""
+"""Subtitle translator CLI with DeepL -> Gemini -> Google fallback chain."""
 
 import logging
 import os
@@ -8,11 +8,15 @@ import sys
 
 import click
 
+from datetime import date
+
 from translation.config import (
     Config, load_config,
-    DEEPL_LANG_MAP, DEEPL_SOURCE_LANG_MAP,
+    ALL_SUPPORTED_LANGS, ALL_SUPPORTED_SOURCE_LANGS,
+    DEEPL_LANG_MAP, DEEPL_SOURCE_LANG_MAP, DEEPL_SKIP_UNTIL,
+    GEMINI_LANG_MAP,
     GOOGLE_LANG_MAP,
-    PROVIDER_DEEPL, PROVIDER_GOOGLE,
+    PROVIDER_DEEPL, PROVIDER_GEMINI, PROVIDER_GOOGLE,
 )
 from translation.db import (
     init_db, record_translation, is_on_cooldown, get_monthly_chars,
@@ -36,11 +40,13 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# Session-level flag: once DeepL quota is exceeded, skip straight to Google
+# Session-level flags: once quota is exceeded, skip to next provider
 _deepl_quota_exceeded = False
+_gemini_quota_exceeded = False
 
 MARKER_EXTENSIONS = {
     PROVIDER_DEEPL: ".deepl",
+    PROVIDER_GEMINI: ".gemini",
     PROVIDER_GOOGLE: ".gtranslate",
 }
 
@@ -50,8 +56,15 @@ def _db_path(state_dir: str) -> str:
 
 
 def _has_deepl(cfg: Config) -> bool:
-    """Check if DeepL is available (has API key and quota not exceeded)."""
+    """Check if DeepL is available (has API key, quota not exceeded, not date-skipped)."""
+    if DEEPL_SKIP_UNTIL and date.today() <= DEEPL_SKIP_UNTIL:
+        return False
     return bool(cfg.deepl_api_key) and not _deepl_quota_exceeded
+
+
+def _has_gemini(cfg: Config) -> bool:
+    """Check if Gemini is available (has keys and quota not exceeded)."""
+    return bool(cfg.gemini_api_keys) and not _gemini_quota_exceeded
 
 
 def _has_google(cfg: Config) -> bool:
@@ -61,12 +74,12 @@ def _has_google(cfg: Config) -> bool:
 
 def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
                                    deepl_translator, google_translator):
-    """Translate cues trying DeepL first, falling back to Google.
+    """Translate cues trying DeepL -> Gemini -> Google.
 
     Returns (translated_cues, chars_used, provider).
     Raises on non-quota errors.
     """
-    global _deepl_quota_exceeded
+    global _deepl_quota_exceeded, _gemini_quota_exceeded
 
     # Try DeepL first
     if _has_deepl(cfg) and base_lang in DEEPL_LANG_MAP and source_lang_code in DEEPL_SOURCE_LANG_MAP:
@@ -80,10 +93,27 @@ def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
         except Exception as e:
             error_msg = str(e).lower()
             if "quota" in error_msg or "456" in str(e):
-                log.warning("DeepL quota exceeded, switching to Google Translate")
+                log.warning("DeepL quota exceeded, trying Gemini")
                 _deepl_quota_exceeded = True
             else:
                 raise
+
+    # Try Gemini
+    if _has_gemini(cfg) and base_lang in GEMINI_LANG_MAP and source_lang_code in GEMINI_LANG_MAP:
+        from translation.gemini_client import (
+            translate_srt_cues as gemini_translate_srt_cues,
+            GeminiQuotaExhausted,
+        )
+        gemini_source = GEMINI_LANG_MAP[source_lang_code]
+        gemini_target = GEMINI_LANG_MAP[base_lang]
+        try:
+            translated_cues, chars_used = gemini_translate_srt_cues(
+                cfg.gemini_api_keys, cues, gemini_source, gemini_target
+            )
+            return translated_cues, chars_used, PROVIDER_GEMINI
+        except GeminiQuotaExhausted:
+            log.warning("All Gemini keys exhausted, falling back to Google")
+            _gemini_quota_exceeded = True
 
     # Fall back to Google
     if _has_google(cfg) and base_lang in GOOGLE_LANG_MAP and source_lang_code in GOOGLE_LANG_MAP:
@@ -140,7 +170,7 @@ def translate_file(cfg: Config, deepl_translator, media_path: str,
         base_lang = target_lang.split(":")[0]
 
         # Check if any provider supports this language
-        if base_lang not in DEEPL_LANG_MAP and base_lang not in GOOGLE_LANG_MAP:
+        if base_lang not in ALL_SUPPORTED_LANGS:
             log.info("No translation mapping for '%s', skipping", base_lang)
             continue
 
@@ -162,7 +192,7 @@ def translate_file(cfg: Config, deepl_translator, media_path: str,
         source_basename = os.path.basename(source_srt)
         source_lang_code = source_basename[len(stem) + 1:].split(".")[0].lower()
 
-        if source_lang_code not in DEEPL_SOURCE_LANG_MAP and source_lang_code not in GOOGLE_LANG_MAP:
+        if source_lang_code not in ALL_SUPPORTED_SOURCE_LANGS:
             log.info("No source mapping for '%s'", source_lang_code)
             continue
 
@@ -295,19 +325,24 @@ def cli():
 @click.option("--bazarr-db", type=str, default=None)
 def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db):
     """Translate missing subtitles via DeepL with Google fallback."""
-    global _deepl_quota_exceeded
+    global _deepl_quota_exceeded, _gemini_quota_exceeded
     _deepl_quota_exceeded = False  # Reset per invocation
+    _gemini_quota_exceeded = False
+
+    # Reset Gemini key rotation state
+    from translation.gemini_client import reset_exhausted_keys
+    reset_exhausted_keys()
 
     cfg = load_config(bazarr_db=bazarr_db, state_dir=state_dir)
     db = _db_path(cfg.state_dir)
     init_db(db)
 
-    # Enforce monthly budget — DeepL only, Google fallback stays available
+    # Enforce monthly budget — DeepL only, Gemini/Google fallback stays available
     monthly_used = get_monthly_chars(db)
     _budget_exceeded = False
     if monthly_budget and monthly_used >= monthly_budget:
         log.warning(
-            "Monthly DeepL budget reached: %s / %s chars — using Google Translate only",
+            "Monthly DeepL budget reached: %s / %s chars — using Gemini/Google fallback",
             f"{monthly_used:,}", f"{monthly_budget:,}",
         )
         _budget_exceeded = True
@@ -323,24 +358,27 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
     deepl_translator = None
     google_translator = None
 
-    if _budget_exceeded:
-        # Budget hit — skip DeepL entirely, use Google only
+    # Check DeepL availability
+    deepl_skipped_by_date = DEEPL_SKIP_UNTIL and date.today() <= DEEPL_SKIP_UNTIL
+    if deepl_skipped_by_date:
+        log.info("DeepL skipped until %s — using Gemini/Google", DEEPL_SKIP_UNTIL)
+        _deepl_quota_exceeded = True
+    elif _budget_exceeded:
         _deepl_quota_exceeded = True
     elif cfg.deepl_api_key:
         deepl_translator = create_deepl_translator(cfg.deepl_api_key)
-        # Check DeepL quota at start
         try:
             usage = deepl_translator.get_usage()
             if usage.character and usage.character.count >= usage.character.limit:
-                log.warning("DeepL quota already exhausted, using Google Translate")
+                log.warning("DeepL quota already exhausted, using Gemini/Google")
                 _deepl_quota_exceeded = True
         except Exception as e:
             log.warning("Could not check DeepL usage: %s", e)
     else:
-        log.info("No DeepL API key, using Google Translate only")
+        log.info("No DeepL API key, using Gemini/Google")
         _deepl_quota_exceeded = True
 
-    if not cfg.deepl_api_key and not cfg.google_translate_enabled and not _budget_exceeded:
+    if not cfg.deepl_api_key and not cfg.gemini_api_keys and not cfg.google_translate_enabled and not _budget_exceeded:
         click.echo("Error: No translation provider available")
         return
 
