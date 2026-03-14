@@ -32,9 +32,9 @@
 [![TMDB](https://img.shields.io/badge/TMDB-✓-01D277?style=flat-square&logo=themoviedatabase&logoColor=white)](https://www.themoviedatabase.org)
 [![Transmission](https://img.shields.io/badge/Transmission-✓-C00?style=flat-square)](https://transmissionbt.com)
 
-[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-18%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
+[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-19%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
 [![Tests](https://img.shields.io/badge/tests-417%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--03--13-informational?style=flat-square&logo=calendar&logoColor=white)]()
+[![Updated](https://img.shields.io/badge/last%20updated-2026--03--14-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -174,7 +174,7 @@ graph TB
 
 | Metric | Value |
 |--------|-------|
-| 📜 Total cron jobs | 18 |
+| 📜 Total cron jobs | 19 |
 | 🧪 Total tests | 417 passing |
 | 🌐 DeepL budget | 400K chars/month (Pro, Google fallback after) |
 | 💾 State databases | 4 (codec, streaming, translation, bazarr) |
@@ -516,6 +516,7 @@ gantt
 | `3 5 * * 2` | 👻 Emby weekly restart | Emby | Tuesday 05:03 UTC |
 | `35 3 * * 2` | 📊 Emby last played report | Reports | Tuesday 03:35 UTC |
 | `0 4 * * *` | 🔍 Verify disputed streaming | Streaming | Cross-validation voting |
+| `50 3 * * 1` | 🔵 Bazarr weekly restart | Maintenance | Prevents FD leak exhaustion |
 | `0 2 */3 * *` | 💾 SQLite backup | Maintenance | All state DBs |
 
 ---
@@ -751,7 +752,7 @@ Caused `analyze_srt_file()` failures in full scan mode.
 ╚════════════════════════════════════════════════╝
 ```
 
-**🤖 Maintained by Beren** · Last updated: **2026-03-13** · Running on an appbox near you
+**🤖 Maintained by Beren** · Last updated: **2026-03-14** · Running on an appbox near you
 
 [![GitHub](https://img.shields.io/badge/GitHub-beregcamlost%2Farr__configs-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/beregcamlost/arr_configs)
 
