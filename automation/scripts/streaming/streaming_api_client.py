@@ -86,6 +86,12 @@ def get_season_availability(api_key, tmdb_id, country="cl"):
 SERVICE_TO_PROVIDER = {
     "netflix": 8, "disney": 337, "hbo": 384,
     "prime": 119, "apple": 350, "paramount": 531,
+    "crunchyroll": 283,
+}
+
+# Mapping from MoTN addon service IDs to TMDB provider IDs
+ADDON_TO_PROVIDER = {
+    "crunchyrollcl": 283,
 }
 
 
@@ -141,6 +147,17 @@ def get_streaming_providers(api_key, tmdb_id, media_type, country="cl", return_s
         if sid and sid not in seen:
             seen.add(sid)
             result.append({"service_id": sid, "service_name": service.get("name", sid)})
+
+    # Second pass: addon entries for known providers (e.g. Crunchyroll in CL)
+    for opt in options:
+        if opt.get("type") != "addon":
+            continue
+        service = opt.get("service", {})
+        sid = service.get("id", "")
+        if sid in ADDON_TO_PROVIDER and sid not in seen:
+            seen.add(sid)
+            result.append({"service_id": sid, "service_name": service.get("name", sid)})
+
     return (result, True) if return_status else result
 
 
@@ -154,6 +171,7 @@ WATCHMODE_TO_PROVIDER = {
     26: 119,   # Amazon Prime
     371: 350,  # Apple TV+
     444: 531,  # Paramount+
+    # TODO: Discover Crunchyroll source ID via Watchmode /sources/?regions=CL endpoint
 }
 
 

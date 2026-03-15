@@ -11,9 +11,10 @@ PROVIDER_MAP = {
     "amazon": 119,
     "apple": 350,
     "paramount": 531,
+    "crunchyroll": 283,
 }
 
-DEFAULT_PROVIDERS = ["netflix", "disney"]
+DEFAULT_PROVIDERS = ["netflix", "disney", "crunchyroll"]
 DEFAULT_COUNTRY = "CL"
 DEFAULT_DB_PATH = "/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
 

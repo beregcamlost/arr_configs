@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from streaming.streaming_api_client import (
+    ADDON_TO_PROVIDER,
     get_season_availability,
     get_streaming_providers,
     get_watchmode_providers,
@@ -369,3 +370,76 @@ class TestGetWatchmodeProviders:
         assert success is True
         assert len(result) == 1
         assert result[0]["provider_id"] == 8
+
+
+class TestCrunchyrollAddonDetection:
+    """Tests for Crunchyroll addon-type detection in get_streaming_providers."""
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_crunchyroll_addon_detected(self, mock_get):
+        """MoTN response with type=addon, service.id=crunchyrollcl → Crunchyroll provider."""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "streamingOptions": {
+                "cl": [
+                    {"service": {"id": "netflix", "name": "Netflix"}, "type": "subscription"},
+                    {"service": {"id": "crunchyrollcl", "name": "Crunchyroll"}, "type": "addon"},
+                ]
+            }
+        }
+        mock_get.return_value.raise_for_status = lambda: None
+        result = get_streaming_providers("test-key", 37854, "tv", country="cl")
+        assert len(result) == 2
+        service_ids = {r["service_id"] for r in result}
+        assert "netflix" in service_ids
+        assert "crunchyrollcl" in service_ids
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_crunchyroll_subscription_type(self, mock_get):
+        """Standard subscription-type Crunchyroll works as before."""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "streamingOptions": {
+                "cl": [
+                    {"service": {"id": "crunchyroll", "name": "Crunchyroll"}, "type": "subscription"},
+                ]
+            }
+        }
+        mock_get.return_value.raise_for_status = lambda: None
+        result = get_streaming_providers("test-key", 37854, "tv", country="cl")
+        assert len(result) == 1
+        assert result[0]["service_id"] == "crunchyroll"
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_addon_ignored_for_unknown_service(self, mock_get):
+        """Unknown addon service IDs don't leak through."""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "streamingOptions": {
+                "cl": [
+                    {"service": {"id": "unknownaddon", "name": "Unknown"}, "type": "addon"},
+                ]
+            }
+        }
+        mock_get.return_value.raise_for_status = lambda: None
+        result = get_streaming_providers("test-key", 550, "movie", country="cl")
+        assert result == []
+
+    @patch("streaming.streaming_api_client.requests.get")
+    def test_addon_not_duplicated_if_subscription_exists(self, mock_get):
+        """If crunchyrollcl appears as both subscription and addon, no duplicate."""
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "streamingOptions": {
+                "cl": [
+                    {"service": {"id": "crunchyrollcl", "name": "Crunchyroll"}, "type": "subscription"},
+                    {"service": {"id": "crunchyrollcl", "name": "Crunchyroll"}, "type": "addon"},
+                ]
+            }
+        }
+        mock_get.return_value.raise_for_status = lambda: None
+        result = get_streaming_providers("test-key", 37854, "tv", country="cl")
+        assert len(result) == 1
+
+    def test_addon_to_provider_mapping(self):
+        assert ADDON_TO_PROVIDER == {"crunchyrollcl": 283}

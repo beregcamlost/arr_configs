@@ -57,6 +57,7 @@ from streaming.discord import (
     notify_stale_flag,
 )
 from streaming.emby_client import get_last_played_map, is_playing, refresh_library
+from streaming.justwatch_client import get_justwatch_providers
 from streaming.streaming_api_client import (
     get_season_availability,
     get_streaming_providers,
@@ -129,9 +130,9 @@ def cli():
 
 
 def _cross_validate_matches(cfg, tmdb_results, items_by_key):
-    """Cross-validate TMDB matches via voting (MoTN + Watchmode).
+    """Cross-validate TMDB matches via voting (MoTN + Watchmode + JustWatch).
 
-    For each item TMDB says is streaming, checks MoTN and Watchmode APIs.
+    For each item TMDB says is streaming, checks MoTN, Watchmode, and JustWatch APIs.
     Voting: 2+ sources agree → confirmed. Only TMDB with active disagreement → disputed.
 
     Returns:
@@ -181,8 +182,21 @@ def _cross_validate_matches(cfg, tmdb_results, items_by_key):
                 if pid:
                     wm_provider_ids.add(pid)
 
+        # Source 3: JustWatch (no API key needed)
+        jw_provider_ids = set()
+        jw_available = False
+        item_title = item.get("title", "")
+        jw_results, jw_available = get_justwatch_providers(
+            tmdb_id, media_type, item_title, country=cfg.country.upper(),
+        )
+        time.sleep(0.05)
+        for r in jw_results:
+            pid = r.get("provider_id")
+            if pid:
+                jw_provider_ids.add(pid)
+
         # Count external sources that actually responded
-        external_sources_checked = sum([motn_available, wm_available])
+        external_sources_checked = sum([motn_available, wm_available, jw_available])
 
         confirmed = []
         disputed = []
@@ -193,6 +207,8 @@ def _cross_validate_matches(cfg, tmdb_results, items_by_key):
             if motn_available and pid in motn_provider_ids:
                 votes += 1
             if wm_available and pid in wm_provider_ids:
+                votes += 1
+            if jw_available and pid in jw_provider_ids:
                 votes += 1
 
             if votes >= 2:
@@ -207,7 +223,7 @@ def _cross_validate_matches(cfg, tmdb_results, items_by_key):
                 disputed.append(p)
                 disputed_count += 1
                 log.info(
-                    "DISPUTED: TMDB says %s on %s but external sources disagree (votes: %d/3)",
+                    "DISPUTED: TMDB says %s on %s but external sources disagree (votes: %d/4)",
                     item["title"], p["provider_name"], votes,
                 )
 
@@ -303,11 +319,10 @@ def scan(country, providers, dry_run, verbose, db_path, skip_verify):
         items_by_key[key] = item
 
     # 4b. Cross-validate TMDB matches
+    # JustWatch requires no API key and always participates in voting
     cross_validated = None
-    if (cfg.rapidapi_key or cfg.watchmode_api_key) and not skip_verify:
+    if not skip_verify:
         cross_validated = _cross_validate_matches(cfg, tmdb_results, items_by_key)
-    elif not cfg.rapidapi_key and not cfg.watchmode_api_key and not skip_verify:
-        log.warning("No external API keys set — skipping cross-validation")
 
     # 5. Process matches
     streaming_tag_radarr = ensure_tag(cfg.radarr_url, cfg.radarr_key, TAG_LABEL) if not cfg.dry_run else None

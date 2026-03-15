@@ -677,6 +677,7 @@ class TestScanCrossValidation:
     """Tests for cross-validation (MoTN + Watchmode voting) in scan command."""
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
@@ -685,9 +686,9 @@ class TestScanCrossValidation:
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_disputed_when_motn_disagrees(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_jw, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
-        """TMDB says Netflix but MoTN + Watchmode disagree → disputed."""
+        """TMDB says Netflix but MoTN + Watchmode + JustWatch disagree → disputed."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
         db = str(tmp_path / "test.db")
 
@@ -703,6 +704,7 @@ class TestScanCrossValidation:
         assert "Disputed:        1" in result.output
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
@@ -711,7 +713,7 @@ class TestScanCrossValidation:
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_confirmed_when_motn_agrees(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_jw, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
         """Both TMDB and MoTN agree → confirmed."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
@@ -730,6 +732,7 @@ class TestScanCrossValidation:
         assert "Disputed:        0" in result.output
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_watchmode_providers")
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
@@ -738,7 +741,7 @@ class TestScanCrossValidation:
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_skip_verify_bypasses_cross_validation(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_jw, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
         """--skip-verify should not call external APIs."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
@@ -755,12 +758,13 @@ class TestScanCrossValidation:
         mock_wm.assert_not_called()
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.batch_check")
     @patch("streaming.streaming_checker.ensure_tag", return_value=1)
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_no_api_keys_falls_back_to_tmdb_only(
-        self, mock_movies, mock_series, mock_tag, mock_batch,
+        self, mock_movies, mock_series, mock_tag, mock_batch, mock_jw,
         mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
         """Without any external API keys, scan uses TMDB-only (no cross-validation)."""
@@ -777,6 +781,7 @@ class TestScanCrossValidation:
         assert "Newly streaming: 1" in result.output
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
@@ -785,7 +790,7 @@ class TestScanCrossValidation:
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_confirmed_when_no_external_source_reachable(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_jw, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
         """If no external source was reachable, treat as confirmed (can't dispute)."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
@@ -803,6 +808,7 @@ class TestScanCrossValidation:
         assert "Disputed:        0" in result.output
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_watchmode_providers")
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
@@ -811,7 +817,7 @@ class TestScanCrossValidation:
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_confirmed_by_watchmode_alone(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_jw, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
         """MoTN disagrees but Watchmode agrees → 2 votes (TMDB+WM) → confirmed."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
@@ -833,6 +839,7 @@ class TestScanCrossValidation:
 
     @patch("streaming.streaming_checker.add_tag_to_item")
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
@@ -841,7 +848,7 @@ class TestScanCrossValidation:
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_disputed_item_gets_three_tags(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_wm, mock_notify, mock_add_tag, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_jw, mock_notify, mock_add_tag, runner, env_config, monkeypatch, tmp_path,
     ):
         """Disputed item should get streaming-available + keep-local + keep-by-disagree."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
@@ -859,6 +866,7 @@ class TestScanCrossValidation:
         assert mock_add_tag.call_count == 3
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
@@ -867,7 +875,7 @@ class TestScanCrossValidation:
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_mixed_confirmed_and_disputed_providers(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_jw, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
         """Item with 2 providers: one confirmed by MoTN, one disputed."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
@@ -918,6 +926,7 @@ class TestScanCrossValidation:
         assert 862 in tmdb_ids  # Toy Story still present
 
     @patch("streaming.streaming_checker.notify_scan_results")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.batch_check")
@@ -926,9 +935,9 @@ class TestScanCrossValidation:
     @patch("streaming.streaming_checker.fetch_movies", return_value=MOCK_MOVIES)
     def test_both_sources_unreachable_confirms_all(
         self, mock_movies, mock_series, mock_tag, mock_batch, mock_rapid,
-        mock_wm, mock_notify, runner, env_config, monkeypatch, tmp_path,
+        mock_wm, mock_jw, mock_notify, runner, env_config, monkeypatch, tmp_path,
     ):
-        """Both RAPIDAPI_KEY and WATCHMODE_API_KEY set but both unreachable → all confirmed."""
+        """All three external sources unreachable → all confirmed."""
         monkeypatch.setenv("RAPIDAPI_KEY", "test-key")
         monkeypatch.setenv("WATCHMODE_API_KEY", "test-wm-key")
         db = str(tmp_path / "test.db")
@@ -1062,13 +1071,14 @@ class TestVerifyDisputed:
         assert "No items with keep-by-disagree" in result.output
 
     @patch("streaming.streaming_checker.remove_tag_from_item")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies")
     @patch("streaming.streaming_checker.get_tag_id")
     def test_resolved_when_sources_agree(
-        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm,
+        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm, mock_jw,
         mock_remove_tag, runner, env_config, monkeypatch, tmp_path,
     ):
         """If sources now agree, remove keep-by-disagree + keep-local."""
@@ -1093,13 +1103,14 @@ class TestVerifyDisputed:
         assert mock_remove_tag.call_count == 2
 
     @patch("streaming.streaming_checker.remove_tag_from_item")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], True))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies")
     @patch("streaming.streaming_checker.get_tag_id")
     def test_still_disputed(
-        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm,
+        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm, mock_jw,
         mock_remove_tag, runner, env_config, monkeypatch, tmp_path,
     ):
         """If sources still disagree, keep tags."""
@@ -1129,13 +1140,14 @@ class TestVerifyDisputed:
 
     @patch("requests.post")
     @patch("streaming.streaming_checker.remove_tag_from_item")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies")
     @patch("streaming.streaming_checker.get_tag_id")
     def test_discord_notification_sent(
-        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm,
+        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm, mock_jw,
         mock_remove_tag, mock_requests_post, runner, env_config, monkeypatch, tmp_path,
     ):
         """Discord webhook called with correct embed structure on resolution."""
@@ -1166,13 +1178,14 @@ class TestVerifyDisputed:
 
     @patch("streaming.streaming_checker._is_dual_audio_keep_local", return_value=True)
     @patch("streaming.streaming_checker.remove_tag_from_item")
+    @patch("streaming.streaming_checker.get_justwatch_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_watchmode_providers", return_value=([], False))
     @patch("streaming.streaming_checker.get_streaming_providers")
     @patch("streaming.streaming_checker.fetch_series", return_value=[])
     @patch("streaming.streaming_checker.fetch_movies")
     @patch("streaming.streaming_checker.get_tag_id")
     def test_preserves_keep_local_for_dual_audio(
-        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm,
+        self, mock_tag_id, mock_movies, mock_series, mock_rapid, mock_wm, mock_jw,
         mock_remove_tag, mock_dual_audio, runner, env_config, monkeypatch, tmp_path,
     ):
         """Resolution removes keep-by-disagree but preserves keep-local for dual-audio items."""

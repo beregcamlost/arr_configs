@@ -16,7 +16,7 @@ class TestLoadConfig:
     def test_defaults(self, env_config):
         cfg = load_config()
         assert cfg.country == "CL"
-        assert cfg.providers == ["netflix", "disney"]
+        assert cfg.providers == ["netflix", "disney", "crunchyroll"]
         assert cfg.dry_run is False
         assert cfg.verbose is False
         assert cfg.radarr_url == "http://127.0.0.1:7878/radarr"
@@ -49,7 +49,7 @@ class TestLoadConfig:
 
     def test_provider_ids(self, env_config):
         cfg = load_config()
-        assert cfg.provider_ids == [8, 337]
+        assert cfg.provider_ids == [8, 337, 283]
 
     def test_custom_db_path(self, env_config, tmp_path):
         db = str(tmp_path / "custom.db")
