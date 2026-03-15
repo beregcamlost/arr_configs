@@ -33,8 +33,8 @@
 [![Transmission](https://img.shields.io/badge/Transmission-✓-C00?style=flat-square)](https://transmissionbt.com)
 
 [![Cron Jobs](https://img.shields.io/badge/cron%20jobs-21%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/tests-496%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--03--14-informational?style=flat-square&logo=calendar&logoColor=white)]()
+[![Tests](https://img.shields.io/badge/tests-528%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
+[![Updated](https://img.shields.io/badge/last%20updated-2026--03--15-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -96,6 +96,8 @@ graph TB
         SC[streaming_checker.py]
         TMDB[🎬 TMDB API]
         MOTN[🌙 Movie of the Night API]
+        WM[📊 Watchmode API]
+        JW[🎯 JustWatch GraphQL]
         SKP["Skip Candidate\n(no transcode)"]
     end
 
@@ -123,6 +125,8 @@ graph TB
     BZ --> DL
     SC --> TMDB
     SC --> MOTN
+    SC --> WM
+    SC --> JW
     SC --> SKP
     SKP --> CQ
     CQ --> CM
@@ -148,7 +152,7 @@ graph TB
     class WH hook
     class PH0,PH1,PH15,PH2,BZ,DL subtitle
     class CQ,CM,FF codec
-    class SC,TMDB,MOTN,SKP stream
+    class SC,TMDB,MOTN,WM,JW,SKP stream
     class DC notify
     class ZR,AC,EM maint
 ```
@@ -161,7 +165,7 @@ graph TB
 |--------|----------|-------|-----------|---------------|
 | 🎬 Subtitle Manager | Bash | 159 ✅ | 5 min / 10 min / daily | ✅ Discord |
 | 🔄 Codec Manager | Bash | — | 15 min / 3 AM daily | ✅ Discord |
-| 📺 Streaming Checker | Python | 239 ✅ | Weekly / Monthly | ✅ Discord |
+| 📺 Streaming Checker | Python | 271 ✅ | Weekly / Monthly | ✅ Discord |
 | 🌐 DeepL Translator | Python | 98 ✅ | 30 min | ✅ Discord |
 | 👻 Zombie Reaper | Bash | — | 2 min | ✅ Discord |
 | 🧹 Arr Cleanup | Bash | — | 30 min | — |
@@ -175,10 +179,10 @@ graph TB
 | Metric | Value |
 |--------|-------|
 | 📜 Total cron jobs | 21 |
-| 🧪 Total tests | 496 passing |
+| 🧪 Total tests | 528 passing |
 | 🌐 DeepL budget | 400K chars/month (Pro, Google fallback after) |
 | 💾 State databases | 5 (codec, streaming, translation, subtitle-quality, bazarr) |
-| 🔌 External APIs | 6 (Sonarr, Radarr, Bazarr, Emby, TMDB, DeepL) |
+| 🔌 External APIs | 9 (Sonarr, Radarr, Bazarr, Emby, TMDB, DeepL, MoTN, Watchmode, JustWatch) |
 | 📡 Discord webhooks | All systems |
 | 🎞️ Target codec | H.264 CRF19 + AAC 192k stereo |
 | ⏭️ Skips | UHD / 4K / HDR / streaming candidates / stale candidates |
@@ -330,13 +334,17 @@ After every successful transcode:
 
 > **`automation/scripts/streaming/`** — Python CLI that cross-references the local media library against real-time streaming provider availability. Flags content that's freely available so you can reclaim disk space.
 
-### 🔌 APIs Used
+### 🔌 APIs Used (4-Source Voting)
 
-| API | Purpose |
-|-----|---------|
-| 🎬 TMDB | Media metadata, IDs |
-| 🌙 Movie of the Night (RapidAPI) | Per-season streaming availability |
-| 📺 Emby Activity Log | Last-played timestamps for staleness detection |
+| API | Purpose | Auth |
+|-----|---------|------|
+| 🎬 TMDB | Primary streaming availability (always votes) | API key |
+| 🌙 Movie of the Night (RapidAPI) | Cross-validation voter + per-season availability | API key |
+| 📊 Watchmode | Cross-validation voter | API key |
+| 🎯 JustWatch (GraphQL) | Cross-validation voter (TMDB's upstream source) | None needed |
+| 📺 Emby Activity Log | Last-played timestamps for staleness detection | API key |
+
+> **Default providers:** Netflix, Disney+, Crunchyroll (CL region)
 
 ### 📟 CLI Subcommands
 
@@ -372,17 +380,19 @@ flowchart TD
 ### 🧪 Test Coverage
 
 ```
-239 tests passing
+271 tests passing
 ├── 96  streaming core tests
 ├── 33  keep-local filtering tests
+├── 27  cross-validation voting tests (4-source model)
 ├── 21  trending auto-add tests
-├── 18  cross-validation voting tests
+├── 20  JustWatch client tests
 ├── 15  per-season streaming tests
 ├── 14  left-streaming tracking tests
 ├── 12  Discord notification tests
 ├── 10  stale flag/delete tests
 ├──  8  CLI argument tests
-└── 12  miscellaneous utility tests
+├──  5  Crunchyroll addon detection tests
+└── 10  miscellaneous utility tests
 ```
 
 ---
@@ -608,7 +618,8 @@ sequenceDiagram
 │       │   └── library_codec_manager.sh
 │       │
 │       ├── 📂 streaming/            # 📺 Streaming checker (python)
-│       │   └── streaming_checker.py
+│       │   ├── streaming_checker.py
+│       │   └── justwatch_client.py
 │       │
 │       ├── 📂 translation/          # 🌐 DeepL translator (python)
 │       │
@@ -636,7 +647,9 @@ sequenceDiagram
 | 📺 Server | Emby | Media server |
 | 🧲 Torrents | Transmission | Download client |
 | 🎬 Metadata | TMDB API | Streaming availability data |
-| 🌙 Streaming | Movie of the Night (RapidAPI) | Per-season availability |
+| 🌙 Streaming | Movie of the Night (RapidAPI) | Per-season availability + cross-validation |
+| 📊 Streaming | Watchmode API | Cross-validation voter |
+| 🎯 Streaming | JustWatch GraphQL | Cross-validation voter (no API key) |
 | 🌐 Translation | DeepL Pro API + Google Translate | Subtitle translation (DeepL primary, Google fallback) |
 | 🔔 Alerts | Discord Webhooks | All system notifications |
 | 🔒 Concurrency | `flock` | Cron job mutual exclusion |
@@ -768,7 +781,7 @@ Caused `analyze_srt_file()` failures in full scan mode.
 ╚════════════════════════════════════════════════╝
 ```
 
-**🤖 Maintained by Beren** · Last updated: **2026-03-14** · Running on an appbox near you
+**🤖 Maintained by Beren** · Last updated: **2026-03-15** · Running on an appbox near you
 
 [![GitHub](https://img.shields.io/badge/GitHub-beregcamlost%2Farr__configs-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/beregcamlost/arr_configs)
 
