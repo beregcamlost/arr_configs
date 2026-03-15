@@ -7,6 +7,10 @@ import requests
 log = logging.getLogger(__name__)
 
 JUSTWATCH_GRAPHQL_URL = "https://apis.justwatch.com/graphql"
+_HEADERS = {
+    "User-Agent": "JustWatch/3.0",
+    "Content-Type": "application/json",
+}
 
 # JustWatch packageId → TMDB provider ID (same IDs for major providers)
 JUSTWATCH_TO_PROVIDER = {
@@ -76,6 +80,7 @@ def get_justwatch_providers(tmdb_id, media_type, title, country="CL"):
     try:
         resp = requests.post(
             JUSTWATCH_GRAPHQL_URL,
+            headers=_HEADERS,
             json={"query": _SEARCH_QUERY, "variables": variables},
             timeout=15,
         )
