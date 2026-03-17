@@ -781,8 +781,6 @@ Caused `analyze_srt_file()` failures in full scan mode.
 ╚════════════════════════════════════════════════╝
 ```
 
-**🤖 Maintained by Beren** · Last updated: **2026-03-15** · Running on an appbox near you
-
 [![GitHub](https://img.shields.io/badge/GitHub-beregcamlost%2Farr__configs-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/beregcamlost/arr_configs)
 
 </div>

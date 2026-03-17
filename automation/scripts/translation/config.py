@@ -206,16 +206,12 @@ def load_config(
     deepl_key = os.environ.get("DEEPL_API_KEY", "")
     google_enabled = os.environ.get("GOOGLE_TRANSLATE_ENABLED", "1") != "0"
 
-    gemini_keys = []
-    for var in ("GEMINI_API_KEY_1", "GEMINI_API_KEY_2"):
-        key = os.environ.get(var, "").strip()
-        if key:
-            gemini_keys.append(key)
+    gemini_keys = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
 
     if not deepl_key and not gemini_keys and not google_enabled:
         raise ValueError(
             "No translation provider available: set DEEPL_API_KEY, "
-            "GEMINI_API_KEY_1/2, or enable Google Translate"
+            "GEMINI_API_KEYS, or enable Google Translate"
         )
 
     return Config(

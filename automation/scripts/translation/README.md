@@ -141,8 +141,7 @@ All secrets in `/config/berenstuff/.env`:
 
 ```bash
 DEEPL_API_KEY=....:fx          # Free tier key (ends with :fx)
-GEMINI_API_KEY_1=AIza...       # Gemini free tier key (primary)
-GEMINI_API_KEY_2=AIza...       # Gemini free tier key (rotation)
+GEMINI_API_KEYS=AIza...,AIza...  # Comma-separated keys for rotation
 BAZARR_URL=http://127.0.0.1:6767/bazarr
 BAZARR_API_KEY=...
 DISCORD_WEBHOOK_URL=...
