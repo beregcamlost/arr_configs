@@ -1,6 +1,6 @@
-# 🌍 DeepL Subtitle Translator
+# 🌍 Subtitle Translator
 
-> Automatically translate missing subtitle languages using the DeepL API — bridging the gap when Bazarr can't find a subtitle in your profile language.
+> Automatically translate missing subtitle languages using Gemini, DeepL, or Google Translate — bridging the gap when Bazarr can't find a subtitle in your profile language.
 
 ---
 
@@ -11,22 +11,26 @@
 | `translator.py` | 🚀 CLI entry point — `translate`, `status`, `usage` commands |
 | `subtitle_scanner.py` | 🔎 Scan Bazarr DB for missing subtitles; find best source SRT |
 | `deepl_client.py` | 🌐 DeepL API wrapper — batched SRT cue translation |
+| `gemini_client.py` | 🤖 Gemini API client — multi-key rotation, batched translation |
+| `google_client.py` | 🔄 Google Translate fallback |
+| `subtitle_quality_checker.py` | 🔍 Gemini-powered content quality checker (lang detection, quality scoring) |
 | `srt_parser.py` | 📄 SRT parse/write with timing preservation |
 | `db.py` | 🗄️ SQLite state DB — translation history + 24h cooldown |
-| `config.py` | ⚙️ Config loader + language code mappings (ISO 639 ↔ DeepL) |
+| `config.py` | ⚙️ Config loader + language code mappings (ISO 639 ↔ provider codes) |
 | `discord.py` | 💬 Discord webhook — translation summaries + quota warnings |
-| `tests/` | ✅ 41 tests (pytest) |
+| `tests/` | ✅ pytest tests covering all modules |
 
 ---
 
 ## ✨ Features
 
-- **🌐 DeepL free API** — up to 500,000 characters/month, zero cost
+- **🤖 Multi-provider** — Gemini 2.5 Pro (primary), DeepL free API (500K chars/month), Google Translate (fallback)
+- **🔄 Automatic failover** — DeepL → Gemini → Google, with per-key rotation and quota tracking
 - **🧠 Smart source SRT selection** — picks the largest non-forced SRT; prefers English if it's within 20% of the largest
 - **🔍 Bazarr profile integration** — reads your Bazarr language profile to know exactly which languages are needed per file
 - **⏱️ 24-hour cooldown** — avoids re-translating the same (file, language) pair too soon after a failure
-- **📦 Batched translation** — sends subtitle cues in ~4 KB batches to respect API limits
-- **🏷️ `.deepl` marker files** — signals `auto-maintain` to defer muxing until translation is confirmed stable
+- **📦 Batched translation** — sends subtitle cues in ~3K char batches to stay within model limits
+- **🏷️ Marker files** — `.deepl`/`.gemini` signals `auto-maintain` to defer muxing until translation is confirmed stable
 - **🔔 Discord notifications** — green summary on success, red alert on quota exceeded
 - **↔️ Two modes** — cron batch mode (`--since N`) and single-file import hook mode (`--file PATH`)
 
@@ -88,9 +92,9 @@ translator.py --file /path/to/file.mkv
        ├──► subtitle_scanner.find_best_source_srt()   ← picks en.srt / largest
        ├──► subtitle_scanner.find_missing_langs_on_disk()  ← what's absent
        ├──► db.is_on_cooldown()                        ← 24h skip guard
-       ├──► deepl_client.translate_srt_cues()          ← batched API calls
+       ├──► gemini/deepl/google translate_srt_cues()    ← batched API calls
        ├──► srt_parser.write_srt()                     ← output fr.srt
-       ├──► touch fr.srt.deepl                         ← defer auto-maintain mux
+       ├──► touch fr.srt.{gemini,deepl}                ← defer auto-maintain mux
        ├──► db.record_translation()                    ← state + cooldown
        └──► bazarr scan-disk                           ← Bazarr picks up new SRT
 
@@ -137,6 +141,8 @@ All secrets in `/config/berenstuff/.env`:
 
 ```bash
 DEEPL_API_KEY=....:fx          # Free tier key (ends with :fx)
+GEMINI_API_KEY_1=AIza...       # Gemini free tier key (primary)
+GEMINI_API_KEY_2=AIza...       # Gemini free tier key (rotation)
 BAZARR_URL=http://127.0.0.1:6767/bazarr
 BAZARR_API_KEY=...
 DISCORD_WEBHOOK_URL=...
@@ -152,4 +158,4 @@ DISCORD_WEBHOOK_URL=...
   >> /config/berenstuff/automation/logs/deepl_translate.log 2>&1
 ```
 
-> **Free tier budget:** 500K chars/month ~ 5–10 full feature films worth of subtitles. The `status` command shows current consumption.
+> **Free tier budgets:** DeepL 500K chars/month, Gemini 2.5 Pro 25 RPM (free tier). The `status` command shows current consumption.

@@ -12,8 +12,8 @@ from translation.srt_parser import Cue, batch_cues
 
 log = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZE = 50_000  # chars per batch — Gemini supports ~1M tokens
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_BATCH_SIZE = 3_000  # chars per batch — large batches cause None responses
+DEFAULT_MODEL = "gemini-2.5-pro"
 
 # Session-scoped set of exhausted API keys
 _exhausted_keys: set = set()
@@ -106,6 +106,10 @@ def _translate_batch(
 
         try:
             response = client.generate_content(prompt)
+            if response.text is None:
+                log.warning("Gemini returned empty response (safety filter?), trying next key")
+                _exhausted_keys.add(api_key)
+                continue
             return _parse_response(response.text, len(cues))
         except ResourceExhausted as e:
             error_msg = str(e).lower()
