@@ -36,9 +36,9 @@ setup() {
   [[ "$result" == "BAD" ]]
 }
 
-@test "score_subtitle: watermarks=1 rates WARN" {
+@test "score_subtitle: watermarks=1 does not affect GOOD rating" {
   result="$(score_subtitle 500 1.0 3300.0 3600 0 1)"
-  [[ "$result" == "WARN" ]]
+  [[ "$result" == "GOOD" ]]
 }
 
 @test "score_subtitle: high cue density rates WARN" {
@@ -68,6 +68,30 @@ setup() {
   # first=400 > 300s threshold; last=2700/3600=75% < 80%
   result="$(score_subtitle 500 400.0 2700.0 3600 0 0)"
   [[ "$result" == "WARN" ]]
+}
+
+# ---------------------------------------------------------------------------
+# score_subtitle 7th param (sync_drift_rating) — 4 tests
+# ---------------------------------------------------------------------------
+
+@test "score_subtitle: 7th arg BAD overrides GOOD to BAD" {
+  result="$(score_subtitle 500 1.0 3300.0 3600 0 0 BAD)"
+  [[ "$result" == "BAD" ]]
+}
+
+@test "score_subtitle: 7th arg WARN downgrades GOOD to WARN" {
+  result="$(score_subtitle 500 1.0 3300.0 3600 0 0 WARN)"
+  [[ "$result" == "WARN" ]]
+}
+
+@test "score_subtitle: 7th arg SKIP has no effect on GOOD" {
+  result="$(score_subtitle 500 1.0 3300.0 3600 0 0 SKIP)"
+  [[ "$result" == "GOOD" ]]
+}
+
+@test "score_subtitle: 6-arg backward compat still works" {
+  result="$(score_subtitle 500 1.0 3300.0 3600 0 0)"
+  [[ "$result" == "GOOD" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -127,6 +151,16 @@ setup() {
   # first=60.0s (00:01:00,000)
   result="$(awk "BEGIN { print ($first > 0) }")"
   [[ "$result" -eq 1 ]]
+}
+
+@test "analyze_srt_file: fansub_watermarked.srt detects fan sub watermarks" {
+  # Fan sub patterns: "The EVIL team", "Dr. Infinito", "GrupoTS"
+  # These are detected via the static WATERMARK_PATTERNS fallback
+  _CACHED_WATERMARK_PATTERNS="galaxytv|yify|yts|opensubtitles|addic7ed|subscene|podnapisi|sub[sz]cene|the evil team|dr\\.? ?infinito|grupots|grupo ?ts"
+  output="$(analyze_srt_file "$FIXTURES_DIR/fansub_watermarked.srt")"
+  read -r cues first last mojibake watermarks <<< "$output"
+  [[ "$cues" -eq 10 ]]
+  [[ "$watermarks" -eq 1 ]]
 }
 
 # ---------------------------------------------------------------------------

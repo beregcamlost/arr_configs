@@ -1,0 +1,39 @@
+1
+00:00:02,000 --> 00:00:05,000
+The EVIL team presents
+
+2
+00:01:00,000 --> 00:01:04,000
+Esta es una linea normal de subtitulo.
+
+3
+00:02:30,000 --> 00:02:35,000
+Otra linea de dialogo aqui.
+
+4
+00:04:00,000 --> 00:04:05,000
+Dr. Infinito - Fansub release
+
+5
+00:05:30,000 --> 00:05:34,000
+Mas dialogo importante aqui.
+
+6
+00:07:00,000 --> 00:07:04,000
+Continuando con la conversacion.
+
+7
+00:08:30,000 --> 00:08:34,000
+GrupoTS - Subtitulos en español
+
+8
+00:10:00,000 --> 00:10:04,000
+Otro dialogo perfectamente normal.
+
+9
+00:12:00,000 --> 00:12:05,000
+Y seguimos con mas dialogo.
+
+10
+00:14:00,000 --> 00:14:04,000
+La ultima linea de subtitulo.
