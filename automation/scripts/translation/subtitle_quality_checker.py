@@ -357,11 +357,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    api_keys = []
-    for var in ("GEMINI_API_KEY_1", "GEMINI_API_KEY_2"):
-        key = os.environ.get(var, "").strip()
-        if key:
-            api_keys.append(key)
+    api_keys = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
 
     if args.command == "check":
         result = check_subtitle_quality(

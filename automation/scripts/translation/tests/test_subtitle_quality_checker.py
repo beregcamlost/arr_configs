@@ -543,8 +543,7 @@ class TestMainCLI:
         monkeypatch.setattr(sys, "argv", [
             "sqc", "check", "--srt", str(srt), "--expected-lang", "es"
         ])
-        monkeypatch.setenv("GEMINI_API_KEY_1", "test-key-1")
-        monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEYS", "test-key-1")
 
         with patch("translation.subtitle_quality_checker.genai") as mock_genai:
             mock_model = MagicMock()
@@ -569,8 +568,7 @@ class TestMainCLI:
         monkeypatch.setattr(sys, "argv", [
             "sqc", "check", "--srt", str(srt), "--expected-lang", "es"
         ])
-        monkeypatch.delenv("GEMINI_API_KEY_1", raising=False)
-        monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
 
         from translation.subtitle_quality_checker import main
         main()
@@ -601,8 +599,7 @@ class TestMainCLI:
             "--expected-lang", "es",
             "--max-calls", "2",
         ])
-        monkeypatch.setenv("GEMINI_API_KEY_1", "test-key-1")
-        monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEYS", "test-key-1")
 
         with patch("translation.subtitle_quality_checker.genai") as mock_genai:
             mock_model = MagicMock()
@@ -630,8 +627,7 @@ class TestMainCLI:
             "--dir", str(tmp_path),
             "--expected-lang", "es",
         ])
-        monkeypatch.delenv("GEMINI_API_KEY_1", raising=False)
-        monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
 
         from translation.subtitle_quality_checker import main
         main()
@@ -655,8 +651,7 @@ class TestMainCLI:
             "--expected-lang", "es",
             "--state-db", db,
         ])
-        monkeypatch.setenv("GEMINI_API_KEY_1", "test-key-1")
-        monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEYS", "test-key-1")
 
         with patch("translation.subtitle_quality_checker.genai") as mock_genai:
             mock_model = MagicMock()
@@ -681,8 +676,7 @@ class TestMainCLI:
             "--expected-lang", "es",
             "--max-calls", "1",
         ])
-        monkeypatch.delenv("GEMINI_API_KEY_1", raising=False)
-        monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
 
         from translation.subtitle_quality_checker import main
         main()

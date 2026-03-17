@@ -14,9 +14,10 @@ log = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 3_000  # chars per batch — large batches cause None responses
 DEFAULT_MODEL = "gemini-2.5-pro"
+FALLBACK_MODEL = "gemini-2.5-flash"
 
-# Session-scoped set of exhausted API keys
-_exhausted_keys: set = set()
+# Session-scoped set of exhausted API keys, tracked per model
+_exhausted_keys: dict = {}  # model -> set of keys
 
 # Cached model instances per (api_key, model, source_lang, target_lang)
 _model_cache: dict = {}
@@ -29,6 +30,11 @@ class GeminiQuotaExhausted(Exception):
     """All Gemini API keys have exhausted their quota."""
 
 
+def _exhausted_for(model: str) -> set:
+    """Get or create the exhausted-keys set for a model."""
+    return _exhausted_keys.setdefault(model, set())
+
+
 def reset_exhausted_keys():
     """Reset the set of exhausted keys and model cache (call at session start)."""
     _exhausted_keys.clear()
@@ -36,8 +42,12 @@ def reset_exhausted_keys():
 
 
 def has_available_keys(api_keys: list) -> bool:
-    """Check if any API key is still available."""
-    return any(k not in _exhausted_keys for k in api_keys)
+    """Check if any API key is still available on at least one model."""
+    return any(
+        any(k not in s for s in _exhausted_keys.values()) if _exhausted_keys
+        else True
+        for k in api_keys
+    )
 
 
 def _get_model(api_key: str, source_lang: str, target_lang: str,
@@ -95,45 +105,54 @@ def _translate_batch(
     target_lang: str,
     model: str = DEFAULT_MODEL,
 ) -> List[str]:
-    """Translate a batch of cues, rotating keys on quota exhaustion."""
+    """Translate a batch of cues, rotating keys on quota exhaustion.
+
+    Tries all keys with the requested model first.  If every key is
+    exhausted on that model and a FALLBACK_MODEL exists, retries the
+    full key ring with the fallback model before giving up.
+    """
     prompt = _build_prompt(cues, source_lang, target_lang)
+    models_to_try = [model]
+    if model != FALLBACK_MODEL:
+        models_to_try.append(FALLBACK_MODEL)
 
-    for api_key in api_keys:
-        if api_key in _exhausted_keys:
-            continue
+    for current_model in models_to_try:
+        exhausted = _exhausted_for(current_model)
 
-        client = _get_model(api_key, source_lang, target_lang, model)
-
-        try:
-            response = client.generate_content(prompt)
-            if response.text is None:
-                log.warning("Gemini returned empty response (safety filter?), trying next key")
-                _exhausted_keys.add(api_key)
+        for api_key in api_keys:
+            if api_key in exhausted:
                 continue
-            return _parse_response(response.text, len(cues))
-        except ResourceExhausted as e:
-            error_msg = str(e).lower()
-            is_rate_limit = "per_minute" in error_msg or "rate" in error_msg
-            if is_rate_limit:
-                # Transient RPM limit — retry once after short sleep
-                log.warning("Gemini RPM rate limit hit, retrying in 4s...")
-                time.sleep(4)
+
+            client = _get_model(api_key, source_lang, target_lang, current_model)
+
+            for attempt in range(2):
                 try:
                     response = client.generate_content(prompt)
+                    if response.text is None:
+                        log.warning("Gemini returned empty response (safety filter?), trying next key")
+                        exhausted.add(api_key)
+                        break
+                    if current_model != model:
+                        log.info("Using fallback model %s", current_model)
                     return _parse_response(response.text, len(cues))
-                except ResourceExhausted:
-                    log.warning("Gemini key %s...%s exhausted (RPM retry failed)",
-                                api_key[:8], api_key[-4:])
-                    _exhausted_keys.add(api_key)
-                    continue
-            else:
-                # Daily quota or other quota limit
-                log.warning("Gemini key %s...%s exhausted (daily quota)",
-                            api_key[:8], api_key[-4:])
-                _exhausted_keys.add(api_key)
-                continue
+                except ResourceExhausted as e:
+                    if attempt == 0:
+                        error_msg = str(e).lower()
+                        is_rate_limit = "per_minute" in error_msg or "rate" in error_msg
+                        if is_rate_limit:
+                            log.warning("Gemini RPM rate limit hit, retrying in 4s...")
+                            time.sleep(4)
+                            continue
+                    label = "RPM retry failed" if attempt else "daily quota"
+                    log.warning("Gemini key %s...%s exhausted on %s (%s)",
+                                api_key[:8], api_key[-4:], current_model, label)
+                    exhausted.add(api_key)
+                    break
 
-    raise GeminiQuotaExhausted("All Gemini API keys have exhausted their quota")
+        if current_model == model and FALLBACK_MODEL != model:
+            log.warning("All keys exhausted on %s, falling back to %s", model, FALLBACK_MODEL)
+
+    raise GeminiQuotaExhausted("All Gemini API keys exhausted on all models")
 
 
 def translate_srt_cues(
@@ -156,8 +175,7 @@ def translate_srt_cues(
     translated_cues = []
 
     for batch in batch_cues(cues, batch_size):
-        texts = [c.text for c in batch]
-        total_chars += sum(len(t) for t in texts)
+        total_chars += sum(len(c.text) for c in batch)
         translated_texts = _translate_batch(
             api_keys, batch, source_lang, target_lang, model
         )

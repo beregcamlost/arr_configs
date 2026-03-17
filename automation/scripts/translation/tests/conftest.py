@@ -36,8 +36,7 @@ def env_config(monkeypatch):
 def env_config_google_only(monkeypatch):
     """Set up environment variables for Google-only mode (no DeepL key)."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY_1", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "1")
     monkeypatch.setenv("BAZARR_API_KEY", "test-bazarr-key")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/test")
@@ -47,7 +46,6 @@ def env_config_google_only(monkeypatch):
 def env_config_gemini(monkeypatch):
     """Set up environment variables with Gemini keys."""
     monkeypatch.setenv("DEEPL_API_KEY", "test-deepl-key:fx")
-    monkeypatch.setenv("GEMINI_API_KEY_1", "test-gemini-key-1")
-    monkeypatch.setenv("GEMINI_API_KEY_2", "test-gemini-key-2")
+    monkeypatch.setenv("GEMINI_API_KEYS", "test-gemini-key-1,test-gemini-key-2")
     monkeypatch.setenv("BAZARR_API_KEY", "test-bazarr-key")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/test")

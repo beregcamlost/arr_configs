@@ -9,8 +9,11 @@ from translation.gemini_client import (
     has_available_keys,
     _build_prompt,
     _parse_response,
+    _exhausted_for,
     GeminiQuotaExhausted,
     _exhausted_keys,
+    DEFAULT_MODEL,
+    FALLBACK_MODEL,
 )
 from translation.srt_parser import Cue
 
@@ -30,7 +33,6 @@ def _reset_keys():
     """Reset exhausted keys before each test."""
     reset_exhausted_keys()
     yield
-    reset_exhausted_keys()
 
 
 class TestBuildPrompt:
@@ -167,8 +169,8 @@ class TestKeyRotation:
         cues = _make_cues(1)
         result_cues, chars = translate_srt_cues(KEYS, cues, "English", "Spanish")
         assert result_cues[0].text == "Hola"
-        assert KEYS[0] in _exhausted_keys
-        assert KEYS[1] not in _exhausted_keys
+        assert KEYS[0] in _exhausted_for(DEFAULT_MODEL)
+        assert KEYS[1] not in _exhausted_for(DEFAULT_MODEL)
 
     @patch("translation.gemini_client.time.sleep")
     @patch("translation.gemini_client.genai")
@@ -191,11 +193,11 @@ class TestKeyRotation:
         assert result_cues[0].text == "Hola"
         mock_sleep.assert_called_once_with(4)
         # Key should NOT be exhausted since retry succeeded
-        assert KEYS[0] not in _exhausted_keys
+        assert KEYS[0] not in _exhausted_for(DEFAULT_MODEL)
 
     @patch("translation.gemini_client.time.sleep")
     @patch("translation.gemini_client.genai")
-    def test_all_keys_exhausted_raises(self, mock_genai, mock_sleep):
+    def test_all_keys_exhausted_raises(self, mock_genai, _mock_sleep):
         """When all keys are exhausted, raises GeminiQuotaExhausted."""
         from google.api_core.exceptions import ResourceExhausted
 
@@ -208,13 +210,15 @@ class TestKeyRotation:
         cues = _make_cues(1)
         with pytest.raises(GeminiQuotaExhausted):
             translate_srt_cues(KEYS, cues, "English", "Spanish")
-        assert KEYS[0] in _exhausted_keys
-        assert KEYS[1] in _exhausted_keys
+        # Both keys exhausted on both models (Pro tried first, then Flash fallback)
+        for m in (DEFAULT_MODEL, FALLBACK_MODEL):
+            assert KEYS[0] in _exhausted_for(m)
+            assert KEYS[1] in _exhausted_for(m)
 
     @patch("translation.gemini_client.genai")
     def test_skips_already_exhausted_keys(self, mock_genai):
         """Already-exhausted keys are skipped."""
-        _exhausted_keys.add(KEYS[0])
+        _exhausted_for(DEFAULT_MODEL).add(KEYS[0])
 
         mock_model = MagicMock()
         mock_response = MagicMock()
@@ -231,8 +235,8 @@ class TestKeyRotation:
 
 class TestHelpers:
     def test_reset_exhausted_keys(self):
-        _exhausted_keys.add("test-key")
-        assert len(_exhausted_keys) == 1
+        _exhausted_for(DEFAULT_MODEL).add("test-key")
+        assert len(_exhausted_for(DEFAULT_MODEL)) == 1
         reset_exhausted_keys()
         assert len(_exhausted_keys) == 0
 
@@ -240,11 +244,12 @@ class TestHelpers:
         assert has_available_keys(KEYS) is True
 
     def test_has_available_keys_none_available(self):
-        _exhausted_keys.update(KEYS)
+        for k in KEYS:
+            _exhausted_for(DEFAULT_MODEL).add(k)
         assert has_available_keys(KEYS) is False
 
     def test_has_available_keys_partial(self):
-        _exhausted_keys.add(KEYS[0])
+        _exhausted_for(DEFAULT_MODEL).add(KEYS[0])
         assert has_available_keys(KEYS) is True
 
     def test_has_available_keys_empty_list(self):

@@ -117,11 +117,10 @@ def test_load_config_gemini_keys(env_config_gemini):
     assert cfg.gemini_api_keys == ["test-gemini-key-1", "test-gemini-key-2"]
 
 
-def test_load_config_gemini_partial_keys(monkeypatch):
-    """Config loads only non-empty Gemini keys."""
+def test_load_config_gemini_single_key(monkeypatch):
+    """Config loads a single Gemini key."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
-    monkeypatch.setenv("GEMINI_API_KEY_1", "only-one-key")
-    monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEYS", "only-one-key")
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "0")
     cfg = load_config()
     assert cfg.gemini_api_keys == ["only-one-key"]
@@ -130,8 +129,7 @@ def test_load_config_gemini_partial_keys(monkeypatch):
 def test_load_config_gemini_only_no_error(monkeypatch):
     """Config doesn't raise when only Gemini keys are set."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
-    monkeypatch.setenv("GEMINI_API_KEY_1", "gemini-key")
-    monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEYS", "gemini-key")
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "0")
     cfg = load_config()
     assert cfg.deepl_api_key == ""
