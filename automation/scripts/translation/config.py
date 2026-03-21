@@ -10,7 +10,7 @@ DEFAULT_STATE_DIR = "/APPBOX_DATA/storage/.translation-state"
 
 # DeepL quota reset date — skip DeepL until this date (inclusive)
 # Set via DEEPL_SKIP_UNTIL env var (YYYY-MM-DD) or None to disable
-_skip_raw = os.environ.get("DEEPL_SKIP_UNTIL", "2026-04-13").strip()
+_skip_raw = os.environ.get("DEEPL_SKIP_UNTIL", "").strip()
 DEEPL_SKIP_UNTIL = date.fromisoformat(_skip_raw) if _skip_raw else None
 
 # Provider constants

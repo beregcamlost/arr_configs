@@ -118,35 +118,53 @@ class TestTranslateCuesWithFallback:
 
     @patch("translation.gemini_client.translate_srt_cues")
     @patch("translation.translator.deepl_translate_srt_cues")
-    def test_deepl_quota_falls_back_to_gemini(self, mock_deepl, mock_gemini):
-        """When DeepL quota exceeded, falls back to Gemini."""
+    def test_gemini_quota_falls_back_to_deepl(self, mock_deepl, mock_gemini):
+        """When Gemini quota exhausted, falls back to DeepL."""
+        from translation.gemini_client import GeminiQuotaExhausted
         translator_mod._deepl_quota_exceeded = False
         translator_mod._gemini_quota_exceeded = False
         cfg = _make_cfg(gemini_keys=["key1", "key2"])
         cues = _make_cues()
-        mock_deepl.side_effect = Exception("Quota exceeded (HTTP 456)")
-        mock_gemini.return_value = (cues, 18)
+        mock_gemini.side_effect = GeminiQuotaExhausted("all keys exhausted")
+        mock_deepl.return_value = (cues, 18)
 
         result_cues, chars, provider = _translate_cues_with_fallback(
             cfg, cues, "en", "es", MagicMock(), None
         )
-        assert provider == "gemini"
-        assert translator_mod._deepl_quota_exceeded is True
+        assert provider == "deepl"
+        assert translator_mod._gemini_quota_exceeded is True
+
+    @patch("translation.translator.deepl_translate_srt_cues")
+    @patch("translation.gemini_client.translate_srt_cues")
+    def test_gemini_error_falls_back_to_deepl(self, mock_gemini, mock_deepl):
+        """When Gemini raises a non-quota error, falls back to DeepL."""
+        translator_mod._deepl_quota_exceeded = False
+        translator_mod._gemini_quota_exceeded = False
+        cfg = _make_cfg(gemini_keys=["key1", "key2"])
+        cues = _make_cues()
+        mock_gemini.side_effect = TypeError("the JSON object must be str, bytes or bytearray, not NoneType")
+        mock_deepl.return_value = (cues, 18)
+
+        result_cues, chars, provider = _translate_cues_with_fallback(
+            cfg, cues, "en", "es", MagicMock(), None
+        )
+        assert provider == "deepl"
+        assert translator_mod._gemini_quota_exceeded is False  # flag NOT set for non-quota errors
 
     @patch("translation.google_client.create_translator")
     @patch("translation.google_client.translate_srt_cues")
     @patch("translation.gemini_client.translate_srt_cues")
     @patch("translation.translator.deepl_translate_srt_cues")
-    def test_full_chain_deepl_gemini_google(self, mock_deepl, mock_gemini,
+    def test_full_chain_gemini_deepl_google(self, mock_deepl, mock_gemini,
                                              mock_google, mock_create_google):
-        """Full chain: DeepL fails -> Gemini fails -> Google succeeds."""
+        """Full chain: Gemini fails -> DeepL fails -> Google succeeds."""
         from translation.gemini_client import GeminiQuotaExhausted
         translator_mod._deepl_quota_exceeded = False
         translator_mod._gemini_quota_exceeded = False
         cfg = _make_cfg(gemini_keys=["key1"])
         cues = _make_cues()
-        mock_deepl.side_effect = Exception("Quota exceeded (HTTP 456)")
         mock_gemini.side_effect = GeminiQuotaExhausted("all keys exhausted")
+        mock_deepl.side_effect = Exception("Quota exceeded (HTTP 456)")
         mock_google.return_value = (cues, 18)
         mock_create_google.return_value = MagicMock()
 

@@ -1154,15 +1154,15 @@ try_providers_for_lang() {
     endpoint_type="episodes"
     local series_dir="${mkv_file%%/Season*}"
     local bsq_series_id bsq_episode_id
-    bsq_series_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$series_dir")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
-    bsq_episode_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrEpisodeId FROM table_episodes WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    bsq_series_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=30000; SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$series_dir")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    bsq_episode_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=30000; SELECT sonarrEpisodeId FROM table_episodes WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
     [[ -z "$bsq_series_id" || -z "$bsq_episode_id" ]] && { log "PROVIDER_CYCLE: no Bazarr episode ID for $(basename "$mkv_file")"; return 1; }
     id_param="episodeid=${bsq_episode_id}"
   else
     media_type="movie"
     endpoint_type="movies"
     local bsq_radarr_id
-    bsq_radarr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    bsq_radarr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=30000; SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
     [[ -z "$bsq_radarr_id" ]] && { log "PROVIDER_CYCLE: no Bazarr movie ID for $(basename "$mkv_file")"; return 1; }
     id_param="radarrid=${bsq_radarr_id}"
   fi
@@ -1325,7 +1325,7 @@ try_providers_for_lang() {
 
 try_translate_inline() {
   local mkv_file="$1" target_lang="$2"
-  log "TRANSLATE_INLINE: attempting DeepL translation for lang=$target_lang: $(basename "$mkv_file")"
+  log "TRANSLATE_INLINE: attempting translation for lang=$target_lang: $(basename "$mkv_file")"
   PYTHONPATH="${SCRIPT_DIR}/../../scripts" python3 \
     -m translation.translator translate --file "$mkv_file" </dev/null 2>&1 | while IFS= read -r line; do
     log "TRANSLATE_INLINE: $line"
@@ -1887,8 +1887,8 @@ cmd_auto_maintain() {
             if [[ -n "$BAZARR_API_KEY" ]] && try_providers_for_lang "$mkv_file" "$ext_lang_norm" "$duration"; then
               log "PROVIDER_CYCLE: resolved via providers for lang=$ext_lang_norm: $basename"
             else
-              # Providers failed — try embedded extraction + DeepL translation
-              log "PROVIDER_CYCLE: falling back to DeepL translation for lang=$ext_lang_norm: $basename"
+              # Providers failed — try embedded extraction + translation
+              log "PROVIDER_CYCLE: falling back to translation for lang=$ext_lang_norm: $basename"
               if [[ -n "$am_profile_set" ]]; then
                 local emb_json_bad emb_count_bad
                 emb_json_bad="$(get_embedded_subs "$mkv_file")"
@@ -2079,7 +2079,7 @@ cmd_auto_maintain() {
 
     # --- Phase 1.5: Clean up non-profile external SRTs ---
     # Once all profile languages are satisfied (embedded or external), non-profile
-    # SRTs are no longer needed as DeepL translation sources — safe to remove.
+    # SRTs are no longer needed as translation sources — safe to remove.
     if [[ -n "$am_profile_set" ]]; then
       # Check if ALL profile languages have subtitles (embedded or external)
       # Re-read embedded after potential mux
@@ -2148,7 +2148,7 @@ cmd_auto_maintain() {
       fi
     fi
 
-    # --- Phase 3: Provider cycle + DeepL translation for completely missing profile languages ---
+    # --- Phase 3: Provider cycle + translation for completely missing profile languages ---
     if [[ -n "$am_profile_set" ]]; then
       # Re-read current state — necessary because Phase 1/1.5 may have muxed/stripped tracks
       local emb_json_now
@@ -2183,9 +2183,9 @@ cmd_auto_maintain() {
             log "PROVIDER_CYCLE: found sub for missing profile lang=$pc_norm: $basename"
             continue
           fi
-          # Providers failed — try DeepL translation from any available profile-language sub
+          # Providers failed — try translation from any available profile-language sub
           if try_translate_inline "$mkv_file" "$pc_norm"; then
-            log "TRANSLATE: filled missing profile lang=$pc_norm via DeepL: $basename"
+            log "TRANSLATE: filled missing profile lang=$pc_norm via translation: $basename"
             continue
           fi
           log "EXHAUSTED: no provider or translation for missing profile lang=$pc_norm: $basename"

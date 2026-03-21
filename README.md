@@ -34,7 +34,7 @@
 
 [![Cron Jobs](https://img.shields.io/badge/cron%20jobs-21%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
 [![Tests](https://img.shields.io/badge/tests-528%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--03--15-informational?style=flat-square&logo=calendar&logoColor=white)]()
+[![Updated](https://img.shields.io/badge/last%20updated-2026--03--21-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -51,7 +51,7 @@
 - [🎬 Subtitle System](#-subtitle-system)
 - [🔄 Codec Manager](#-codec-manager)
 - [📺 Streaming Checker](#-streaming-checker)
-- [🌐 DeepL Translation System](#-deepl-translation-system)
+- [🌐 Translation System](#-translation-system)
 - [👻 Emby Zombie Reaper](#-emby-zombie-reaper)
 - [🧹 Arr Cleanup](#-arr-cleanup)
 - [⏰ Cron Schedule](#-cron-schedule)
@@ -166,7 +166,7 @@ graph TB
 | 🎬 Subtitle Manager | Bash | 159 ✅ | 5 min / 10 min / daily | ✅ Discord |
 | 🔄 Codec Manager | Bash | — | 15 min / 3 AM daily | ✅ Discord |
 | 📺 Streaming Checker | Python | 271 ✅ | Weekly / Monthly | ✅ Discord |
-| 🌐 DeepL Translator | Python | 98 ✅ | 30 min | ✅ Discord |
+| 🌐 Translation System | Python | 151 ✅ | 30 min | ✅ Discord |
 | 👻 Zombie Reaper | Bash | — | 2 min | ✅ Discord |
 | 🧹 Arr Cleanup | Bash | — | 30 min | — |
 | 📈 Trending Auto-Add | Python | 21 ✅ | Weekly (DISABLED) | — |
@@ -180,7 +180,7 @@ graph TB
 |--------|-------|
 | 📜 Total cron jobs | 21 |
 | 🧪 Total tests | 528 passing |
-| 🌐 DeepL budget | 400K chars/month (Pro, Google fallback after) |
+| 🌐 Translation budget | Gemini primary (13 free keys), DeepL 400K/month fallback, Google last resort |
 | 💾 State databases | 5 (codec, streaming, translation, subtitle-quality, bazarr) |
 | 🔌 External APIs | 9 (Sonarr, Radarr, Bazarr, Emby, TMDB, DeepL, MoTN, Watchmode, JustWatch) |
 | 📡 Discord webhooks | All systems |
@@ -265,10 +265,10 @@ flowchart LR
 
 ```
 Every  5 min  → subtitle dedupe quick scan      (--since 10 min)
-Every 10 min  → subtitle auto-maintain quick    (--since 15 min)
+Every ~10 min → subtitle auto-maintain quick    (--since 15 min, staggered at :07/:17/...)
 Daily  1 AM   → subtitle auto-maintain full     (entire library)
 Weekly Sun 4AM→ subtitle dedupe full            (entire library)
-Every 15 min  → bazarr subtitle recovery        (--since 30 min)
+Every ~15 min → bazarr subtitle recovery        (--since 30 min, staggered at :03/:18/...)
 ```
 
 > 💡 **`--since` logic**: checks both MKV mtime AND SRT mtime (OR logic), so new imports without SRTs are always caught by quick scans.
@@ -397,9 +397,9 @@ flowchart TD
 
 ---
 
-## 🌐 DeepL Translation System
+## 🌐 Translation System
 
-> **`automation/scripts/translation/`** — Automatic subtitle translation for missing profile languages using the DeepL free API. Bridges the gap when Bazarr can't find subtitles in the required language.
+> **`automation/scripts/translation/`** — Automatic subtitle translation for missing profile languages using Gemini, DeepL, and Google Translate. Bridges the gap when Bazarr can't find subtitles in the required language.
 
 ### 🧠 Smart Source Selection
 
@@ -429,9 +429,9 @@ Import Hook (background, async)
 
 | Metric | Value |
 |--------|-------|
-| Plan | Pro API ($5.49/mo + $25/M chars) |
-| Monthly budget | 400,000 characters (~$15.50/mo cap) |
-| Over-budget | Falls back to Google Translate (free) |
+| Primary | Gemini 2.5 Pro/Flash (13 free API keys, 1500 req/day each) |
+| Fallback | DeepL Pro API (400K chars/month budget cap) |
+| Last resort | Google Translate (free, unofficial API) |
 | Cooldown | 24h per (file, language) |
 | Discord alert | Quota warning webhook on low balance |
 | Override | `--monthly-budget 0` for unlimited (manual only) |
@@ -439,12 +439,14 @@ Import Hook (background, async)
 ### 🧪 Test Coverage
 
 ```
-98 tests passing
+151 tests passing
+├── Provider fallback chain (Gemini → DeepL → Google)
 ├── CLI argument handling
 ├── Source SRT selection logic
 ├── State DB cooldown enforcement
 ├── Bazarr DB profile + missing_subtitles parsing
-├── Gemini provider tests
+├── Gemini multi-key rotation + model fallback
+├── Google Translate error recovery
 └── Language code mapping validation
 ```
 
@@ -477,11 +479,12 @@ Import Hook (background, async)
 ### ⚙️ What It Does
 
 ```
-Every 30 minutes:
+Every 30 minutes (at :12 and :42):
   1. Query Sonarr + Radarr for queue items in "importBlocked" status
-  2. Remove matching entries from arr queues
-  3. Delete corresponding torrents from Transmission
-  4. Free up queue space for new downloads
+  2. Blocklist queue items with executable extensions (.exe, .msi, etc.)
+  3. Remove matching entries from arr queues
+  4. Delete corresponding torrents from Transmission
+  5. Free up queue space for new downloads
 ```
 
 ---
@@ -498,8 +501,8 @@ gantt
 
     section Subtitles
     Dedupe quick (every 5m)     :active, 00:00, 24:00
-    Auto-maintain quick (10m)   :active, 00:00, 24:00
-    Bazarr recovery (15m)       :active, 00:00, 24:00
+    Auto-maintain quick (~10m staggered)   :active, 00:00, 24:00
+    Bazarr recovery (~15m staggered)       :active, 00:00, 24:00
     Auto-maintain full          :milestone, 01:00, 0m
 
     section Codec
@@ -523,14 +526,14 @@ gantt
 | Schedule | Job | System | Notes |
 |----------|-----|--------|-------|
 | `*/5 * * * *` | 🎬 Subtitle dedupe quick | Subtitles | `--since 10` min |
-| `*/10 * * * *` | 🎬 Subtitle auto-maintain quick | Subtitles | `--since 15` min |
-| `*/15 * * * *` | 🎬 Bazarr subtitle recovery | Subtitles | `--since 30` min |
+| `7,17,27,37,47,57 * * * *` | 🎬 Subtitle auto-maintain quick | Subtitles | `--since 15` min |
+| `3,18,33,48 * * * *` | 🎬 Bazarr subtitle recovery | Subtitles | `--since 30` min |
 | `0 1 * * *` | 🎬 Subtitle auto-maintain full | Subtitles | Full library scan (checks SRT mtimes) |
 | `0 4 * * 0` | 🎬 Subtitle dedupe full | Subtitles | Weekly, Sunday 4 AM |
 | `*/15 * * * *` | 🔄 Codec manager resume | Codec | Batch size 1 |
 | `0 3 * * *` | 🔄 Codec audit + plan | Codec | Incremental, ~7 min |
 | `*/30 * * * *` | 🌐 DeepL translation | Translation | `--since 60` min |
-| `*/30 * * * *` | 🧹 Arr import-blocked cleanup | Cleanup | — |
+| `12,42 * * * *` | 🧹 Arr import-blocked cleanup | Cleanup | — |
 | `0 5 * * 0` | 📺 Streaming availability scan | Streaming | Weekly, Sunday 5 AM |
 | `30 5 * * 0` | 📺 Tier 1.5: stale flag (90d unwatched) | Streaming | Weekly, Sunday 5:30 AM |
 | `0 6 * * 0` | 📺 Tier 1: streaming cleanup | Streaming | Weekly, Sunday 6 AM (DISABLED) |
@@ -650,7 +653,7 @@ sequenceDiagram
 | 🌙 Streaming | Movie of the Night (RapidAPI) | Per-season availability + cross-validation |
 | 📊 Streaming | Watchmode API | Cross-validation voter |
 | 🎯 Streaming | JustWatch GraphQL | Cross-validation voter (no API key) |
-| 🌐 Translation | DeepL Pro API + Google Translate | Subtitle translation (DeepL primary, Google fallback) |
+| 🌐 Translation | Gemini + DeepL Pro + Google Translate | Subtitle translation (Gemini primary, DeepL fallback, Google last resort) |
 | 🔔 Alerts | Discord Webhooks | All system notifications |
 | 🔒 Concurrency | `flock` | Cron job mutual exclusion |
 | 🔍 Indexers | Prowlarr (23 indexers) | Torrent search |

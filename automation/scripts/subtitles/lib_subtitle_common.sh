@@ -18,6 +18,8 @@
 
 : "${DB:=/opt/bazarr/data/db/bazarr.db}"
 
+SQLITE_TIMEOUT_MS=30000
+
 # Subtitle extensions that can be converted to SRT (text-based formats)
 CONVERTIBLE_SUB_EXTS="ass ssa vtt"
 # All subtitle extensions we care about (convertible + srt)
@@ -301,7 +303,7 @@ resolve_bazarr_profile_langs() {
   esc_path="$(sql_escape "$file_path")"
 
   if is_tv_path "$file_path"; then
-    profile_id="$(sqlite3 "$bazarr_db" "
+    profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
       SELECT s.profileId FROM table_episodes e
       JOIN table_shows s ON s.sonarrSeriesId = e.sonarrSeriesId
       WHERE e.path = '$esc_path' LIMIT 1;
@@ -311,14 +313,14 @@ resolve_bazarr_profile_langs() {
       local series_dir
       series_dir="$(echo "$file_path" | sed 's|/Season.*||' | xargs basename 2>/dev/null)"
       if [[ -n "$series_dir" ]]; then
-        profile_id="$(sqlite3 "$bazarr_db" "
+        profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
           SELECT profileId FROM table_shows
           WHERE path LIKE '%$(sql_escape "$series_dir")%' LIMIT 1;
         " 2>/dev/null)"
       fi
     fi
   elif is_movie_path "$file_path"; then
-    profile_id="$(sqlite3 "$bazarr_db" "
+    profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
       SELECT profileId FROM table_movies WHERE path = '$esc_path' LIMIT 1;
     " 2>/dev/null)"
 
@@ -326,7 +328,7 @@ resolve_bazarr_profile_langs() {
       local movie_dir
       movie_dir="$(basename "$(dirname "$file_path")")"
       if [[ -n "$movie_dir" ]]; then
-        profile_id="$(sqlite3 "$bazarr_db" "
+        profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
           SELECT profileId FROM table_movies
           WHERE path LIKE '%$(sql_escape "$movie_dir")%' LIMIT 1;
         " 2>/dev/null)"
@@ -337,7 +339,7 @@ resolve_bazarr_profile_langs() {
   [[ -z "$profile_id" ]] && return 1
 
   local items
-  items="$(sqlite3 "$bazarr_db" "
+  items="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
     SELECT items FROM table_languages_profiles WHERE profileId = $profile_id LIMIT 1;
   " 2>/dev/null)"
 
@@ -360,12 +362,12 @@ bazarr_rescan_for_file() {
   if is_tv_path "$file_path"; then
     local show_dir sonarr_id
     show_dir="$(echo "$file_path" | sed 's|/Season.*||' | sed 's|/$||')"
-    sonarr_id="$(sqlite3 "$bazarr_db" "SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$show_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
+    sonarr_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$show_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
     [[ -n "$sonarr_id" ]] && bazarr_scan_disk_series "$sonarr_id" "$bazarr_url" "$api_key"
   elif is_movie_path "$file_path"; then
     local movie_dir radarr_id
     movie_dir="$(dirname "$file_path")"
-    radarr_id="$(sqlite3 "$bazarr_db" "SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$movie_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
+    radarr_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$movie_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
     [[ -n "$radarr_id" ]] && bazarr_scan_disk_movie "$radarr_id" "$bazarr_url" "$api_key"
   fi
 }
@@ -1031,7 +1033,7 @@ upsert_needs_upgrade() {
   local db="$1" fp="$2" lang="$3" forced="$4" rating="$5" score="$6" src="${7:-external}"
   local now
   now="$(date +%s)"
-  sqlite3 -cmd ".timeout 30000" "$db" "
+  sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     INSERT INTO needs_upgrade (file_path, lang, forced, current_rating, current_score, source, first_seen_ts, last_retry_ts, retry_count, resolved_ts)
     VALUES ('$(sql_escape "$fp")', '$(sql_escape "$lang")', $forced, '$rating', $score, '$src', $now, 0, 0, NULL)
     ON CONFLICT(file_path, lang, forced) DO UPDATE SET
@@ -1048,7 +1050,7 @@ resolve_needs_upgrade() {
   local db="$1" fp="$2" lang="$3" forced="$4"
   local now
   now="$(date +%s)"
-  sqlite3 -cmd ".timeout 30000" "$db" "
+  sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     UPDATE needs_upgrade SET resolved_ts = $now
     WHERE file_path = '$(sql_escape "$fp")' AND lang = '$(sql_escape "$lang")' AND forced = $forced AND resolved_ts IS NULL;
   " </dev/null 2>/dev/null || true
@@ -1064,7 +1066,7 @@ drain_upgrade_candidates() {
   local limit="${4:-500}"
   local cutoff
   cutoff="$(( $(date +%s) - threshold ))"
-  sqlite3 -separator $'\t' -cmd ".timeout 30000" "$db" "
+  sqlite3 -separator $'\t' -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     SELECT file_path, lang, forced, current_rating, current_score, retry_count
     FROM needs_upgrade
     WHERE resolved_ts IS NULL
@@ -1081,7 +1083,7 @@ touch_upgrade_retry() {
   local db="$1" fp="$2" lang="$3" forced="$4"
   local now
   now="$(date +%s)"
-  sqlite3 -cmd ".timeout 30000" "$db" "
+  sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     UPDATE needs_upgrade SET last_retry_ts = $now, retry_count = retry_count + 1
     WHERE file_path = '$(sql_escape "$fp")' AND lang = '$(sql_escape "$lang")' AND forced = $forced;
   " </dev/null 2>/dev/null || true

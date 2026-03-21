@@ -24,8 +24,8 @@
 
 ## ✨ Features
 
-- **🤖 Multi-provider** — Gemini 2.5 Pro (primary, auto-fallback to 2.5 Flash), DeepL free API (500K chars/month), Google Translate (fallback)
-- **🔄 Automatic failover** — DeepL → Gemini (Pro → Flash) → Google, with per-key rotation and per-model quota tracking
+- **🤖 Multi-provider** — Gemini 2.5 Pro (primary, auto-fallback to 2.5 Flash), DeepL Pro API (fallback), Google Translate (last resort)
+- **🔄 Automatic failover** — Gemini (Pro → Flash) → DeepL → Google, with per-key rotation and per-model quota tracking
 - **🧠 Smart source SRT selection** — picks the largest non-forced SRT; prefers English if it's within 20% of the largest
 - **🔍 Bazarr profile integration** — reads your Bazarr language profile to know exactly which languages are needed per file
 - **⏱️ 24-hour cooldown** — avoids re-translating the same (file, language) pair too soon after a failure
@@ -130,7 +130,7 @@ pt → PT-PT      it → IT      ...
 ```bash
 cd /config/berenstuff/automation/scripts
 python3 -m pytest translation/tests/ -v
-# 149 tests covering all modules
+# 151 tests covering all modules
 ```
 
 ---
@@ -157,4 +157,4 @@ DISCORD_WEBHOOK_URL=...
   >> /config/berenstuff/automation/logs/deepl_translate.log 2>&1
 ```
 
-> **Free tier budgets:** DeepL 500K chars/month, Gemini 2.5 Pro 25 RPM / Flash 30 RPM (free tier, 1500 req/day per key). The `status` command shows current consumption.
+> **Budgets:** DeepL Pro 400K chars/month budget cap, Gemini 2.5 Pro 25 RPM / Flash 30 RPM (free tier, 1500 req/day per key × 13 keys). Google Translate is free (unofficial API, no guaranteed SLA). The `status` command shows current consumption.

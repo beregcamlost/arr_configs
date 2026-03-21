@@ -26,10 +26,16 @@ def translate_texts(
     """Translate a list of texts via Google Translate. Returns translated strings."""
     if not texts:
         return []
-    results = translator.translate(texts, src=source_lang, dest=target_lang)
-    if isinstance(results, list):
-        return [r.text for r in results]
-    return [results.text]
+    # Translate one at a time — googletrans batch mode is broken (returns None)
+    results = []
+    for text in texts:
+        try:
+            result = translator.translate(text, src=source_lang, dest=target_lang)
+            results.append(result.text if result and result.text else text)
+        except Exception as e:
+            log.warning("Google Translate failed for cue, keeping original: %s", e)
+            results.append(text)
+    return results
 
 
 def translate_srt_cues(

@@ -74,31 +74,14 @@ def _has_google(cfg: Config) -> bool:
 
 def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
                                    deepl_translator, google_translator):
-    """Translate cues trying DeepL -> Gemini -> Google.
+    """Translate cues trying Gemini -> DeepL -> Google.
 
     Returns (translated_cues, chars_used, provider).
     Raises on non-quota errors.
     """
     global _deepl_quota_exceeded, _gemini_quota_exceeded
 
-    # Try DeepL first
-    if _has_deepl(cfg) and base_lang in DEEPL_LANG_MAP and source_lang_code in DEEPL_SOURCE_LANG_MAP:
-        deepl_source = DEEPL_SOURCE_LANG_MAP[source_lang_code]
-        deepl_target = DEEPL_LANG_MAP[base_lang]
-        try:
-            translated_cues, chars_used = deepl_translate_srt_cues(
-                deepl_translator, cues, deepl_source, deepl_target
-            )
-            return translated_cues, chars_used, PROVIDER_DEEPL
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "quota" in error_msg or "456" in str(e):
-                log.warning("DeepL quota exceeded, trying Gemini")
-                _deepl_quota_exceeded = True
-            else:
-                raise
-
-    # Try Gemini
+    # Try Gemini first
     if _has_gemini(cfg) and base_lang in GEMINI_LANG_MAP and source_lang_code in GEMINI_LANG_MAP:
         from translation.gemini_client import (
             translate_srt_cues as gemini_translate_srt_cues,
@@ -112,8 +95,29 @@ def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
             )
             return translated_cues, chars_used, PROVIDER_GEMINI
         except GeminiQuotaExhausted:
-            log.warning("All Gemini keys exhausted, falling back to Google")
+            log.warning("All Gemini keys exhausted, trying DeepL")
             _gemini_quota_exceeded = True
+        except Exception as e:
+            # Non-quota error — fall through without setting _gemini_quota_exceeded
+            # so Gemini is retried on the next file (transient errors may self-resolve)
+            log.warning("Gemini failed (%s), trying DeepL", e)
+
+    # Try DeepL
+    if _has_deepl(cfg) and base_lang in DEEPL_LANG_MAP and source_lang_code in DEEPL_SOURCE_LANG_MAP:
+        deepl_source = DEEPL_SOURCE_LANG_MAP[source_lang_code]
+        deepl_target = DEEPL_LANG_MAP[base_lang]
+        try:
+            translated_cues, chars_used = deepl_translate_srt_cues(
+                deepl_translator, cues, deepl_source, deepl_target
+            )
+            return translated_cues, chars_used, PROVIDER_DEEPL
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "quota" in error_msg or "456" in str(e):
+                log.warning("DeepL quota exceeded, trying Google")
+                _deepl_quota_exceeded = True
+            else:
+                raise
 
     # Fall back to Google
     if _has_google(cfg) and base_lang in GOOGLE_LANG_MAP and source_lang_code in GOOGLE_LANG_MAP:

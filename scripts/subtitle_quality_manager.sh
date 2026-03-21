@@ -29,10 +29,17 @@ RADARR_URL="${RADARR_URL:-http://127.0.0.1:7878/radarr}"
 RADARR_KEY="${RADARR_KEY:-}"
 DEEPL_API_KEY="${DEEPL_API_KEY:-}"
 BAZARR_MIN_SCORE="${BAZARR_MIN_SCORE:-80}"
+UPGRADE_TRANSLATE_RETRY="${UPGRADE_TRANSLATE_RETRY:-3}"
+UPGRADE_ALERT_RETRY="${UPGRADE_ALERT_RETRY:-4}"
+UPGRADE_MAX_RETRY="${UPGRADE_MAX_RETRY:-5}"
+# Dead-end sources (embedded_desync/missing) cap at UPGRADE_MAX_RETRY; other
+# sources use a higher ceiling before abandonment.
+UPGRADE_PROVIDER_MAX_RETRY="${UPGRADE_PROVIDER_MAX_RETRY:-30}"
 COMPLIANCE_FORMAT="text"
 COMPLIANCE_VERBOSE=0
 
 WATERMARK_PATTERNS="galaxytv|yify|yts|opensubtitles|addic7ed|subscene|podnapisi|sub[sz]cene"
+_CACHED_WATERMARK_PATTERNS=""
 
 usage() {
   cat <<'EOF'
@@ -45,6 +52,7 @@ Commands:
   auto-maintain  Automated mux/strip with safety checks (quick + full mode)
   enqueue        Add file path(s) to pending work queue for next auto-maintain run
   compliance     Report subtitle compliance against Bazarr profiles for all media
+  watermark      Manage subtitle watermark patterns (list/add/remove/test)
 
 Common options:
   --path DIR            Media directory to process (required for audit/mux/strip)
@@ -134,9 +142,65 @@ init_state_db() {
     );
     CREATE INDEX IF NOT EXISTS idx_nu_last_retry ON needs_upgrade(last_retry_ts);
     CREATE INDEX IF NOT EXISTS idx_nu_resolved   ON needs_upgrade(resolved_ts);
+    CREATE TABLE IF NOT EXISTS watermark_patterns (
+      pattern    TEXT PRIMARY KEY,
+      source     TEXT DEFAULT 'builtin',
+      added_ts   INTEGER NOT NULL,
+      hit_count  INTEGER DEFAULT 0,
+      last_hit   INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS sync_drift_cache (
+      file_path    TEXT NOT NULL,
+      target_lang  TEXT NOT NULL,
+      file_mtime   INTEGER NOT NULL,
+      ref_lang     TEXT NOT NULL,
+      max_drift    REAL NOT NULL,
+      drift_rating TEXT NOT NULL,
+      checked_ts   INTEGER NOT NULL,
+      PRIMARY KEY (file_path, target_lang)
+    );
+    CREATE TABLE IF NOT EXISTS quality_checks (
+      srt_path      TEXT NOT NULL,
+      srt_mtime     INTEGER NOT NULL,
+      expected_lang TEXT NOT NULL,
+      actual_lang   TEXT DEFAULT '',
+      quality       TEXT NOT NULL,
+      reason        TEXT DEFAULT '',
+      confidence    REAL DEFAULT 0.0,
+      checked_ts    INTEGER NOT NULL,
+      provider      TEXT DEFAULT 'gemini',
+      PRIMARY KEY (srt_path, expected_lang)
+    );
     PRAGMA journal_mode=WAL;
     PRAGMA busy_timeout=30000;
   " </dev/null >/dev/null 2>&1
+}
+
+init_watermark_patterns() {
+  local db="$1"
+  local now
+  now="$(date +%s)"
+  # One multi-row INSERT covers all builtins — idempotent via OR IGNORE
+  sqm_db "$db" "
+    INSERT OR IGNORE INTO watermark_patterns(pattern, source, added_ts) VALUES
+      ('galaxytv',         'builtin', $now),
+      ('yify',             'builtin', $now),
+      ('yts',              'builtin', $now),
+      ('opensubtitles',    'builtin', $now),
+      ('addic7ed',         'builtin', $now),
+      ('subscene',         'builtin', $now),
+      ('podnapisi',        'builtin', $now),
+      ('sub[sz]cene',      'builtin', $now),
+      ('the evil team',    'builtin', $now),
+      ('dr\\.? ?infinito', 'builtin', $now),
+      ('grupots',          'builtin', $now),
+      ('grupo ?ts',        'builtin', $now);
+  " 2>/dev/null || true
+}
+
+load_watermark_patterns() {
+  local db="$1"
+  sqm_db "$db" -separator '|' "SELECT pattern FROM watermark_patterns ORDER BY source, pattern;" 2>/dev/null
 }
 
 # SQLite wrapper: sets busy_timeout via -cmd (no stdout leakage), passes through flags and query
@@ -260,7 +324,8 @@ analyze_srt_file() {
   fi
 
   local watermarks=0
-  if grep -qiE "$WATERMARK_PATTERNS" "$srt_file" 2>/dev/null; then
+  local _wm_pat="${_CACHED_WATERMARK_PATTERNS:-$WATERMARK_PATTERNS}"
+  if [[ -n "$_wm_pat" ]] && grep -qiE "$_wm_pat" "$srt_file" 2>/dev/null; then
     watermarks=1
   fi
 
@@ -327,6 +392,7 @@ check_embedded_collision() {
 
 score_subtitle() {
   local cues="$1" first="$2" last="$3" duration="$4" mojibake="$5" watermarks="$6"
+  local sync_drift_rating="${7:-}"
   local rating="GOOD"
 
   [[ "$mojibake" -eq 1 ]] && { echo "BAD"; return; }
@@ -349,20 +415,243 @@ score_subtitle() {
     elif [[ "$coverage" -lt 70 ]]; then
       rating="WARN"
     fi
-  fi
-
-  # Late first-cue: only WARN when coverage is also low (high coverage = artistic choice)
-  if [[ "$duration" != "0" ]] && [[ "$duration" != "0.0" ]] && [[ "$cues" -gt 0 ]]; then
-    local late_coverage
-    late_coverage="$(awk "BEGIN { printf \"%.0f\", ($last / $duration) * 100 }")"
-    if [[ "$(awk "BEGIN { print ($first > 300) }")" -eq 1 ]] && [[ "$late_coverage" -lt 80 ]]; then
+    # Late first-cue: only WARN when coverage is also low (high coverage = artistic choice)
+    if [[ "$(awk "BEGIN { print ($first > 300) }")" -eq 1 ]] && [[ "$coverage" -lt 80 ]]; then
       rating="WARN"
     fi
   fi
 
-  [[ "$watermarks" -eq 1 ]] && rating="WARN"
+  # Sync drift override (7th param from check_sync_drift)
+  if [[ "$sync_drift_rating" == "BAD" ]]; then
+    echo "BAD"; return
+  elif [[ "$sync_drift_rating" == "WARN" && "$rating" == "GOOD" ]]; then
+    rating="WARN"
+  fi
 
   echo "$rating"
+}
+
+# ---------------------------------------------------------------------------
+# Sync drift detection
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# get_drift_anchor_lang emb_json profile_langs
+#
+# Determines the drift anchor language: first profile lang that has an
+# embedded text-based subtitle track.  Outputs the normalized lang code,
+# or "" when no anchor can be determined.
+# ---------------------------------------------------------------------------
+get_drift_anchor_lang() {
+  local emb_json="$1" profile_langs="$2"
+  [[ -z "$profile_langs" ]] && return 0
+
+  declare -A _gda_text_langs=()
+  while IFS=$'\t' read -r _gda_lang _gda_codec; do
+    is_text_sub_codec "$_gda_codec" && _gda_text_langs["$(normalize_track_lang "$_gda_lang")"]=1
+  done < <(jq -r '.[] | [(.tags.language // "und"), .codec_name] | @tsv' <<<"$emb_json")
+
+  IFS=',' read -ra _gda_codes <<< "$profile_langs"
+  for _gda_c in "${_gda_codes[@]}"; do
+    local _gda_norm
+    _gda_norm="$(normalize_track_lang "$_gda_c")"
+    if [[ -n "${_gda_text_langs[$_gda_norm]:-}" ]]; then
+      echo "$_gda_norm"
+      return
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# find_reference_track mkv_file target_lang [profile_langs]
+#
+# Finds the best reference subtitle track for sync-drift comparison against
+# target_lang.  Outputs "ref_stream_idx ref_lang" on stdout, or "SKIP none"
+# when no usable reference exists.
+#
+# Cascade:
+#   1. Profile anchor — first profile lang that is NOT target_lang and HAS a
+#      text-based embedded subtitle track.
+#   2. Audio language — first audio track language (if != target_lang) that
+#      has a matching text-based embedded subtitle track.
+#   3. SKIP — no usable reference found.
+# ---------------------------------------------------------------------------
+find_reference_track() {
+  local mkv_file="$1" target_lang="$2" profile_langs="${3:-}"
+
+  # Retrieve all embedded subtitle streams as a JSON array.
+  local emb_json
+  emb_json="$(get_embedded_subs "$mkv_file")"
+
+  # Need at least 2 tracks for a meaningful reference (target + reference).
+  [[ "$(jq 'length' <<<"$emb_json")" -lt 2 ]] && { echo "SKIP none"; return; }
+
+  # Build map: normalized_lang -> first stream index for text-based tracks
+  # that are NOT the target language.
+  declare -A avail_tracks=()
+  while IFS=$'\t' read -r idx lang codec; do
+    is_text_sub_codec "$codec" || continue
+    local norm
+    norm="$(normalize_track_lang "$lang")"
+    [[ "$norm" == "$target_lang" ]] && continue  # Skip the target itself
+    # First text track per language wins
+    [[ -z "${avail_tracks[$norm]:-}" ]] && avail_tracks["$norm"]="$idx"
+  done < <(jq -r '.[] | [(.index | tostring), (.tags.language // "und"), .codec_name] | @tsv' <<<"$emb_json")
+
+  # Cascade 1: Profile anchor — first profile lang (not target) with a track
+  if [[ -n "$profile_langs" ]]; then
+    IFS=',' read -ra prof_codes <<< "$profile_langs"
+    for pc in "${prof_codes[@]}"; do
+      local pc_norm
+      pc_norm="$(normalize_track_lang "$pc")"
+      [[ "$pc_norm" == "$target_lang" ]] && continue
+      if [[ -n "${avail_tracks[$pc_norm]:-}" ]]; then
+        echo "${avail_tracks[$pc_norm]} $pc_norm"
+        return
+      fi
+    done
+  fi
+
+  # Cascade 2: Audio language — first audio lang (not target) with a sub track
+  local audio_langs
+  audio_langs="$(get_audio_languages "$mkv_file")" || audio_langs=""
+  if [[ -n "$audio_langs" ]]; then
+    IFS=',' read -ra a_codes <<< "$audio_langs"
+    for ac in "${a_codes[@]}"; do
+      local ac_norm
+      ac_norm="$(normalize_track_lang "$ac")"
+      [[ "$ac_norm" == "$target_lang" ]] && continue
+      if [[ -n "${avail_tracks[$ac_norm]:-}" ]]; then
+        echo "${avail_tracks[$ac_norm]} $ac_norm"
+        return
+      fi
+    done
+  fi
+
+  # Cascade 3: No usable reference
+  echo "SKIP none"
+}
+
+# ---------------------------------------------------------------------------
+# check_sync_drift mkv_file target_lang duration [profile_langs]
+#
+# Measures the maximum timing drift between the target subtitle track and a
+# reference track chosen by find_reference_track().
+#
+# Output: "max_drift_sec drift_rating ref_lang"
+#   drift_rating: GOOD (<30s), WARN (30-60s), BAD (>60s), SKIP (no reference)
+# ---------------------------------------------------------------------------
+check_sync_drift() {
+  local mkv_file="$1" target_lang="$2" duration="$3" profile_langs="${4:-}"
+
+  # Find reference track
+  local ref_result ref_idx ref_lang
+  ref_result="$(find_reference_track "$mkv_file" "$target_lang" "$profile_langs")"
+  read -r ref_idx ref_lang <<< "$ref_result"
+
+  if [[ "$ref_idx" == "SKIP" ]]; then
+    echo "0 SKIP none"
+    return
+  fi
+
+  # Find target track index among text-based embedded subs
+  local emb_json target_idx=""
+  emb_json="$(get_embedded_subs "$mkv_file")"
+  while IFS=$'\t' read -r idx lang codec; do
+    is_text_sub_codec "$codec" || continue
+    local norm
+    norm="$(normalize_track_lang "$lang")"
+    if [[ "$norm" == "$target_lang" ]]; then
+      target_idx="$idx"
+      break
+    fi
+  done < <(jq -r '.[] | [(.index | tostring), (.tags.language // "und"), .codec_name] | @tsv' <<<"$emb_json")
+
+  [[ -z "$target_idx" ]] && { echo "0 SKIP none"; return; }
+
+  # Extract both tracks to temporary SRT files
+  local tmp_ref="/tmp/drift_ref_${$}.srt"
+  local tmp_tgt="/tmp/drift_tgt_${$}.srt"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp_ref' '$tmp_tgt'" RETURN
+
+  ffmpeg -v quiet -i "$mkv_file" -map "0:${ref_idx}" -f srt "$tmp_ref" </dev/null 2>/dev/null \
+    || { echo "0 SKIP none"; return; }
+  ffmpeg -v quiet -i "$mkv_file" -map "0:${target_idx}" -f srt "$tmp_tgt" </dev/null 2>/dev/null \
+    || { echo "0 SKIP none"; return; }
+
+  [[ ! -s "$tmp_ref" || ! -s "$tmp_tgt" ]] && { echo "0 SKIP none"; return; }
+
+  # Parse both SRT files with a single awk pass; sample ~20 evenly-spaced
+  # timestamp pairs and compute the maximum absolute drift.
+  # Uses substr/index rather than three-argument match() for mawk compatibility.
+  local max_drift
+  max_drift="$(awk '
+    function parse_ts(s,   parts, hms, n) {
+      # SRT timestamp: HH:MM:SS,mmm — split on comma
+      n = split(s, parts, ",")
+      split(parts[1], hms, ":")
+      return hms[1]*3600 + hms[2]*60 + hms[3] + (n > 1 ? parts[2]+0 : 0)/1000
+    }
+
+    BEGIN {
+      ref_count  = 0
+      tgt_count  = 0
+      phase      = 1   # 1 = reading ref file, 2 = reading target file
+      prev_file  = ""
+    }
+
+    # Detect file boundary
+    FILENAME != prev_file {
+      if (NR > 1) phase = 2
+      prev_file = FILENAME
+    }
+
+    phase == 1 && /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9],[0-9][0-9][0-9] -->/ {
+      ts = substr($0, 1, index($0, " -->") - 1)
+      ref_times[ref_count++] = parse_ts(ts)
+    }
+
+    phase == 2 && /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9],[0-9][0-9][0-9] -->/ {
+      ts = substr($0, 1, index($0, " -->") - 1)
+      tgt_times[tgt_count++] = parse_ts(ts)
+    }
+
+    END {
+      if (ref_count < 5 || tgt_count < 5) { print 0; exit }
+
+      # Sample ~20 evenly-spaced points; map target index to proportional ref index
+      shorter = (tgt_count < ref_count) ? tgt_count : ref_count
+      samples = (shorter < 20) ? shorter : 20
+      max_d   = 0
+
+      for (s = 0; s < samples; s++) {
+        i = int(s * (tgt_count - 1) / (samples - 1))
+        j = int(i * ref_count / tgt_count)
+        if (j >= ref_count) j = ref_count - 1
+
+        d = tgt_times[i] - ref_times[j]
+        if (d < 0) d = -d
+        if (d > max_d) max_d = d
+      }
+
+      printf "%.0f", max_d
+    }
+  ' "$tmp_ref" "$tmp_tgt" 2>/dev/null)" || max_drift=0
+
+  [[ -z "$max_drift" ]] && max_drift=0
+
+  # Classify drift
+  local drift_rating
+  if [[ "$max_drift" -lt 30 ]]; then
+    drift_rating="GOOD"
+  elif [[ "$max_drift" -lt 60 ]]; then
+    drift_rating="WARN"
+  else
+    drift_rating="BAD"
+  fi
+
+  echo "$max_drift $drift_rating $ref_lang"
 }
 
 # ---------------------------------------------------------------------------
@@ -371,6 +660,12 @@ score_subtitle() {
 
 cmd_audit() {
   log "Auditing subtitles in: $PATH_PREFIX (recursive=$RECURSIVE)"
+
+  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  init_state_db "$state_db"
+  init_watermark_patterns "$state_db"
+  _CACHED_WATERMARK_PATTERNS="$(load_watermark_patterns "$state_db")"
+  [[ -z "$_CACHED_WATERMARK_PATTERNS" ]] && _CACHED_WATERMARK_PATTERNS="$WATERMARK_PATTERNS"
 
   local total_files=0 total_tracks=0 good=0 warn=0 bad=0
 
@@ -381,15 +676,22 @@ cmd_audit() {
     dir="$(dirname "$mkv_file")"
     duration="$(get_video_duration "$mkv_file")"
 
+    local am_profile_langs=""
+    am_profile_langs="$(resolve_bazarr_profile_langs "$mkv_file" "$BAZARR_DB")" || am_profile_langs=""
+
     printf '\n=== %s (%.0fs) ===\n' "$basename" "$duration" >&2
-    printf '%-6s %-8s %-7s %-6s %-6s %-5s %-4s %-4s %s\n' \
-      "TYPE" "LANG" "CODEC" "CUES" "COVER" "SYNC" "WM" "ENC" "RATING" >&2
-    printf '%s\n' "--------------------------------------------------------------" >&2
+    printf '%-6s %-8s %-7s %-6s %-6s %-7s %-4s %-4s %s\n' \
+      "TYPE" "LANG" "CODEC" "CUES" "COVER" "DRIFT" "WM" "ENC" "RATING" >&2
+    printf '%s\n' "-----------------------------------------------------------------" >&2
 
     # Embedded subtitle tracks
     local embedded_json emb_count
     embedded_json="$(get_embedded_subs "$mkv_file")"
     emb_count="$(jq 'length' <<<"$embedded_json")"
+
+    # Determine drift anchor language (first profile lang with a text track)
+    local drift_anchor_lang=""
+    drift_anchor_lang="$(get_drift_anchor_lang "$embedded_json" "$am_profile_langs")"
 
     for ((i=0; i<emb_count; i++)); do
       local stream_idx lang title codec_name
@@ -410,7 +712,8 @@ cmd_audit() {
       rm -f "$tmpfile"
 
       # Check title for watermarks too
-      if echo "$title" | grep -qiE "$WATERMARK_PATTERNS" 2>/dev/null; then
+      local _wm_pat="${_CACHED_WATERMARK_PATTERNS:-$WATERMARK_PATTERNS}"
+      if [[ -n "$_wm_pat" ]] && echo "$title" | grep -qiE "$_wm_pat" 2>/dev/null; then
         watermarks=1
       fi
 
@@ -418,14 +721,30 @@ cmd_audit() {
       if [[ "$duration" != "0" ]] && [[ "$duration" != "0.0" ]] && [[ "$cues" -gt 0 ]]; then
         coverage="$(awk "BEGIN { printf \"%.0f%%\", ($last_sec / $duration) * 100 }")"
       fi
-      local sync_ok="OK"
-      [[ "$(awk "BEGIN { print ($first_sec > 120) }")" -eq 1 ]] && sync_ok="LATE"
+
+      # Compute sync drift against reference track (skip anchor — it's the reference)
+      local drift_display="--"
+      local drift_rating_val=""
+      local lang_norm
+      lang_norm="$(normalize_track_lang "$lang")"
+      if [[ -n "$drift_anchor_lang" && "$lang_norm" != "$drift_anchor_lang" ]]; then
+        local drift_result drift_max drift_rate drift_ref
+        drift_result="$(check_sync_drift "$mkv_file" "$lang_norm" "$duration" "$am_profile_langs")"
+        read -r drift_max drift_rate drift_ref <<< "$drift_result"
+        drift_rating_val="$drift_rate"
+        case "$drift_rate" in
+          GOOD) drift_display="${drift_max}s" ;;
+          WARN) drift_display="${drift_max}s?" ;;
+          BAD)  drift_display="${drift_max}s!" ;;
+          SKIP) drift_display="--" ;;
+        esac
+      fi
 
       local rating
-      rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
+      rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks" "$drift_rating_val")"
 
-      printf '%-6s %-8s %-7s %-6s %-6s %-5s %-4s %-4s %s\n' \
-        "EMB" "$lang" "$codec_name" "$cues" "$coverage" "$sync_ok" \
+      printf '%-6s %-8s %-7s %-6s %-6s %-7s %-4s %-4s %s\n' \
+        "EMB" "$lang" "$codec_name" "$cues" "$coverage" "$drift_display" \
         "$([[ "$watermarks" -eq 1 ]] && echo "YES" || echo "--")" \
         "$([[ "$mojibake" -eq 1 ]] && echo "BAD" || echo "OK")" \
         "$rating" >&2
@@ -455,14 +774,12 @@ cmd_audit() {
       if [[ "$duration" != "0" ]] && [[ "$duration" != "0.0" ]] && [[ "$cues" -gt 0 ]]; then
         coverage="$(awk "BEGIN { printf \"%.0f%%\", ($last_sec / $duration) * 100 }")"
       fi
-      local sync_ok="OK"
-      [[ "$(awk "BEGIN { print ($first_sec > 120) }")" -eq 1 ]] && sync_ok="LATE"
 
       local rating
       rating="$(score_subtitle "$cues" "$first_sec" "$last_sec" "$duration" "$mojibake" "$watermarks")"
 
-      printf '%-6s %-8s %-7s %-6s %-6s %-5s %-4s %-4s %s\n' \
-        "EXT" "$ext_lang" "srt" "$cues" "$coverage" "$sync_ok" \
+      printf '%-6s %-8s %-7s %-6s %-6s %-7s %-4s %-4s %s\n' \
+        "EXT" "$ext_lang" "srt" "$cues" "$coverage" "--" \
         "$([[ "$watermarks" -eq 1 ]] && echo "YES" || echo "--")" \
         "$([[ "$mojibake" -eq 1 ]] && echo "BAD" || echo "OK")" \
         "$rating" >&2
@@ -837,15 +1154,15 @@ try_providers_for_lang() {
     endpoint_type="episodes"
     local series_dir="${mkv_file%%/Season*}"
     local bsq_series_id bsq_episode_id
-    bsq_series_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$series_dir")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
-    bsq_episode_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT sonarrEpisodeId FROM table_episodes WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    bsq_series_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=30000; SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$series_dir")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    bsq_episode_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=30000; SELECT sonarrEpisodeId FROM table_episodes WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
     [[ -z "$bsq_series_id" || -z "$bsq_episode_id" ]] && { log "PROVIDER_CYCLE: no Bazarr episode ID for $(basename "$mkv_file")"; return 1; }
     id_param="episodeid=${bsq_episode_id}"
   else
     media_type="movie"
     endpoint_type="movies"
     local bsq_radarr_id
-    bsq_radarr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=5000; SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
+    bsq_radarr_id="$(sqlite3 "$BAZARR_DB" "PRAGMA busy_timeout=30000; SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "${mkv_file%.*}")")%' LIMIT 1;" </dev/null 2>/dev/null)" || true
     [[ -z "$bsq_radarr_id" ]] && { log "PROVIDER_CYCLE: no Bazarr movie ID for $(basename "$mkv_file")"; return 1; }
     id_param="radarrid=${bsq_radarr_id}"
   fi
@@ -1008,7 +1325,7 @@ try_providers_for_lang() {
 
 try_translate_inline() {
   local mkv_file="$1" target_lang="$2"
-  log "TRANSLATE_INLINE: attempting DeepL translation for lang=$target_lang: $(basename "$mkv_file")"
+  log "TRANSLATE_INLINE: attempting translation for lang=$target_lang: $(basename "$mkv_file")"
   PYTHONPATH="${SCRIPT_DIR}/../../scripts" python3 \
     -m translation.translator translate --file "$mkv_file" </dev/null 2>&1 | while IFS= read -r line; do
     log "TRANSLATE_INLINE: $line"
@@ -1082,13 +1399,41 @@ run_upgrade_retries() {
 
     touch_upgrade_retry "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
 
-    # Check if retry count exceeded
-    if [[ "$nu_retries" -ge 29 ]]; then
-      log "UPGRADE_ABANDONED: max retries reached lang=$nu_lang forced=$nu_forced: $(basename "$nu_path")"
-      # Mark as resolved with special timestamp to indicate abandonment
-      resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
+    # Dead-end sources cap early; provider-cycle sources get more attempts.
+    local nu_source
+    nu_source="$(sqm_db "$state_db" "SELECT source FROM needs_upgrade WHERE file_path='$(sql_escape "$nu_path")' AND lang='$(sql_escape "$nu_lang")' AND forced=$nu_forced;" 2>/dev/null || echo "external")"
+    local effective_max
+    if [[ "$nu_source" == "embedded_desync" || "$nu_source" == "missing" ]]; then
+      effective_max="$UPGRADE_MAX_RETRY"
+    else
+      effective_max="$UPGRADE_PROVIDER_MAX_RETRY"
+    fi
+
+    if [[ "$nu_retries" -ge "$effective_max" ]]; then
+      log "UPGRADE_ABANDONED: max retries ($effective_max) reached lang=$nu_lang source=$nu_source: $(basename "$nu_path")"
+      sqm_db "$state_db" "UPDATE needs_upgrade SET source='accepted_fallback', resolved_ts=$(date +%s) WHERE file_path='$(sql_escape "$nu_path")' AND lang='$(sql_escape "$nu_lang")' AND forced=$nu_forced;" 2>/dev/null || true
       abandoned=$((abandoned + 1))
       continue
+    fi
+
+    # Stage 2: Discord alert at retry threshold
+    if [[ "$nu_retries" -eq "$((UPGRADE_ALERT_RETRY - 1))" ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+      local _alert_fields
+      _alert_fields="$(jq -nc \
+        --arg file "$(basename "$nu_path")" \
+        --arg lang "$nu_lang" \
+        --arg source "$nu_source" \
+        --arg retries "$((nu_retries + 1))/$effective_max" \
+        '[
+          {name: "📁 File",     value: $file,    inline: false},
+          {name: "🌐 Language", value: $lang,    inline: true},
+          {name: "📋 Source",   value: $source,  inline: true},
+          {name: "🔄 Retries",  value: $retries, inline: true}
+        ]')"
+      notify_discord_embed "🔴 Subtitle Upgrade Stalled" \
+        "May need manual intervention" \
+        15158332 "Subtitle Quality Manager" "$_alert_fields" \
+        || log "WARN: Discord dead-end alert failed (non-fatal)"
     fi
 
     # Try providers
@@ -1120,6 +1465,9 @@ cmd_auto_maintain() {
 
   local state_db="$STATE_DIR/subtitle_quality_state.db"
   init_state_db "$state_db"
+  init_watermark_patterns "$state_db"
+  _CACHED_WATERMARK_PATTERNS="$(load_watermark_patterns "$state_db")"
+  [[ -z "$_CACHED_WATERMARK_PATTERNS" ]] && _CACHED_WATERMARK_PATTERNS="$WATERMARK_PATTERNS"
   _DEEPL_QUOTA_CACHED=""  # Reset per-run cache
 
   # Run upgrade retries in full mode only (daily 1 AM)
@@ -1381,6 +1729,55 @@ cmd_auto_maintain() {
       fi
     fi
 
+    # --- Phase 0.75: Sync drift validation for embedded profile-language tracks ---
+    if [[ "$KEEP_PROFILE_LANGS" -eq 1 ]] && [[ -n "$am_profile_set" ]]; then
+      local emb_json_p075
+      emb_json_p075="$(get_embedded_subs "$mkv_file")"
+      local emb_count_p075
+      emb_count_p075="$(jq 'length' <<<"$emb_json_p075")"
+
+      if [[ "$emb_count_p075" -ge 2 ]]; then
+        # Determine drift anchor (first profile lang with text track)
+        local drift_anchor_p075=""
+        drift_anchor_p075="$(get_drift_anchor_lang "$emb_json_p075" "$am_profile_langs")"
+
+        for ((i=0; i<emb_count_p075; i++)); do
+          local p075_idx p075_lang p075_codec
+          p075_idx="$(jq -r ".[$i].index" <<<"$emb_json_p075")"
+          p075_lang="$(jq -r ".[$i].tags.language // \"und\"" <<<"$emb_json_p075")"
+          p075_codec="$(jq -r ".[$i].codec_name" <<<"$emb_json_p075")"
+          is_text_sub_codec "$p075_codec" || continue
+          local p075_norm
+          p075_norm="$(normalize_track_lang "$p075_lang")"
+          # Only check profile-language tracks, skip the anchor
+          lang_in_set "$p075_norm" "$am_profile_set" || continue
+          [[ "$p075_norm" == "$drift_anchor_p075" ]] && continue
+
+          local drift_result drift_max drift_rate drift_ref
+          drift_result="$(check_sync_drift "$mkv_file" "$p075_norm" "$duration" "$am_profile_langs")"
+          read -r drift_max drift_rate drift_ref <<< "$drift_result"
+
+          case "$drift_rate" in
+            BAD)
+              log "PHASE_0.75: embedded desync detected lang=$p075_norm drift=${drift_max}s ref=$drift_ref: $basename"
+              if [[ "$DRY_RUN" -eq 0 ]]; then
+                upsert_needs_upgrade "$state_db" "$mkv_file" "$p075_norm" 0 "BAD" 0 "embedded_desync"
+              fi
+              ;;
+            WARN)
+              log "PHASE_0.75: embedded drift warning lang=$p075_norm drift=${drift_max}s ref=$drift_ref: $basename"
+              ;;
+            GOOD)
+              debug "PHASE_0.75: embedded sync OK lang=$p075_norm drift=${drift_max}s ref=$drift_ref: $basename"
+              ;;
+            SKIP)
+              debug "PHASE_0.75: no reference for drift check lang=$p075_norm: $basename"
+              ;;
+          esac
+        done
+      fi
+    fi
+
     # --- Phase 1: Audit & mux external SRTs ---
     # Build embedded language map for collision detection
     declare -A embedded_lang_idx_p1=()
@@ -1490,8 +1887,8 @@ cmd_auto_maintain() {
             if [[ -n "$BAZARR_API_KEY" ]] && try_providers_for_lang "$mkv_file" "$ext_lang_norm" "$duration"; then
               log "PROVIDER_CYCLE: resolved via providers for lang=$ext_lang_norm: $basename"
             else
-              # Providers failed — try embedded extraction + DeepL translation
-              log "PROVIDER_CYCLE: falling back to DeepL translation for lang=$ext_lang_norm: $basename"
+              # Providers failed — try embedded extraction + translation
+              log "PROVIDER_CYCLE: falling back to translation for lang=$ext_lang_norm: $basename"
               if [[ -n "$am_profile_set" ]]; then
                 local emb_json_bad emb_count_bad
                 emb_json_bad="$(get_embedded_subs "$mkv_file")"
@@ -1682,7 +2079,7 @@ cmd_auto_maintain() {
 
     # --- Phase 1.5: Clean up non-profile external SRTs ---
     # Once all profile languages are satisfied (embedded or external), non-profile
-    # SRTs are no longer needed as DeepL translation sources — safe to remove.
+    # SRTs are no longer needed as translation sources — safe to remove.
     if [[ -n "$am_profile_set" ]]; then
       # Check if ALL profile languages have subtitles (embedded or external)
       # Re-read embedded after potential mux
@@ -1751,7 +2148,7 @@ cmd_auto_maintain() {
       fi
     fi
 
-    # --- Phase 3: Provider cycle + DeepL translation for completely missing profile languages ---
+    # --- Phase 3: Provider cycle + translation for completely missing profile languages ---
     if [[ -n "$am_profile_set" ]]; then
       # Re-read current state — necessary because Phase 1/1.5 may have muxed/stripped tracks
       local emb_json_now
@@ -1786,9 +2183,9 @@ cmd_auto_maintain() {
             log "PROVIDER_CYCLE: found sub for missing profile lang=$pc_norm: $basename"
             continue
           fi
-          # Providers failed — try DeepL translation from any available profile-language sub
+          # Providers failed — try translation from any available profile-language sub
           if try_translate_inline "$mkv_file" "$pc_norm"; then
-            log "TRANSLATE: filled missing profile lang=$pc_norm via DeepL: $basename"
+            log "TRANSLATE: filled missing profile lang=$pc_norm via translation: $basename"
             continue
           fi
           log "EXHAUSTED: no provider or translation for missing profile lang=$pc_norm: $basename"
@@ -2162,6 +2559,89 @@ cmd_enqueue() {
   log "enqueue done: $count file(s) added to pending queue"
 }
 
+update_watermark_hits() {
+  local db="$1" srt_file="$2"
+  local patterns
+  patterns="$(load_watermark_patterns "$db")"
+  [[ -z "$patterns" ]] && return 0
+  local now
+  now="$(date +%s)"
+  while IFS= read -r pat; do
+    [[ -z "$pat" ]] && continue
+    if grep -qiE "$pat" "$srt_file" 2>/dev/null; then
+      sqm_db "$db" "UPDATE watermark_patterns SET hit_count = hit_count + 1, last_hit = $now WHERE pattern = '$(sql_escape "$pat")';" 2>/dev/null || true
+    fi
+  done < <(printf '%s\n' "$patterns" | tr '|' '\n')
+}
+
+cmd_watermark() {
+  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  init_state_db "$state_db"
+  init_watermark_patterns "$state_db"
+
+  local subcmd="${1:-list}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    list)
+      printf '%-30s %-8s %-6s %-20s\n' "PATTERN" "SOURCE" "HITS" "LAST_HIT" >&2
+      printf '%s\n' "-------------------------------------------------------------------" >&2
+      while IFS=$'\t' read -r pat src hits last; do
+        [[ -z "$pat" ]] && continue
+        local last_str="--"
+        [[ "$last" -gt 0 ]] && last_str="$(date -d "@$last" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$last")"
+        printf '%-30s %-8s %-6s %-20s\n' "$pat" "$src" "$hits" "$last_str" >&2
+      done < <(sqm_db "$state_db" -separator $'\t' "SELECT pattern, source, hit_count, last_hit FROM watermark_patterns ORDER BY source, pattern;" 2>/dev/null)
+      ;;
+    add)
+      local pattern="${1:-}"
+      [[ -z "$pattern" ]] && { echo "Usage: watermark add \"pattern\"" >&2; return 1; }
+      local now
+      now="$(date +%s)"
+      sqm_db "$state_db" "INSERT OR IGNORE INTO watermark_patterns(pattern, source, added_ts) VALUES ('$(sql_escape "$pattern")', 'user', $now);" 2>/dev/null
+      log "WATERMARK_ADD: pattern='$pattern' source=user"
+      ;;
+    remove)
+      local pattern="${1:-}"
+      [[ -z "$pattern" ]] && { echo "Usage: watermark remove \"pattern\"" >&2; return 1; }
+      local src
+      src="$(sqm_db "$state_db" "SELECT source FROM watermark_patterns WHERE pattern='$(sql_escape "$pattern")';" 2>/dev/null || true)"
+      if [[ "$src" == "builtin" ]]; then
+        echo "Cannot remove builtin pattern: $pattern" >&2
+        return 1
+      fi
+      sqm_db "$state_db" "DELETE FROM watermark_patterns WHERE pattern='$(sql_escape "$pattern")' AND source != 'builtin';" 2>/dev/null
+      log "WATERMARK_REMOVE: pattern='$pattern'"
+      ;;
+    test)
+      local srt_file="${1:-}"
+      [[ -z "$srt_file" || ! -f "$srt_file" ]] && { echo "Usage: watermark test file.srt" >&2; return 1; }
+      local patterns
+      patterns="$(load_watermark_patterns "$state_db")"
+      if [[ -z "$patterns" ]]; then
+        echo "No patterns loaded." >&2
+        return 1
+      fi
+      local -a pat_list=()
+      while IFS= read -r p; do [[ -n "$p" ]] && pat_list+=("$p"); done \
+        < <(printf '%s\n' "$patterns" | tr '|' '\n')
+      echo "Testing $(basename "$srt_file") against ${#pat_list[@]} patterns:" >&2
+      for pat in "${pat_list[@]}"; do
+        if grep -qiE "$pat" "$srt_file" 2>/dev/null; then
+          local count
+          count="$(grep -ciE "$pat" "$srt_file" 2>/dev/null)" || count=0
+          printf '  MATCH: %-30s (%d hits)\n' "$pat" "$count" >&2
+        fi
+      done
+      ;;
+    *)
+      echo "Unknown watermark subcommand: $subcmd" >&2
+      echo "Usage: watermark {list|add|remove|test} [args]" >&2
+      return 1
+      ;;
+  esac
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
 COMMAND="${1:-}"
@@ -2169,13 +2649,23 @@ COMMAND="${1:-}"
 shift
 
 case "$COMMAND" in
-  audit|mux|strip|auto-maintain|enqueue|compliance) ;;
+  audit|mux|strip|auto-maintain|enqueue|compliance|watermark) ;;
   --help|-h) usage; exit 0 ;;
   *) echo "Unknown command: $COMMAND" >&2; usage; exit 1 ;;
 esac
 
 ENQUEUE_FILES=()
-if [[ "$COMMAND" == "enqueue" ]]; then
+WM_ARGS=()
+if [[ "$COMMAND" == "watermark" ]]; then
+  # watermark passes remaining args directly to cmd_watermark; only parse --state-dir
+  WM_ARGS=("$@")
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --state-dir) STATE_DIR="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+elif [[ "$COMMAND" == "enqueue" ]]; then
   # enqueue takes positional file paths + optional --state-dir
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2213,7 +2703,7 @@ else
   done
 fi
 
-if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]] && [[ "$COMMAND" != "enqueue" ]] && [[ "$COMMAND" != "compliance" ]]; then
+if [[ -z "$PATH_PREFIX" ]] && [[ "$COMMAND" != "auto-maintain" ]] && [[ "$COMMAND" != "enqueue" ]] && [[ "$COMMAND" != "compliance" ]] && [[ "$COMMAND" != "watermark" ]]; then
   echo "--path is required." >&2; exit 1
 fi
 
@@ -2242,6 +2732,7 @@ case "$COMMAND" in
   auto-maintain) cmd_auto_maintain ;;
   enqueue)      cmd_enqueue ;;
   compliance)   cmd_compliance ;;
+  watermark)    cmd_watermark "${WM_ARGS[@]}" ;;
 esac
 
 fi
