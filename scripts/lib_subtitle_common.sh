@@ -18,6 +18,8 @@
 
 : "${DB:=/opt/bazarr/data/db/bazarr.db}"
 
+SQLITE_TIMEOUT_MS=30000
+
 # Subtitle extensions that can be converted to SRT (text-based formats)
 CONVERTIBLE_SUB_EXTS="ass ssa vtt"
 # All subtitle extensions we care about (convertible + srt)
@@ -287,6 +289,39 @@ get_audio_languages() {
     | jq -r '[.streams[].tags.language // "und"] | map(select(. == "und" | not)) | unique | join(",")' 2>/dev/null
 }
 
+# Validate that output file preserved all audio and video streams from original.
+# Returns 0 if valid, 1 if streams are missing (caller must delete temp and abort).
+# $1=original_file  $2=output_file  $3=label (for log context)
+validate_streams_match() {
+  local orig="$1" output="$2" label="${3:-remux}"
+  local orig_video new_video orig_audio new_audio
+
+  orig_video="$(ffprobe -v error -select_streams v -show_entries stream=index \
+    -of csv=p=0 "$orig" </dev/null 2>/dev/null | wc -l)"
+  new_video="$(ffprobe -v error -select_streams v -show_entries stream=index \
+    -of csv=p=0 "$output" </dev/null 2>/dev/null | wc -l)"
+
+  orig_audio="$(ffprobe -v error -select_streams a -show_entries stream=index \
+    -of csv=p=0 "$orig" </dev/null 2>/dev/null | wc -l)"
+  new_audio="$(ffprobe -v error -select_streams a -show_entries stream=index \
+    -of csv=p=0 "$output" </dev/null 2>/dev/null | wc -l)"
+
+  if [[ "$new_video" -lt 1 ]]; then
+    log "CRITICAL: $label output has 0 video streams (orig=${orig_video}) — rejecting: $(basename "$orig")"
+    return 1
+  fi
+  if [[ "$new_video" -ne "$orig_video" ]]; then
+    log "CRITICAL: $label video stream count mismatch (orig=${orig_video} new=${new_video}) — rejecting: $(basename "$orig")"
+    return 1
+  fi
+  if [[ "$new_audio" -ne "$orig_audio" ]]; then
+    log "CRITICAL: $label audio stream count mismatch (orig=${orig_audio} new=${new_audio}) — rejecting: $(basename "$orig")"
+    return 1
+  fi
+
+  return 0
+}
+
 # Resolve Bazarr language profile for a media file.
 # Returns comma-separated language codes (e.g. "en,es") or empty string if not found.
 # $1=file_path  $2=bazarr_db_path
@@ -301,7 +336,7 @@ resolve_bazarr_profile_langs() {
   esc_path="$(sql_escape "$file_path")"
 
   if is_tv_path "$file_path"; then
-    profile_id="$(sqlite3 "$bazarr_db" "
+    profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
       SELECT s.profileId FROM table_episodes e
       JOIN table_shows s ON s.sonarrSeriesId = e.sonarrSeriesId
       WHERE e.path = '$esc_path' LIMIT 1;
@@ -311,14 +346,14 @@ resolve_bazarr_profile_langs() {
       local series_dir
       series_dir="$(echo "$file_path" | sed 's|/Season.*||' | xargs basename 2>/dev/null)"
       if [[ -n "$series_dir" ]]; then
-        profile_id="$(sqlite3 "$bazarr_db" "
+        profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
           SELECT profileId FROM table_shows
           WHERE path LIKE '%$(sql_escape "$series_dir")%' LIMIT 1;
         " 2>/dev/null)"
       fi
     fi
   elif is_movie_path "$file_path"; then
-    profile_id="$(sqlite3 "$bazarr_db" "
+    profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
       SELECT profileId FROM table_movies WHERE path = '$esc_path' LIMIT 1;
     " 2>/dev/null)"
 
@@ -326,7 +361,7 @@ resolve_bazarr_profile_langs() {
       local movie_dir
       movie_dir="$(basename "$(dirname "$file_path")")"
       if [[ -n "$movie_dir" ]]; then
-        profile_id="$(sqlite3 "$bazarr_db" "
+        profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
           SELECT profileId FROM table_movies
           WHERE path LIKE '%$(sql_escape "$movie_dir")%' LIMIT 1;
         " 2>/dev/null)"
@@ -337,7 +372,7 @@ resolve_bazarr_profile_langs() {
   [[ -z "$profile_id" ]] && return 1
 
   local items
-  items="$(sqlite3 "$bazarr_db" "
+  items="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "
     SELECT items FROM table_languages_profiles WHERE profileId = $profile_id LIMIT 1;
   " 2>/dev/null)"
 
@@ -360,12 +395,12 @@ bazarr_rescan_for_file() {
   if is_tv_path "$file_path"; then
     local show_dir sonarr_id
     show_dir="$(echo "$file_path" | sed 's|/Season.*||' | sed 's|/$||')"
-    sonarr_id="$(sqlite3 "$bazarr_db" "SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$show_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
+    sonarr_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "SELECT sonarrSeriesId FROM table_shows WHERE path LIKE '%$(sql_escape "$(basename "$show_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
     [[ -n "$sonarr_id" ]] && bazarr_scan_disk_series "$sonarr_id" "$bazarr_url" "$api_key"
   elif is_movie_path "$file_path"; then
     local movie_dir radarr_id
     movie_dir="$(dirname "$file_path")"
-    radarr_id="$(sqlite3 "$bazarr_db" "SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$movie_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
+    radarr_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$bazarr_db" "SELECT radarrId FROM table_movies WHERE path LIKE '%$(sql_escape "$(basename "$movie_dir")")%' LIMIT 1;" 2>/dev/null || echo "")"
     [[ -n "$radarr_id" ]] && bazarr_scan_disk_movie "$radarr_id" "$bazarr_url" "$api_key"
   fi
 }
@@ -995,14 +1030,14 @@ strip_all_embedded_subs() {
   [[ "$sub_count" -eq 0 ]] && return 0
 
   ext="${file##*.}"
-  tmp_out="${file}.strip_tmp.${ext}"
+  tmp_out="${file%.*}.striptmp.${ext}"
 
   if ffmpeg -y -v quiet -i "$file" -map 0 -map -0:s -c copy "$tmp_out" </dev/null 2>/dev/null; then
     # Verify output is non-empty and reasonable size
     local orig_size new_size
     orig_size="$(stat -c '%s' "$file" 2>/dev/null || echo 0)"
     new_size="$(stat -c '%s' "$tmp_out" 2>/dev/null || echo 0)"
-    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]]; then
+    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]] && validate_streams_match "$file" "$tmp_out" "strip_all"; then
       mv -f "$tmp_out" "$file"
       log "STRIP_EMBEDDED removed $sub_count subtitle streams from $(basename "$file")"
       return 0
@@ -1031,7 +1066,7 @@ upsert_needs_upgrade() {
   local db="$1" fp="$2" lang="$3" forced="$4" rating="$5" score="$6" src="${7:-external}"
   local now
   now="$(date +%s)"
-  sqlite3 -cmd ".timeout 30000" "$db" "
+  sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     INSERT INTO needs_upgrade (file_path, lang, forced, current_rating, current_score, source, first_seen_ts, last_retry_ts, retry_count, resolved_ts)
     VALUES ('$(sql_escape "$fp")', '$(sql_escape "$lang")', $forced, '$rating', $score, '$src', $now, 0, 0, NULL)
     ON CONFLICT(file_path, lang, forced) DO UPDATE SET
@@ -1048,7 +1083,7 @@ resolve_needs_upgrade() {
   local db="$1" fp="$2" lang="$3" forced="$4"
   local now
   now="$(date +%s)"
-  sqlite3 -cmd ".timeout 30000" "$db" "
+  sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     UPDATE needs_upgrade SET resolved_ts = $now
     WHERE file_path = '$(sql_escape "$fp")' AND lang = '$(sql_escape "$lang")' AND forced = $forced AND resolved_ts IS NULL;
   " </dev/null 2>/dev/null || true
@@ -1064,7 +1099,7 @@ drain_upgrade_candidates() {
   local limit="${4:-500}"
   local cutoff
   cutoff="$(( $(date +%s) - threshold ))"
-  sqlite3 -separator $'\t' -cmd ".timeout 30000" "$db" "
+  sqlite3 -separator $'\t' -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     SELECT file_path, lang, forced, current_rating, current_score, retry_count
     FROM needs_upgrade
     WHERE resolved_ts IS NULL
@@ -1081,7 +1116,7 @@ touch_upgrade_retry() {
   local db="$1" fp="$2" lang="$3" forced="$4"
   local now
   now="$(date +%s)"
-  sqlite3 -cmd ".timeout 30000" "$db" "
+  sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     UPDATE needs_upgrade SET last_retry_ts = $now, retry_count = retry_count + 1
     WHERE file_path = '$(sql_escape "$fp")' AND lang = '$(sql_escape "$lang")' AND forced = $forced;
   " </dev/null 2>/dev/null || true
@@ -1305,7 +1340,7 @@ strip_embedded_by_indices() {
     local orig_size new_size
     orig_size="$(stat -c '%s' "$file" 2>/dev/null || echo 0)"
     new_size="$(stat -c '%s' "$tmp_out" 2>/dev/null || echo 0)"
-    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]]; then
+    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]] && validate_streams_match "$file" "$tmp_out" "selective_strip"; then
       mv -f "$tmp_out" "$file"
       log "SELECTIVE_STRIP: removed ${#_indices[@]} embedded track(s) from $(basename "$file")"
       return 0

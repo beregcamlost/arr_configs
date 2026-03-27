@@ -256,6 +256,7 @@ flowchart LR
 - 🔄 **Upgrade retries** — `needs_upgrade` SQLite table tracks WARN/MISSING subs for daily retry via providers + DeepL
 - 📊 **Compliance reporting** — `compliance` subcommand audits entire library against Bazarr profiles (text + JSON output)
 - 💧 **Watermark stripping** — removes common watermark lines from SRT files
+- 🛡️ **Remux integrity validation** — `validate_streams_match()` verifies video + audio stream counts survive every strip/mux operation; rejects output and keeps original intact on any mismatch
 - 🎭 **HI/SDH/CC awareness** — `subtitle_group_key()` looks past hearing-impaired qualifiers for dedup grouping
 - 🌊 **Streaming candidate skip** — pre-loaded associative array pattern; zero subprocess calls in hot loops
 - 🔄 **Bazarr integration** — `bazarr_rescan_for_file()` + per-language subtitle search after every operation

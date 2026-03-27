@@ -944,6 +944,12 @@ cmd_mux() {
       continue
     fi
 
+    if ! validate_streams_match "$mkv_file" "$tmp_out" "mux"; then
+      rm -f "$tmp_out"
+      failed=$((failed + 1))
+      continue
+    fi
+
     # Swap original with muxed version
     mv "$tmp_out" "$mkv_file"
 
@@ -965,7 +971,7 @@ cmd_mux() {
       strip_cmd+=(-c copy)
       local strip_ext="${mkv_file##*.}"
       local strip_tmp="${mkv_file%.*}.collisiontmp.${strip_ext}"
-      if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]]; then
+      if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]] && validate_streams_match "$mkv_file" "$strip_tmp" "post_mux_strip"; then
         mv "$strip_tmp" "$mkv_file"
         log "STRIPPED ${#premux_strip_indices[@]} superseded embedded track(s) from: $basename"
       else
@@ -1104,6 +1110,12 @@ cmd_strip() {
 
     if [[ ! -s "$tmp_out" ]]; then
       log "FAIL strip (empty output): $basename"
+      rm -f "$tmp_out"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    if ! validate_streams_match "$mkv_file" "$tmp_out" "cmd_strip"; then
       rm -f "$tmp_out"
       failed=$((failed + 1))
       continue
@@ -1487,7 +1499,8 @@ cmd_auto_maintain() {
   [[ "$pending_count" -gt 0 ]] && log "auto-maintain: drained $pending_count file(s) from pending queue"
 
   local total_files=0 muxed_files=0 muxed_tracks=0 stripped_files=0 stripped_tracks=0
-  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0 bad_deleted=0
+  local skipped_converter=0 skipped_playback=0 skipped_streaming=0 warned=0 deepl_deferred=0 cleaned_nonprofile=0 extracted_nonprofile=0
+  local exhausted_count=0 exhausted_summary=""
   local -a modified_dirs=()
   local -A bazarr_rescanned=()
 
@@ -1695,7 +1708,7 @@ cmd_auto_maintain() {
             p0_strip_cmd+=(-c copy)
             local ext_p0="${mkv_file##*.}"
             local p0_strip_tmp="${mkv_file%.*}.bloattmp.${ext_p0}"
-            if "${p0_strip_cmd[@]}" "$p0_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p0_strip_tmp" ]]; then
+            if "${p0_strip_cmd[@]}" "$p0_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p0_strip_tmp" ]] && validate_streams_match "$mkv_file" "$p0_strip_tmp" "phase0_strip"; then
               mv "$p0_strip_tmp" "$mkv_file"
               stripped_tracks=$((stripped_tracks + ${#p0_strip_indices[@]}))
               stripped_files=$((stripped_files + 1))
@@ -1877,58 +1890,12 @@ cmd_auto_maintain() {
           ;;
         BAD)
           if [[ "$DRY_RUN" -eq 1 ]]; then
-            log "[DRY-RUN] Would delete BAD external and cycle providers: $srt_basename"
+            log "[DRY-RUN] BAD external (would keep, needs manual replacement): $srt_basename"
           else
-            rm -f "$srt_file"
-            log "DELETED BAD external: $srt_basename (starting provider cycle)"
-            bad_deleted=$((bad_deleted + 1))
-            file_modified=1  # Deletion itself triggers Emby refresh + Bazarr rescan
-
-            if [[ -n "$BAZARR_API_KEY" ]] && try_providers_for_lang "$mkv_file" "$ext_lang_norm" "$duration"; then
-              log "PROVIDER_CYCLE: resolved via providers for lang=$ext_lang_norm: $basename"
-            else
-              # Providers failed — try embedded extraction + translation
-              log "PROVIDER_CYCLE: falling back to translation for lang=$ext_lang_norm: $basename"
-              if [[ -n "$am_profile_set" ]]; then
-                local emb_json_bad emb_count_bad
-                emb_json_bad="$(get_embedded_subs "$mkv_file")"
-                emb_count_bad="$(jq 'length' <<<"$emb_json_bad")"
-                local -a _bad_lang=() _bad_codec=() _bad_idx=() _bad_forced=()
-                while IFS=$'\t' read -r _bl _bc _bi _bf; do
-                  _bad_lang+=("$_bl")
-                  _bad_codec+=("$_bc")
-                  _bad_idx+=("$_bi")
-                  _bad_forced+=("$_bf")
-                done < <(jq -r '.[] | [(.tags.language // "und"), .codec_name, (.index | tostring), (if .forced == 1 then "1" else "0" end)] | @tsv' <<<"$emb_json_bad")
-                local bi_lang bi_codec bi_idx bi_forced
-                for ((bi=0; bi<emb_count_bad; bi++)); do
-                  bi_lang="${_bad_lang[$bi]}"
-                  bi_codec="${_bad_codec[$bi]}"
-                  bi_idx="${_bad_idx[$bi]}"
-                  bi_forced="${_bad_forced[$bi]}"
-                  local bi_norm
-                  bi_norm="$(normalize_track_lang "$bi_lang")"
-                  if lang_in_set "$bi_norm" "$am_profile_set" && is_text_sub_codec "$bi_codec" && [[ "$bi_forced" -ne 1 ]]; then
-                    local src_srt="${dir}/${name_stem}.${bi_norm}.srt"
-                    if [[ ! -f "$src_srt" ]]; then
-                      if ffmpeg -v quiet -i "$mkv_file" -map "0:${bi_idx}" -f srt "$src_srt" </dev/null 2>/dev/null && [[ -s "$src_srt" ]]; then
-                        touch "${src_srt}.deepl-source"
-                        log "EXTRACTED translation source: ${name_stem}.${bi_norm}.srt for DeepL fallback"
-                      else
-                        rm -f "$src_srt"
-                      fi
-                    fi
-                  fi
-                done
-              fi
-              if try_translate_inline "$mkv_file" "$ext_lang_norm"; then
-                log "TRANSLATE_INLINE: resolved via DeepL for lang=$ext_lang_norm: $basename"
-                file_modified=1
-              else
-                log "EXHAUSTED: no provider or translation for lang=$ext_lang_norm: $basename"
-              fi
-            fi
+            log "BAD external (kept, needs manual replacement): $srt_basename"
           fi
+          exhausted_count=$((exhausted_count + 1))
+          exhausted_summary="${exhausted_summary}${basename} [${ext_lang_norm}] — bad sub, kept for review\n"
           ;;
       esac
     done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null | sort)
@@ -1976,6 +1943,10 @@ cmd_auto_maintain() {
           expected=$((existing_sub_count + ${#good_srts[@]}))
 
           if [[ "$new_sub_count" -eq "$expected" ]]; then
+            if ! validate_streams_match "$mkv_file" "$tmp_out" "phase1_mux"; then
+              rm -f "$tmp_out"
+              continue
+            fi
             mv "$tmp_out" "$mkv_file"
             for sf in "${good_srts[@]}"; do rm -f "$sf"; done
             muxed_tracks=$((muxed_tracks + ${#good_srts[@]}))
@@ -1992,7 +1963,7 @@ cmd_auto_maintain() {
               p1_strip_cmd+=(-c copy)
               local p1_strip_ext="${mkv_file##*.}"
               local p1_strip_tmp="${mkv_file%.*}.collisiontmp.${p1_strip_ext}"
-              if "${p1_strip_cmd[@]}" "$p1_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p1_strip_tmp" ]]; then
+              if "${p1_strip_cmd[@]}" "$p1_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p1_strip_tmp" ]] && validate_streams_match "$mkv_file" "$p1_strip_tmp" "phase1_collision_strip"; then
                 mv "$p1_strip_tmp" "$mkv_file"
                 stripped_tracks=$((stripped_tracks + ${#premux_strip_indices_p1[@]}))
                 stripped_files=$((stripped_files + 1))
@@ -2189,6 +2160,8 @@ cmd_auto_maintain() {
             continue
           fi
           log "EXHAUSTED: no provider or translation for missing profile lang=$pc_norm: $basename"
+          exhausted_count=$((exhausted_count + 1))
+          exhausted_summary="${exhausted_summary}${basename} [${pc_norm}] — no provider or translation found\n"
         fi
       done
     fi
@@ -2317,7 +2290,7 @@ cmd_auto_maintain() {
           strip_cmd+=(-c copy)
           local ext="${mkv_file##*.}"
           local strip_tmp="${mkv_file%.*}.striptmp.${ext}"
-          if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]]; then
+          if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]] && validate_streams_match "$mkv_file" "$strip_tmp" "phase2_dedup_strip"; then
             mv "$strip_tmp" "$mkv_file"
             stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))
             stripped_files=$((stripped_files + 1))
@@ -2370,10 +2343,27 @@ cmd_auto_maintain() {
     done
   fi
 
-  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) bad_deleted=$bad_deleted extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
+  log "auto-maintain done: files=$total_files muxed=$muxed_files($muxed_tracks tracks) stripped=$stripped_files($stripped_tracks tracks) extracted_nonprofile=$extracted_nonprofile cleaned_nonprofile=$cleaned_nonprofile warned=$warned exhausted=$exhausted_count skipped_converter=$skipped_converter skipped_playback=$skipped_playback skipped_streaming=$skipped_streaming"
+
+  # Discord notification for files needing manual subtitle intervention
+  if [[ "$exhausted_count" -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+    local _ex_fields _ex_list
+    _ex_list="$(printf '%b' "$exhausted_summary" | head -20)"
+    _ex_fields="$(jq -nc \
+      --arg count "$exhausted_count" \
+      --arg files "$_ex_list" \
+      '[
+        {name: "📋 Files needing subs", value: $files, inline: false},
+        {name: "🔢 Count",              value: $count,  inline: true}
+      ]')"
+    notify_discord_embed "🔴 Subtitles Needed" \
+      "Manual subtitle download required for **${exhausted_count}** file(s) — no provider or translation could be found" \
+      15158332 "Subtitle Quality Manager" "$_ex_fields" \
+      || log "WARN: Discord exhausted-subs alert failed (non-fatal)"
+  fi
 
   # Discord notification (non-fatal, only when actions taken)
-  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files + extracted_nonprofile + cleaned_nonprofile + bad_deleted)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+  if [[ "$DRY_RUN" -eq 0 ]] && [[ $((muxed_files + stripped_files + extracted_nonprofile + cleaned_nonprofile)) -gt 0 ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
     local mode="quick"
     [[ "$SINCE_MINUTES" -eq 0 ]] && mode="full"
 
@@ -2393,7 +2383,6 @@ cmd_auto_maintain() {
     _am_fields+="{\"name\":\"🔍 Scanned\",\"value\":\"${total_files}\",\"inline\":true}"
     [[ "$extracted_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"📤 Extracted\",\"value\":\"${extracted_nonprofile} track(s)\",\"inline\":true}"
     [[ "$cleaned_nonprofile" -gt 0 ]] && _am_fields+=",{\"name\":\"🧹 Cleaned\",\"value\":\"${cleaned_nonprofile} SRT(s)\",\"inline\":true}"
-    [[ "$bad_deleted" -gt 0 ]] && _am_fields+=",{\"name\":\"🗑️ BAD Deleted\",\"value\":\"${bad_deleted} SRT(s)\",\"inline\":true}"
     [[ "$warned" -gt 0 ]] && _am_fields+=",{\"name\":\"⚠️ WARN Upgrade\",\"value\":\"${warned} SRT(s)\",\"inline\":true}"
     [[ "$deepl_deferred" -gt 0 ]] && _am_fields+=",{\"name\":\"⏳ DeepL Deferred\",\"value\":\"${deepl_deferred}\",\"inline\":true}"
     local _skips=""

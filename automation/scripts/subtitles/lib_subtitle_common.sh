@@ -289,6 +289,39 @@ get_audio_languages() {
     | jq -r '[.streams[].tags.language // "und"] | map(select(. == "und" | not)) | unique | join(",")' 2>/dev/null
 }
 
+# Validate that output file preserved all audio and video streams from original.
+# Returns 0 if valid, 1 if streams are missing (caller must delete temp and abort).
+# $1=original_file  $2=output_file  $3=label (for log context)
+validate_streams_match() {
+  local orig="$1" output="$2" label="${3:-remux}"
+  local orig_video new_video orig_audio new_audio
+
+  orig_video="$(ffprobe -v error -select_streams v -show_entries stream=index \
+    -of csv=p=0 "$orig" </dev/null 2>/dev/null | wc -l)"
+  new_video="$(ffprobe -v error -select_streams v -show_entries stream=index \
+    -of csv=p=0 "$output" </dev/null 2>/dev/null | wc -l)"
+
+  orig_audio="$(ffprobe -v error -select_streams a -show_entries stream=index \
+    -of csv=p=0 "$orig" </dev/null 2>/dev/null | wc -l)"
+  new_audio="$(ffprobe -v error -select_streams a -show_entries stream=index \
+    -of csv=p=0 "$output" </dev/null 2>/dev/null | wc -l)"
+
+  if [[ "$new_video" -lt 1 ]]; then
+    log "CRITICAL: $label output has 0 video streams (orig=${orig_video}) — rejecting: $(basename "$orig")"
+    return 1
+  fi
+  if [[ "$new_video" -ne "$orig_video" ]]; then
+    log "CRITICAL: $label video stream count mismatch (orig=${orig_video} new=${new_video}) — rejecting: $(basename "$orig")"
+    return 1
+  fi
+  if [[ "$new_audio" -ne "$orig_audio" ]]; then
+    log "CRITICAL: $label audio stream count mismatch (orig=${orig_audio} new=${new_audio}) — rejecting: $(basename "$orig")"
+    return 1
+  fi
+
+  return 0
+}
+
 # Resolve Bazarr language profile for a media file.
 # Returns comma-separated language codes (e.g. "en,es") or empty string if not found.
 # $1=file_path  $2=bazarr_db_path
@@ -997,14 +1030,14 @@ strip_all_embedded_subs() {
   [[ "$sub_count" -eq 0 ]] && return 0
 
   ext="${file##*.}"
-  tmp_out="${file}.strip_tmp.${ext}"
+  tmp_out="${file%.*}.striptmp.${ext}"
 
   if ffmpeg -y -v quiet -i "$file" -map 0 -map -0:s -c copy "$tmp_out" </dev/null 2>/dev/null; then
     # Verify output is non-empty and reasonable size
     local orig_size new_size
     orig_size="$(stat -c '%s' "$file" 2>/dev/null || echo 0)"
     new_size="$(stat -c '%s' "$tmp_out" 2>/dev/null || echo 0)"
-    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]]; then
+    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]] && validate_streams_match "$file" "$tmp_out" "strip_all"; then
       mv -f "$tmp_out" "$file"
       log "STRIP_EMBEDDED removed $sub_count subtitle streams from $(basename "$file")"
       return 0
@@ -1307,7 +1340,7 @@ strip_embedded_by_indices() {
     local orig_size new_size
     orig_size="$(stat -c '%s' "$file" 2>/dev/null || echo 0)"
     new_size="$(stat -c '%s' "$tmp_out" 2>/dev/null || echo 0)"
-    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]]; then
+    if [[ "$new_size" -gt 0 && "$new_size" -le "$orig_size" ]] && validate_streams_match "$file" "$tmp_out" "selective_strip"; then
       mv -f "$tmp_out" "$file"
       log "SELECTIVE_STRIP: removed ${#_indices[@]} embedded track(s) from $(basename "$file")"
       return 0
