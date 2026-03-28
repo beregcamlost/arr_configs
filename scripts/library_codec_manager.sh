@@ -1176,6 +1176,23 @@ audit_cmd() {
 
 plan_cmd() {
   log "info" "Building conversion plan"
+
+  # Acquire convert lock — plan rebuilds conversion_plan which convert reads.
+  local lock_file="$STATE_DIR/convert.lock"
+  exec 8>"$lock_file"
+  local waited=0
+  while ! flock -n 8; do
+    if (( waited >= 1800 )); then
+      log "error" "Plan aborted: convert lock held for >30min"
+      exec 8>&-
+      return 1
+    fi
+    (( waited % 300 == 0 )) && log "info" "Plan waiting for convert lock (${waited}s elapsed)"
+    sleep 30
+    waited=$((waited + 30))
+  done
+  log "info" "Plan acquired convert lock"
+
   load_streaming_candidates
   load_stale_candidates
 
@@ -1267,6 +1284,7 @@ SQL
   done
 
   log "info" "Plan completed"
+  exec 8>&-
 }
 
 report_cmd() {

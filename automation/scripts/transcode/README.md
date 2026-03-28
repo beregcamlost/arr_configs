@@ -120,16 +120,17 @@ $CODEC prune-backups --retention-days 14
 ## 🏗️ Architecture
 
 ```
-Daily 3 AM                      Every 15 min
-     │                               │
-     ▼                               ▼
-  audit cmd                      resume cmd
-  (probe all files               (pick next eligible
-   from Bazarr DB)                from conversion_plan
-     │                            ORDER BY priority ASC)
-     ▼                               │
-  plan cmd                           ▼
-  (evaluate eligibility)       ffmpeg transcode
+Daily 3:00 AM   Daily 3:45 AM   Every 15 min
+     │                │               │
+     ▼                ▼               ▼
+  audit cmd       plan cmd        resume cmd
+  (probe all   (acquires        (pick next eligible
+   files from   convert lock,    from conversion_plan
+   Bazarr DB)   rebuilds plan)   ORDER BY priority ASC)
+     │                │               │
+     (runs freely     ▼               ▼
+      alongside   eligibility   ffmpeg transcode
+      convert)    decisions
   ┌── eligible=1, priority=1    H.264 CRF19 / AAC 192k
   │   (audio-only remux)              │
   ├── eligible=1, priority=10         ▼
@@ -182,12 +183,12 @@ probe_streams (media_id, stream_index, codec_type, codec_name, ...)
 
 | Time | Command | Purpose |
 |------|---------|---------|
-| `0 3 daily` | `audit` | Incremental probe of Bazarr DB (~7 min) |
-| `0 3 daily` | `plan` | Rebuild eligibility after audit |
-| `*/15 min` | `resume --batch-size 1` | Convert next file in queue |
+| `0 3 daily` | `audit` | Incremental probe of Bazarr DB (safe to run during convert) |
+| `45 3 daily` | `plan` | Rebuild eligibility (acquires convert lock internally) |
+| `*/15 min` | `resume --batch-size 2` | Convert next 2 files in queue |
 | `35 3 Tue` | `daily-status` | Weekly Discord status ping |
 
-> Uses `flock` at crontab level — audit/plan/resume never overlap.
+> Audit runs freely alongside convert. Plan acquires `convert.lock` (waits up to 30 min) to avoid rebuilding `conversion_plan` while convert reads it. Resume uses `flock` at crontab level to prevent overlap.
 
 ---
 
