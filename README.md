@@ -205,7 +205,7 @@ graph TB
 | `lib_subtitle_common.sh` | Shared library — language helpers, codec helpers, path classifiers |
 | `arr_profile_extract_on_import.sh` | Unified Sonarr + Radarr import hook |
 | `library_subtitle_dedupe.sh` | Removes duplicate/low-quality external subs |
-| `bazarr_subtitle_recovery.sh` | Retries missing subtitle downloads with translation fallback |
+| `bazarr_subtitle_recovery.sh` | Retries missing subtitle downloads with translation fallback; Stage 4 (searches exhausted) sends a Discord "⚠️ Stuck Alerts" notification instead of deleting and re-grabbing |
 
 ### 🔀 Multi-Phase Pipeline
 
@@ -322,6 +322,7 @@ graph LR
 | Stale candidates | Flagged 90d+ unwatched + on streaming (tier 1.5) |
 | Already H.264 + AAC | Nothing to do |
 | Currently being converted | Concurrency guard |
+| Micro-encode (1080p MKV, BPF < 0.08) | Already-degraded source; transcoding would further harm quality. Logged to `$STATE_DIR/micro_encodes.csv` + Discord alert |
 
 ### 📊 Post-Swap Actions
 

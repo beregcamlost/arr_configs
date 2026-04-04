@@ -477,6 +477,46 @@ notify_discord_attempt_limit() {
     -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
+notify_discord_micro_encode() {
+  local path="$1" bpf="$2" bitrate_kbps="$3" resolution="$4"
+  [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
+
+  local payload
+  payload="$(jq -nc \
+    --arg path "$path" \
+    --arg bpf "$bpf" \
+    --arg bitrate "${bitrate_kbps} kbps" \
+    --arg res "$resolution" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: "🗜️ Codec Manager — Micro-Encode Detected",
+      description: "Source quality too low to transcode — skipping to avoid converting garbage to garbage.",
+      color: 15158332,
+      fields: [
+        {name: "📊 BPF",       value: $bpf,     inline: true},
+        {name: "📡 Bitrate",   value: $bitrate,  inline: true},
+        {name: "📐 Resolution",value: $res,      inline: true},
+        {name: "📁 File",      value: ("`" + $path + "`"), inline: false}
+      ],
+      footer: {text: "Codec Manager · micro_encode"},
+      timestamp: $ts
+    }]}')"
+
+  curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+    -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
+}
+
+# Append one row to the micro-encodes CSV; create file with header if it doesn't exist.
+# $1=date  $2=path  $3=codec  $4=bitrate_kbps  $5=resolution  $6=fps  $7=bpf  $8=size_mb
+log_micro_encode_csv() {
+  local csv_path="$STATE_DIR/micro_encodes.csv"
+  if [[ ! -f "$csv_path" ]]; then
+    printf 'date,path,codec,bitrate_kbps,resolution,fps,bpf,size_mb\n' >"$csv_path"
+  fi
+  printf '%s,"%s",%s,%s,%s,%s,%s,%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" >>"$csv_path"
+}
+
 die() {
   log "error" "$*"
   exit 1
@@ -1252,6 +1292,60 @@ ORDER BY m.path${where_limit};
       skip_reason="streaming_candidate"
     elif is_stale_candidate_inline "$path"; then
       skip_reason="stale_candidate"
+    elif [[ "$container" == "mkv" && "$max_w" -ge 1920 ]]; then
+      # Micro-encode detection: 1080p MKV files with extremely low bits-per-pixel-per-frame.
+      # Converting a low-quality source wastes resources and produces garbage output.
+      # Use </dev/null on mediainfo to prevent stdin consumption inside this pipeline loop.
+      local bpf_raw bpf_numeric
+      bpf_raw="$(mediainfo --Inform="Video;%Bits-(Pixel*Frame)%" "$path" </dev/null 2>/dev/null || true)"
+      # mediainfo may return empty, "N/A", or a decimal float
+      if [[ -n "$bpf_raw" ]] && [[ "$bpf_raw" =~ ^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
+        bpf_numeric=1
+      else
+        bpf_numeric=0
+      fi
+
+      if [[ "$bpf_numeric" -eq 1 ]] && awk -v bpf="$bpf_raw" 'BEGIN{exit (bpf < 0.08) ? 0 : 1}'; then
+        skip_reason="micro_encode"
+        log "warn" "Micro-encode detected: bpf=$bpf_raw path=$path"
+
+        # Gather additional metadata for the CSV and Discord alert
+        local me_width me_height me_fps me_bitrate me_codec me_size_mb me_resolution me_date
+        me_width="$(mediainfo --Inform="Video;%Width%"    "$path" </dev/null 2>/dev/null || true)"
+        me_height="$(mediainfo --Inform="Video;%Height%"  "$path" </dev/null 2>/dev/null || true)"
+        me_fps="$(mediainfo --Inform="Video;%FrameRate%"  "$path" </dev/null 2>/dev/null || true)"
+        me_bitrate="$(mediainfo --Inform="Video;%BitRate%" "$path" </dev/null 2>/dev/null || true)"
+        me_codec="$(mediainfo --Inform="Video;%Format%"   "$path" </dev/null 2>/dev/null || true)"
+        # Convert bitrate from bps → kbps (integer division)
+        if [[ "$me_bitrate" =~ ^[0-9]+$ ]]; then
+          me_bitrate=$(( me_bitrate / 1000 ))
+        else
+          me_bitrate="0"
+        fi
+        me_resolution="${me_width:-0}x${me_height:-0}"
+        me_size_mb="$(awk -v b="${size_bytes:-0}" 'BEGIN{printf "%.1f", b/1048576}')"
+        me_date="$(date '+%Y-%m-%d %H:%M:%S')"
+
+        log_micro_encode_csv \
+          "$me_date" "$path" "${me_codec:-unknown}" "$me_bitrate" \
+          "$me_resolution" "${me_fps:-0}" "$bpf_raw" "$me_size_mb"
+
+        notify_discord_micro_encode "$path" "$bpf_raw" "$me_bitrate" "$me_resolution"
+      else
+        # BPF above threshold or unreadable — fall through to normal eligibility logic
+        if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
+          skip_reason="already_compliant"
+        else
+          eligible=1
+          if [[ "$total_v" -gt 0 && "$h264_v" -eq "$total_v" ]]; then
+            reason="audio_only"
+            priority=1
+          else
+            reason="needs_transcode"
+            priority=10
+          fi
+        fi
+      fi
     else
       if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
         skip_reason="already_compliant"
@@ -1443,7 +1537,7 @@ verify_converted_file_standalone() {
   fi
 
   duration="$(jq -r '.format.duration // "0"' <<<"$probe_json")"
-  if [[ -z "$duration" ]] || ! [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]] || awk "BEGIN{exit ($duration > 0) ? 0 : 1}"; then
+  if [[ -z "$duration" ]] || ! [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk "BEGIN{exit ($duration > 0) ? 0 : 1}"; then
     VERIFY_FAIL_REASON="invalid_duration=$duration"
     return 1
   fi
@@ -1673,7 +1767,7 @@ run_convert_for_media() {
     audio_copy=1
   fi
 
-  ff_cmd=(ffmpeg -hide_banner -nostdin -y -i "$src" -map 0:V?)
+  ff_cmd=(ffmpeg -hide_banner -nostdin -y -i "$src" -map 0:v:0)
   ff_cmd+=( "${audio_map_args[@]}" )
   ff_cmd+=( -map 0:s? )
   if [[ "$video_copy" -eq 1 ]]; then

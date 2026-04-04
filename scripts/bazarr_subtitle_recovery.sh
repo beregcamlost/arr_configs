@@ -31,7 +31,7 @@ For items with missing subtitles in Bazarr:
 1) try Bazarr subtitle download
 2) if still missing and another subtitle language exists for that file, auto-translate from existing -> missing language
 3) if still missing, trigger Sonarr/Radarr search command
-4) if arr searches exhausted, delete media file via arr API and re-grab (different release)
+4) if arr searches exhausted, send a Discord alert (no file deletion)
 
 Commands:
   --report              Show current recovery state summary and exit
@@ -292,7 +292,7 @@ notify_discord() {
       {name: "🎯 Bazarr",        value: $bazarr,        inline: true},
       {name: "🌐 Translations",  value: $translations,  inline: true},
       {name: "🔁 Arr Triggers",  value: $arr,           inline: true},
-      {name: "💀 Regrabs",       value: $regrab,        inline: true}
+      {name: "⚠️ Stuck Alerts",  value: $regrab,        inline: true}
     ]')"
   # Add details if available
   if [[ "${#ACTION_DETAILS[@]}" -gt 0 ]]; then
@@ -388,21 +388,6 @@ state_reset_bazarr_attempts() {
   "
 }
 
-state_reset_for_regrab() {
-  local media_type="$1" media_id="$2" lang="$3" forced="$4" hi="$5"
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] state_reset_for_regrab $media_type $media_id $lang forced=$forced hi=$hi"
-    return 0
-  fi
-  recovery_db "
-    UPDATE recovery_state
-    SET bazarr_attempts=0, arr_attempts=0,
-        last_bazarr_try_ts=0, last_translate_try_ts=0, last_arr_try_ts=0,
-        last_regrab_ts=$(date +%s),
-        updated_at=datetime('now')
-    WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi;
-  "
-}
 
 should_run_with_cooldown() {
   local last_ts="$1" cooldown="$2" now_ts="$3"
@@ -528,190 +513,53 @@ trigger_arr_search_movie() {
 }
 
 # ---------------------------------------------------------------------------
-# Post-regrab import verification
-# When Sonarr/Radarr re-grabs a torrent already in the download client (same
-# hash), the download is instantly 100% but Sonarr/Radarr won't process the
-# import event. These helpers wait briefly, then force a ManualImport if the
-# file hasn't been imported but the search completed.
+# Stage 4: Discord alert for stuck subtitle items (replaces delete & re-grab)
 # ---------------------------------------------------------------------------
-verify_and_force_import_episode() {
-  local episode_id="$1"
-  local wait_secs=30 check_interval=10 elapsed=0
-  # Wait for Sonarr to process the search grab
-  while [[ "$elapsed" -lt "$wait_secs" ]]; do
-    sleep "$check_interval"
-    elapsed=$((elapsed + check_interval))
-    local has_file
-    has_file="$(curl -sS "$SONARR_URL/api/v3/episode/$episode_id?apikey=$SONARR_KEY" 2>/dev/null | jq -r '.hasFile // false')"
-    if [[ "$has_file" == "true" ]]; then
-      log "REGRAB_IMPORT_OK type=episode id=$episode_id (imported within ${elapsed}s)"
-      return 0
-    fi
-  done
-  # File not imported — check if it's in the queue (still downloading)
-  local in_queue
-  in_queue="$(curl -sS "$SONARR_URL/api/v3/queue?page=1&pageSize=200&apikey=$SONARR_KEY" 2>/dev/null \
-    | jq -r "[.records[] | select(.episodeId == $episode_id)] | length" 2>/dev/null || echo 0)"
-  if [[ "$in_queue" -gt 0 ]]; then
-    log "REGRAB_IMPORTING type=episode id=$episode_id (in download queue, will import on completion)"
-    return 0
-  fi
-  # Not in queue and not imported — likely the same-torrent-hash issue.
-  # Use remote path mapping to find the download directory.
-  local series_id mi_json mi_path mi_quality mi_langs mi_group mi_release_type
-  series_id="$(curl -sS "$SONARR_URL/api/v3/episode/$episode_id?apikey=$SONARR_KEY" 2>/dev/null | jq -r '.seriesId')"
-  local dl_local_path
-  dl_local_path="$(curl -sS "$SONARR_URL/api/v3/remotepathmapping?apikey=$SONARR_KEY" 2>/dev/null \
-    | jq -r '.[0].localPath // empty')"
-  if [[ -n "$dl_local_path" ]]; then
-    mi_json="$(curl -sS "$SONARR_URL/api/v3/manualimport?folder=${dl_local_path}&filterExistingFiles=false&seriesId=$series_id&apikey=$SONARR_KEY" 2>/dev/null \
-      | jq -c "[.[] | select(.episodes[]?.id == $episode_id)] | .[0] // empty" 2>/dev/null)"
-  fi
-  if [[ -z "$mi_json" || "$mi_json" == "null" ]]; then
-    log "REGRAB_IMPORT_MISS type=episode id=$episode_id reason=no_file_in_download_dir"
-    return 0
-  fi
-  # Extract fields for ManualImport command
-  mi_path="$(printf '%s' "$mi_json" | jq -r '.path')"
-  mi_quality="$(printf '%s' "$mi_json" | jq -c '.quality')"
-  mi_langs="$(printf '%s' "$mi_json" | jq -c '.languages')"
-  mi_group="$(printf '%s' "$mi_json" | jq -r '.releaseGroup // ""')"
-  mi_release_type="$(printf '%s' "$mi_json" | jq -r '.releaseType // "singleEpisode"')"
-  local import_http
-  import_http="$(curl -sS -o "$TMPDIR_RECOVERY/sonarr_manualimport.out" -w "%{http_code}" \
-    -X POST \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n \
-      --arg path "$mi_path" \
-      --argjson sid "$series_id" \
-      --argjson eids "[$episode_id]" \
-      --argjson quality "$mi_quality" \
-      --argjson langs "$mi_langs" \
-      --arg group "$mi_group" \
-      --arg rtype "$mi_release_type" \
-      '{name:"ManualImport",importMode:"auto",files:[{path:$path,seriesId:$sid,episodeIds:$eids,quality:$quality,languages:$langs,releaseGroup:$group,releaseType:$rtype,indexerFlags:0}]}')" \
-    "$SONARR_URL/api/v3/command?apikey=$SONARR_KEY")"
-  log "REGRAB_FORCE_IMPORT type=episode id=$episode_id path=$mi_path http=$import_http"
-  add_action "FORCE_IMPORT episode $episode_id http=$import_http"
-  # Brief wait and final check
-  sleep 15
-  local final_check
-  final_check="$(curl -sS "$SONARR_URL/api/v3/episode/$episode_id?apikey=$SONARR_KEY" 2>/dev/null | jq -r '.hasFile // false')"
-  if [[ "$final_check" == "true" ]]; then
-    log "REGRAB_IMPORT_OK type=episode id=$episode_id (force-imported)"
-  else
-    log "REGRAB_IMPORT_PENDING type=episode id=$episode_id (import queued, will complete soon)"
-  fi
-}
-
-verify_and_force_import_movie() {
-  local movie_id="$1"
-  local wait_secs=30 check_interval=10 elapsed=0
-  while [[ "$elapsed" -lt "$wait_secs" ]]; do
-    sleep "$check_interval"
-    elapsed=$((elapsed + check_interval))
-    local has_file
-    has_file="$(curl -sS "$RADARR_URL/api/v3/movie/$movie_id?apikey=$RADARR_KEY" 2>/dev/null | jq -r '.hasFile // false')"
-    if [[ "$has_file" == "true" ]]; then
-      log "REGRAB_IMPORT_OK type=movie id=$movie_id (imported within ${elapsed}s)"
-      return 0
-    fi
-  done
-  local in_queue
-  in_queue="$(curl -sS "$RADARR_URL/api/v3/queue?page=1&pageSize=200&apikey=$RADARR_KEY" 2>/dev/null \
-    | jq -r "[.records[] | select(.movieId == $movie_id)] | length" 2>/dev/null || echo 0)"
-  if [[ "$in_queue" -gt 0 ]]; then
-    log "REGRAB_IMPORTING type=movie id=$movie_id (in download queue, will import on completion)"
-    return 0
-  fi
-  local mi_json mi_path mi_quality mi_langs mi_group
-  local dl_local_path
-  dl_local_path="$(curl -sS "$RADARR_URL/api/v3/remotepathmapping?apikey=$RADARR_KEY" 2>/dev/null \
-    | jq -r '.[0].localPath // empty')"
-  if [[ -n "$dl_local_path" ]]; then
-    mi_json="$(curl -sS "$RADARR_URL/api/v3/manualimport?folder=${dl_local_path}&filterExistingFiles=false&movieId=$movie_id&apikey=$RADARR_KEY" 2>/dev/null \
-      | jq -c "[.[] | select(.movie.id == $movie_id)] | .[0] // empty" 2>/dev/null)"
-  fi
-  if [[ -z "$mi_json" || "$mi_json" == "null" ]]; then
-    log "REGRAB_IMPORT_MISS type=movie id=$movie_id reason=no_file_in_download_dir"
-    return 0
-  fi
-  mi_path="$(printf '%s' "$mi_json" | jq -r '.path')"
-  mi_quality="$(printf '%s' "$mi_json" | jq -c '.quality')"
-  mi_langs="$(printf '%s' "$mi_json" | jq -c '.languages')"
-  mi_group="$(printf '%s' "$mi_json" | jq -r '.releaseGroup // ""')"
-  local import_http
-  import_http="$(curl -sS -o "$TMPDIR_RECOVERY/radarr_manualimport.out" -w "%{http_code}" \
-    -X POST \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n \
-      --arg path "$mi_path" \
-      --argjson mid "$movie_id" \
-      --argjson quality "$mi_quality" \
-      --argjson langs "$mi_langs" \
-      --arg group "$mi_group" \
-      '{name:"ManualImport",importMode:"auto",files:[{path:$path,movieId:$mid,quality:$quality,languages:$langs,releaseGroup:$group,indexerFlags:0}]}')" \
-    "$RADARR_URL/api/v3/command?apikey=$RADARR_KEY")"
-  log "REGRAB_FORCE_IMPORT type=movie id=$movie_id path=$mi_path http=$import_http"
-  add_action "FORCE_IMPORT movie $movie_id http=$import_http"
-  sleep 15
-  local final_check
-  final_check="$(curl -sS "$RADARR_URL/api/v3/movie/$movie_id?apikey=$RADARR_KEY" 2>/dev/null | jq -r '.hasFile // false')"
-  if [[ "$final_check" == "true" ]]; then
-    log "REGRAB_IMPORT_OK type=movie id=$movie_id (force-imported)"
-  else
-    log "REGRAB_IMPORT_PENDING type=movie id=$movie_id (import queued, will complete soon)"
-  fi
-}
-
-delete_and_regrab_episode() {
-  local episode_id="$1"
+notify_subtitle_stuck() {
+  local media_type="$1" media_id="$2" lang_token="$3"
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] would DELETE episode file for episode=$episode_id via Sonarr and re-search"
+    log "[DRY-RUN] would send subtitle-stuck Discord alert type=$media_type id=$media_id lang=$lang_token"
     return 0
   fi
-  # Get episodeFileId from Sonarr
-  local ep_json file_id del_http
-  ep_json="$(curl -sS "$SONARR_URL/api/v3/episode/$episode_id?apikey=$SONARR_KEY" 2>/dev/null)"
-  file_id="$(printf '%s' "$ep_json" | jq -r '.episodeFileId // 0')"
-  if [[ -z "$file_id" || "$file_id" == "0" || "$file_id" == "null" ]]; then
-    log "REGRAB_SKIP type=episode id=$episode_id reason=no_episode_file"
+  [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && {
+    log "SUBTITLE_STUCK_NO_WEBHOOK type=$media_type id=$media_id lang=$lang_token"
     return 0
-  fi
-  # Delete the episode file
-  del_http="$(curl -sS -o "$TMPDIR_RECOVERY/sonarr_delete.out" -w "%{http_code}" \
-    -X DELETE \
-    "$SONARR_URL/api/v3/episodefile/$file_id?apikey=$SONARR_KEY")"
-  log "REGRAB_DELETE type=episode id=$episode_id fileId=$file_id http=$del_http"
-  # Trigger a fresh search
-  trigger_arr_search_episode "$episode_id" >/dev/null 2>&1
-  # Post-regrab: verify import or force it (handles already-complete torrents)
-  verify_and_force_import_episode "$episode_id"
-}
+  }
 
-delete_and_regrab_movie() {
-  local movie_id="$1"
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] would DELETE movie file for movie=$movie_id via Radarr and re-search"
-    return 0
+  local item_title="Unknown"
+  if [[ "$media_type" == "movie" ]]; then
+    item_title="$(curl -sS "$RADARR_URL/api/v3/movie/$media_id?apikey=$RADARR_KEY" 2>/dev/null \
+      | jq -r '(.title // "Movie \(.id)") + " (" + ((.year // 0)|tostring) + ")"' 2>/dev/null \
+      || echo "Movie $media_id")"
+  else
+    local ep_json series_title ep_label
+    ep_json="$(curl -sS "$SONARR_URL/api/v3/episode/$media_id?apikey=$SONARR_KEY" 2>/dev/null)"
+    series_title="$(printf '%s' "$ep_json" | jq -r '.series.title // ""' 2>/dev/null)"
+    ep_label="$(printf '%s' "$ep_json" | jq -r '"S" + (.seasonNumber|tostring|("00"+.)[-2:]) + "E" + (.episodeNumber|tostring|("00"+.)[-2:])' 2>/dev/null)"
+    item_title="${series_title:+$series_title }${ep_label:-Episode $media_id}"
   fi
-  # Get movieFileId from Radarr
-  local mv_json file_id del_http
-  mv_json="$(curl -sS "$RADARR_URL/api/v3/movie/$movie_id?apikey=$RADARR_KEY" 2>/dev/null)"
-  file_id="$(printf '%s' "$mv_json" | jq -r '.movieFile.id // 0')"
-  if [[ -z "$file_id" || "$file_id" == "0" || "$file_id" == "null" ]]; then
-    log "REGRAB_SKIP type=movie id=$movie_id reason=no_movie_file"
-    return 0
-  fi
-  # Delete the movie file
-  del_http="$(curl -sS -o "$TMPDIR_RECOVERY/radarr_delete.out" -w "%{http_code}" \
-    -X DELETE \
-    "$RADARR_URL/api/v3/moviefile/$file_id?apikey=$RADARR_KEY")"
-  log "REGRAB_DELETE type=movie id=$movie_id fileId=$file_id http=$del_http"
-  # Trigger a fresh search
-  trigger_arr_search_movie "$movie_id" >/dev/null 2>&1
-  # Post-regrab: verify import or force it (handles already-complete torrents)
-  verify_and_force_import_movie "$movie_id"
+
+  local payload
+  payload="$(jq -nc \
+    --arg item_title "$item_title" \
+    --arg media_type "$media_type" \
+    --arg lang "$lang_token" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: "⚠️ Subtitle Recovery Stuck",
+      description: ("Could not find **\($lang)** subtitles for **\($item_title)** after exhausting all Bazarr, translation, and Arr search attempts. Manual intervention required."),
+      color: 15105570,
+      fields: [
+        {name: "📺 Type",     value: $media_type, inline: true},
+        {name: "🎬 Title",    value: $item_title,  inline: true},
+        {name: "🌐 Language", value: $lang,         inline: true}
+      ],
+      timestamp: $ts
+    }]}')"
+  curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
+    -H "Content-Type: application/json" \
+    -d "$payload" >/dev/null 2>&1
+  log "SUBTITLE_STUCK_NOTIFIED type=$media_type id=$media_id lang=$lang_token title=$item_title"
 }
 
 # ---------------------------------------------------------------------------
@@ -891,7 +739,7 @@ process_item() {
     elif [[ "$arr_att" -lt "$MAX_ARR_ATTEMPTS" ]]; then
       prev_stage="stage3_arr"
     else
-      prev_stage="stage4_regrab"
+      prev_stage="stage4_notify"
     fi
 
     # -- Stage 1: Bazarr download attempt --
@@ -1010,30 +858,29 @@ process_item() {
       state_set "$media_type" "$media_id" "$lang" "$forced" "$hi" "$last_baz" "$last_tr" "$now_ts" "arr_search_http_$arr_http"
     fi
 
-    # -- Stage 4: Delete & re-grab --
+    # -- Stage 4: Discord alert (subtitle stuck, no file deletion) --
     if [[ "$arr_att" -ge "$MAX_ARR_ATTEMPTS" && "$regrab_att" -lt "$MAX_REGRABS" && "$MAX_REGRABS" -gt 0 ]] \
        && should_run_with_cooldown "$last_regrab" "$REGRAB_COOLDOWN_SEC" "$now_ts"; then
-      new_stage="stage4_regrab"
+      new_stage="stage4_notify"
       if [[ "$prev_stage" != "$new_stage" ]]; then
-        log "STAGE_TRANSITION type=$media_type id=$media_id lang=$token from=$prev_stage to=$new_stage arr_attempts=$arr_att regrab_attempt=$((regrab_att+1))"
+        log "STAGE_TRANSITION type=$media_type id=$media_id lang=$token from=$prev_stage to=$new_stage arr_attempts=$arr_att alert_attempt=$((regrab_att+1))"
       fi
 
       local regrab_dedup_key="${media_type}_${media_id}"
       if [[ -z "${regrabbed_this_run[$regrab_dedup_key]+x}" ]]; then
-        if [[ "$media_type" == "episode" ]]; then
-          delete_and_regrab_episode "$media_id"
-        else
-          delete_and_regrab_movie "$media_id"
-        fi
+        notify_subtitle_stuck "$media_type" "$media_id" "$token"
         regrabbed_this_run["$regrab_dedup_key"]=1
         regrab_triggers=$((regrab_triggers + 1))
-        log "REGRAB_TRIGGER type=$media_type id=$media_id lang=$token regrab_attempt=$((regrab_att+1))/$MAX_REGRABS"
-        add_action "REGRAB_TRIGGER $media_type $media_id lang=$token regrab=$((regrab_att+1))/$MAX_REGRABS"
+        log "SUBTITLE_STUCK_ALERT type=$media_type id=$media_id lang=$token alert_attempt=$((regrab_att+1))/$MAX_REGRABS"
+        add_action "SUBTITLE_STUCK $media_type $media_id lang=$token alert=$((regrab_att+1))/$MAX_REGRABS"
       else
-        log "REGRAB_DEDUP type=$media_type id=$media_id lang=$token (already regrabbed this run)"
+        log "SUBTITLE_STUCK_DEDUP type=$media_type id=$media_id lang=$token (already alerted this run)"
       fi
       state_inc_col "$media_type" "$media_id" "$lang" "$forced" "$hi" "regrab_attempts"
-      state_reset_for_regrab "$media_type" "$media_id" "$lang" "$forced" "$hi"
+      [[ "$DRY_RUN" -eq 0 ]] && recovery_db "
+        UPDATE recovery_state SET last_regrab_ts=$(date +%s), updated_at=datetime('now')
+        WHERE media_type='$media_type' AND media_id=$media_id AND lang_code='$lang' AND forced=$forced AND hi=$hi;
+      "
       regrab_att=$((regrab_att + 1))
     fi
 
@@ -1117,7 +964,7 @@ if [[ $((bazarr_attempts + translations + arr_triggers + regrab_triggers)) -gt 0
   discord_title="🔄 Subtitle Recovery Complete"
   discord_body="📊 **Scanned:** $scanned · 🎯 **Bazarr:** $bazarr_attempts · 🌐 **Translations:** $translations · 🔁 **Arr triggers:** $arr_triggers"
   if [[ "$regrab_triggers" -gt 0 ]]; then
-    discord_body="${discord_body} · 💀 **Regrabs:** $regrab_triggers"
+    discord_body="${discord_body} · ⚠️ **Stuck Alerts:** $regrab_triggers"
   fi
   if [[ "${#ACTION_DETAILS[@]}" -gt 0 ]]; then
     details_text=""
