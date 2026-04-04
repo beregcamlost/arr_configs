@@ -32,9 +32,9 @@
 [![TMDB](https://img.shields.io/badge/TMDB-✓-01D277?style=flat-square&logo=themoviedatabase&logoColor=white)](https://www.themoviedatabase.org)
 [![Transmission](https://img.shields.io/badge/Transmission-✓-C00?style=flat-square)](https://transmissionbt.com)
 
-[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-21%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
+[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-22%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
 [![Tests](https://img.shields.io/badge/tests-528%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--03--21-informational?style=flat-square&logo=calendar&logoColor=white)]()
+[![Updated](https://img.shields.io/badge/last%20updated-2026--04--04-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -54,6 +54,7 @@
 - [🌐 Translation System](#-translation-system)
 - [👻 Emby Zombie Reaper](#-emby-zombie-reaper)
 - [🧹 Arr Cleanup](#-arr-cleanup)
+- [🚫 Grab Monitor](#-grab-monitor)
 - [⏰ Cron Schedule](#-cron-schedule)
 - [🔌 Integration Flow](#-integration-flow)
 - [📁 Repository Structure](#-repository-structure)
@@ -169,6 +170,7 @@ graph TB
 | 🌐 Translation System | Python | 151 ✅ | 30 min | ✅ Discord |
 | 👻 Zombie Reaper | Bash | — | 2 min | ✅ Discord |
 | 🧹 Arr Cleanup | Bash | — | 30 min | — |
+| 🚫 Grab Monitor | Bash | — | 3 min | ✅ Discord |
 | 📈 Trending Auto-Add | Python | 21 ✅ | Weekly (DISABLED) | — |
 | 💾 SQLite Backup | Bash | — | Every 3 days | — |
 
@@ -178,10 +180,10 @@ graph TB
 
 | Metric | Value |
 |--------|-------|
-| 📜 Total cron jobs | 21 |
+| 📜 Total cron jobs | 22 |
 | 🧪 Total tests | 528 passing |
 | 🌐 Translation budget | Gemini primary (13 free keys), DeepL 400K/month fallback, Google last resort |
-| 💾 State databases | 5 (codec, streaming, translation, subtitle-quality, bazarr) |
+| 💾 State databases | 6 (codec, streaming, translation, subtitle-quality, bazarr, grab-monitor) |
 | 🔌 External APIs | 9 (Sonarr, Radarr, Bazarr, Emby, TMDB, DeepL, MoTN, Watchmode, JustWatch) |
 | 📡 Discord webhooks | All systems |
 | 🎞️ Target codec | H.264 CRF19 + AAC 192k stereo |
@@ -490,6 +492,48 @@ Every 30 minutes (at :12 and :42):
 
 ---
 
+## 🚫 Grab Monitor
+
+> **`automation/scripts/grab-monitor.sh`** — Enforces a language policy at download time. Monitors recent grabs from Sonarr and Radarr and removes any download whose detected audio languages fall outside the allowed set.
+
+### 🎯 Allowed Languages Per Item
+
+```
+{Original language of the series/movie} ∪ {English} ∪ {Spanish} ∪ {Spanish Latino}
+```
+
+- **Attack on Titan** (Japanese-origin): Japanese + English + Spanish → allowed ✅
+- **Amélie** (French-origin): French + English → allowed ✅
+- **Rooster** (English-origin): French + English MULTI → **blocked** ✅
+
+### ⚙️ How It Works
+
+```
+Every 3 minutes:
+  1. Query Sonarr + Radarr history for grabs in the last 5 minutes
+  2. For each grab: look up the series/movie original language via API
+  3. Build allowed set: {originalLang, English, Spanish, Spanish Latino}
+  4. If any parsed language is outside the allowed set:
+     → Remove torrent from Transmission
+     → Discord notification with violation details
+     → Log action to state dir
+  5. Mark all processed grabs as seen (SQLite) to avoid reprocessing
+```
+
+### 📂 Key Files
+
+| File | Purpose |
+|------|---------|
+| `automation/scripts/grab-monitor.sh` | Canonical script |
+| `scripts/grab-monitor.sh` | Compat copy (used by cron) |
+
+### 📋 State
+
+- **State DB**: `/APPBOX_DATA/storage/.grab-monitor-state/seen.db`
+- **Log**: `/APPBOX_DATA/storage/.grab-monitor-state/grab-monitor.log`
+
+---
+
 ## ⏰ Cron Schedule
 
 > All jobs use `flock` for concurrency control. Subtitle dedupe + auto-maintain share a flock group. DeepL has its own. Codec manager has its own.
@@ -526,6 +570,7 @@ gantt
 
 | Schedule | Job | System | Notes |
 |----------|-----|--------|-------|
+| `*/3 * * * *` | 🚫 Grab monitor | Language Guard | Removes MULTI/foreign-language bad grabs |
 | `*/5 * * * *` | 🎬 Subtitle dedupe quick | Subtitles | `--since 10` min |
 | `7,17,27,37,47,57 * * * *` | 🎬 Subtitle auto-maintain quick | Subtitles | `--since 15` min |
 | `3,18,33,48 * * * *` | 🎬 Bazarr subtitle recovery | Subtitles | `--since 30` min |
@@ -602,7 +647,7 @@ sequenceDiagram
 │
 ├── 📂 automation/
 │   ├── 📂 configs/                  # Tracked configs & crontab
-│   │   ├── 📄 crontab.env-sourced  # 21 cron jobs (install with: crontab <file>)
+│   │   ├── 📄 crontab.env-sourced  # 22 cron jobs (install with: crontab <file>)
 │   │   ├── 📄 bazarr-config.yaml
 │   │   ├── 📄 radarr-config.xml
 │   │   └── 📄 sonarr-config.xml
@@ -628,6 +673,7 @@ sequenceDiagram
 │       ├── 📂 translation/          # 🌐 DeepL translator (python)
 │       │
 │       ├── 📄 arr_cleanup_importblocked.sh
+│       ├── 📄 grab-monitor.sh
 │       ├── 📄 emby_zombie_reaper.sh
 │       └── 📄 emby_last_played_report.sh
 │
