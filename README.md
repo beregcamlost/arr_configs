@@ -34,7 +34,7 @@
 
 [![Cron Jobs](https://img.shields.io/badge/cron%20jobs-22%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
 [![Tests](https://img.shields.io/badge/tests-528%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--04--04-informational?style=flat-square&logo=calendar&logoColor=white)]()
+[![Updated](https://img.shields.io/badge/last%20updated-2026--04--06-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -802,7 +802,7 @@ Actual path: `/APPBOX_DATA/storage/.transcode-state-media/` (not `.transcode-sta
 <details>
 <summary>🗑️ <strong>Orphaned temp files pollute find scans</strong></summary>
 
-Interrupted ffmpeg operations leave `.striptmp.*`, `.bloattmp.*`, `.subtmp.*`, `.collisiontmp.*` files. Three-layer fix: (1) auto-cleanup at scan start removes stale temps older than 1 hour, (2) `! -name "*tmp.*"` in all find patterns, (3) normal success path cleans up. Found 373 orphaned files in production.
+Interrupted ffmpeg operations leave temp files (`.striptmp.*`, `.bloattmp.*`, `.subtmp.*`, `.collisiontmp.*`). Four-layer fix: (1) all temp files use dot-prefix (e.g. `.Movie.striptmp.mkv`) so Radarr/Emby skip them — prevents metadata orphans, (2) auto-cleanup at scan start removes stale temps older than 1 hour, (3) `! -name "*tmp.*"` in all find patterns, (4) normal success path cleans up immediately.
 
 </details>
 

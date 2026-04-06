@@ -917,7 +917,8 @@ cmd_mux() {
     local ext="${mkv_file##*.}"
     local sub_codec="copy"
     [[ "${ext,,}" == "mp4" || "${ext,,}" == "m4v" ]] && sub_codec="mov_text"
-    local tmp_out="${mkv_file%.*}.subtmp.${ext}"
+    local tmp_out="${mkv_file%/*}/.${mkv_file##*/}"
+    tmp_out="${tmp_out%.*}.subtmp.${ext}"
     if ! "${ffmpeg_cmd[@]}" "${map_args[@]}" -c:v copy -c:a copy -c:s "$sub_codec" "$tmp_out" </dev/null 2>/dev/null; then
       log "FAIL mux: $basename"
       rm -f "$tmp_out"
@@ -970,7 +971,8 @@ cmd_mux() {
       done
       strip_cmd+=(-c copy)
       local strip_ext="${mkv_file##*.}"
-      local strip_tmp="${mkv_file%.*}.collisiontmp.${strip_ext}"
+      local strip_tmp="${mkv_file%/*}/.${mkv_file##*/}"
+      strip_tmp="${strip_tmp%.*}.collisiontmp.${strip_ext}"
       if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]] && validate_streams_match "$mkv_file" "$strip_tmp" "post_mux_strip"; then
         mv "$strip_tmp" "$mkv_file"
         log "STRIPPED ${#premux_strip_indices[@]} superseded embedded track(s) from: $basename"
@@ -1100,7 +1102,8 @@ cmd_strip() {
     ffmpeg_cmd+=(-c copy)
 
     local ext="${mkv_file##*.}"
-    local tmp_out="${mkv_file%.*}.striptmp.${ext}"
+    local tmp_out="${mkv_file%/*}/.${mkv_file##*/}"
+    tmp_out="${tmp_out%.*}.striptmp.${ext}"
     if ! "${ffmpeg_cmd[@]}" "$tmp_out" </dev/null 2>/dev/null; then
       log "FAIL strip: $basename"
       rm -f "$tmp_out"
@@ -1510,7 +1513,7 @@ cmd_auto_maintain() {
     [[ -z "$stale_tmp" ]] && continue
     rm -f "$stale_tmp"
     stale_count=$((stale_count + 1))
-  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.striptmp.*" -o -name "*.bloattmp.*" -o -name "*.subtmp.*" -o -name "*.collisiontmp.*" \) -mmin +60 2>/dev/null)
+  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.striptmp.*" -o -name ".*.striptmp.*" -o -name "*.bloattmp.*" -o -name ".*.bloattmp.*" -o -name "*.subtmp.*" -o -name ".*.subtmp.*" -o -name "*.collisiontmp.*" -o -name ".*.collisiontmp.*" \) -mmin +60 2>/dev/null)
   [[ "$stale_count" -gt 0 ]] && log "CLEANUP $stale_count orphaned temp file(s)"
 
   # Find MKV files across all media dirs
@@ -1707,7 +1710,8 @@ cmd_auto_maintain() {
             done
             p0_strip_cmd+=(-c copy)
             local ext_p0="${mkv_file##*.}"
-            local p0_strip_tmp="${mkv_file%.*}.bloattmp.${ext_p0}"
+            local p0_strip_tmp="${mkv_file%/*}/.${mkv_file##*/}"
+            p0_strip_tmp="${p0_strip_tmp%.*}.bloattmp.${ext_p0}"
             if "${p0_strip_cmd[@]}" "$p0_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p0_strip_tmp" ]] && validate_streams_match "$mkv_file" "$p0_strip_tmp" "phase0_strip"; then
               mv "$p0_strip_tmp" "$mkv_file"
               stripped_tracks=$((stripped_tracks + ${#p0_strip_indices[@]}))
@@ -1936,7 +1940,8 @@ cmd_auto_maintain() {
         local ext="${mkv_file##*.}"
         local sub_codec="copy"
         [[ "${ext,,}" == "mp4" || "${ext,,}" == "m4v" ]] && sub_codec="mov_text"
-        local tmp_out="${mkv_file%.*}.subtmp.${ext}"
+        local tmp_out="${mkv_file%/*}/.${mkv_file##*/}"
+        tmp_out="${tmp_out%.*}.subtmp.${ext}"
         if "${ffmpeg_cmd[@]}" "${map_args[@]}" -c:v copy -c:a copy -c:s "$sub_codec" "$tmp_out" </dev/null 2>/dev/null; then
           local new_sub_count expected
           new_sub_count="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$tmp_out" 2>/dev/null | jq '.streams | length')"
@@ -1962,7 +1967,8 @@ cmd_auto_maintain() {
               done
               p1_strip_cmd+=(-c copy)
               local p1_strip_ext="${mkv_file##*.}"
-              local p1_strip_tmp="${mkv_file%.*}.collisiontmp.${p1_strip_ext}"
+              local p1_strip_tmp="${mkv_file%/*}/.${mkv_file##*/}"
+              p1_strip_tmp="${p1_strip_tmp%.*}.collisiontmp.${p1_strip_ext}"
               if "${p1_strip_cmd[@]}" "$p1_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p1_strip_tmp" ]] && validate_streams_match "$mkv_file" "$p1_strip_tmp" "phase1_collision_strip"; then
                 mv "$p1_strip_tmp" "$mkv_file"
                 stripped_tracks=$((stripped_tracks + ${#premux_strip_indices_p1[@]}))
@@ -2289,7 +2295,8 @@ cmd_auto_maintain() {
           done
           strip_cmd+=(-c copy)
           local ext="${mkv_file##*.}"
-          local strip_tmp="${mkv_file%.*}.striptmp.${ext}"
+          local strip_tmp="${mkv_file%/*}/.${mkv_file##*/}"
+          strip_tmp="${strip_tmp%.*}.striptmp.${ext}"
           if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]] && validate_streams_match "$mkv_file" "$strip_tmp" "phase2_dedup_strip"; then
             mv "$strip_tmp" "$mkv_file"
             stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))

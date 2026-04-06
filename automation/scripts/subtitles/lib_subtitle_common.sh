@@ -1030,7 +1030,8 @@ strip_all_embedded_subs() {
   [[ "$sub_count" -eq 0 ]] && return 0
 
   ext="${file##*.}"
-  tmp_out="${file%.*}.striptmp.${ext}"
+  tmp_out="${file%/*}/.${file##*/}"
+  tmp_out="${tmp_out%.*}.striptmp.${ext}"
 
   if ffmpeg -y -v quiet -i "$file" -map 0 -map -0:s -c copy "$tmp_out" </dev/null 2>/dev/null; then
     # Verify output is non-empty and reasonable size
@@ -1335,7 +1336,8 @@ strip_embedded_by_indices() {
   strip_cmd+=(-c copy)
 
   local ext="${file##*.}"
-  local tmp_out="${file%.*}.striptmp.${ext}"
+  local tmp_out="${file%/*}/.${file##*/}"
+  tmp_out="${tmp_out%.*}.striptmp.${ext}"
   if "${strip_cmd[@]}" "$tmp_out" </dev/null 2>/dev/null; then
     local orig_size new_size
     orig_size="$(stat -c '%s' "$file" 2>/dev/null || echo 0)"
