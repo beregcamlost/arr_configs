@@ -48,6 +48,7 @@ def fetch_movies(radarr_url, api_key):
             "has_file": m.get("hasFile", False),
             "library": _detect_library(path, "movie"),
             "media_type": "movie",
+            "added": m.get("added", ""),
         })
     return movies
 
@@ -87,6 +88,7 @@ def fetch_series(sonarr_url, api_key):
             "media_type": "tv",
             "season_count": len(owned_seasons),
             "season_numbers": owned_seasons,
+            "added": s.get("added", ""),
         })
     return series
 

@@ -1018,7 +1018,9 @@ def summary(json_out, db_path):
 @click.option("--dry-run", is_flag=True, help="Show what would happen without deleting")
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
 @click.option("--db-path", default=None, help="Path to streaming state database")
-def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path):
+@click.option("--grace-days", default=180, type=int,
+              help="Skip items added within this many days regardless of play history (default: 180)")
+def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path, grace_days):
     """Delete stale library items not played in N days.
 
     Scans ALL library items (not just streaming matches). Auto-deletes items
@@ -1071,7 +1073,8 @@ def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path):
 
     # 4. Filter to stale items
     from datetime import datetime, timezone
-    cutoff = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    cutoff = now
     min_size_bytes = int(min_size_gb * 1_000_000_000)
 
     stale_items = []
@@ -1085,6 +1088,18 @@ def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path):
         # Exclude dual-audio items (jpn+spa or eng+spa)
         if _is_dual_audio_keep_local(item.get("path", "")):
             continue
+        # Exclude items added within the grace period (regardless of play history)
+        added_str = item.get("added", "")
+        if added_str and grace_days > 0:
+            try:
+                added_dt = datetime.fromisoformat(added_str.replace("Z", "+00:00"))
+                added_days_ago = (now - added_dt).days
+                if added_days_ago < grace_days:
+                    if verbose:
+                        print(f"  [grace] {item['title']} added {added_days_ago}d ago, skipping")
+                    continue
+            except (ValueError, TypeError):
+                pass
         # Check play history
         path = item.get("path", "")
         last_played = play_map.get(path)

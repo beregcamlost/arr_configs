@@ -16,7 +16,7 @@
 | `db.py` | 🗄️ SQLite state DB — tracks streaming history across scans |
 | `config.py` | ⚙️ Config loader — reads `.env`, maps provider names to IDs |
 | `discord.py` | 💬 Discord webhook notifications (new matches, deletions) |
-| `tests/` | ✅ 233 tests (pytest) |
+| `tests/` | ✅ 282 tests (pytest) |
 
 ---
 
@@ -103,6 +103,27 @@ python3 -m streaming.streaming_checker summary --json
 python3 -m streaming.streaming_checker providers --country CL
 python3 -m streaming.streaming_checker providers --country US
 ```
+
+### 🗑️ `stale-cleanup` — Auto-delete unplayed library items
+
+Deletes items not played in N days that exceed a size threshold. Items added within the grace period are always skipped.
+
+```bash
+# Dry-run: see what would be deleted (safe)
+python3 -m streaming.streaming_checker stale-cleanup --yes --dry-run \
+  --no-play-days 365 --min-size-gb 3.0 --grace-days 180
+
+# For real (runs monthly via cron, 1st of month 7 AM)
+python3 -m streaming.streaming_checker stale-cleanup --yes \
+  --no-play-days 365 --min-size-gb 3.0 --grace-days 180
+```
+
+Options:
+- `--no-play-days` — items not played in this many days are stale (default: 365)
+- `--min-size-gb` — auto-delete items above this size; report-only below (default: 3.0)
+- `--grace-days` — skip items added within this many days, regardless of play history (default: 180)
+- `--dry-run` — preview without deleting
+- `--verbose` — show per-item reasoning
 
 ---
 
