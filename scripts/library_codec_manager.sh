@@ -27,6 +27,7 @@ INCLUDE_SERIES=1
 INCLUDE_MOVIES=1
 LOG_LEVEL="info"
 PATH_PREFIX=""
+FORCE_MICRO_ENCODE=0
 
 TARGET_VIDEO_CODEC="h264"
 TARGET_AUDIO_CODEC="aac"
@@ -91,6 +92,7 @@ Options:
   --limit N             Max files for audit/plan/report sampling (default: 0 = all)
   --dry-run             No media mutations; print planned actions
   --path-prefix PATH    Restrict audit source rows to paths under this prefix
+  --force-micro-encode  Allow plan to include micro-encode files (logs warn, skips Discord alert)
   --include-series      Restrict scope to series only
   --include-movies      Restrict scope to movies only
   --max-attempts N      Max conversion attempts per media before skip (default: $MAX_ATTEMPTS_DEFAULT)
@@ -568,6 +570,8 @@ parse_args() {
         DRY_RUN=1; shift ;;
       --path-prefix)
         PATH_PREFIX="$2"; shift 2 ;;
+      --force-micro-encode)
+        FORCE_MICRO_ENCODE=1; shift ;;
       --include-series)
         INCLUDE_SERIES=1; INCLUDE_MOVIES=0; shift ;;
       --include-movies)
@@ -740,6 +744,7 @@ lang_name_to_iso() {
     german)               echo "ger" ;;
     italian)              echo "ita" ;;
     portuguese)           echo "por" ;;
+    "chinese simplified") echo "zho" ;;
     chinese*|mandarin)    echo "zho" ;;
     japanese)             echo "jpn" ;;
     korean)               echo "kor" ;;
@@ -764,7 +769,6 @@ lang_name_to_iso() {
     ukrainian)            echo "ukr" ;;
     bulgarian)            echo "bul" ;;
     croatian)             echo "hrv" ;;
-    "chinese simplified") echo "zho" ;;
     *)                    echo "" ;;
   esac
 }
@@ -1134,7 +1138,7 @@ audit_cmd() {
   local query
   query="$(fetch_sources_query)"
 
-  local total=0 ok=0 missing=0 probe_fail=0 skipped=0
+  local total=0 ok=0 missing_cnt=0 probe_fail=0 skipped=0
 
   local sources_tmp
   sources_tmp="$(mktemp)"
@@ -1163,7 +1167,7 @@ audit_cmd() {
     media_id="$(media_id_for_path "$path")"
 
     if [[ ! -f "$path" ]]; then
-      missing=$((missing + 1))
+      missing_cnt=$((missing_cnt + 1))
       clear_probe_streams "$media_id"
       upsert_audit_status "$media_id" 0 0 "missing_file"
       insert_event "warn" "audit" "$media_id" "Missing file" "{\"path\":\"$(sql_quote "$path")\"}"
@@ -1208,10 +1212,10 @@ audit_cmd() {
   done <"$sources_tmp"
   rm -f "$sources_tmp"
 
-  log "info" "Audit completed. processed=$total probe_ok=$ok skipped=$skipped missing=$missing probe_fail=$probe_fail"
+  log "info" "Audit completed. processed=$total probe_ok=$ok skipped=$skipped missing=$missing_cnt probe_fail=$probe_fail"
   end_ts="$(date +%s)"
   elapsed="$((end_ts - start_ts))"
-  notify_discord_audit_done "$total" "$ok" "$missing" "$probe_fail" "$elapsed" "$skipped"
+  notify_discord_audit_done "$total" "$ok" "$missing_cnt" "$probe_fail" "$elapsed" "$skipped"
 }
 
 plan_cmd() {
@@ -1306,7 +1310,6 @@ ORDER BY m.path${where_limit};
       fi
 
       if [[ "$bpf_numeric" -eq 1 ]] && awk -v bpf="$bpf_raw" 'BEGIN{exit (bpf < 0.08) ? 0 : 1}'; then
-        skip_reason="micro_encode"
         log "warn" "Micro-encode detected: bpf=$bpf_raw path=$path"
 
         # Gather additional metadata for the CSV and Discord alert
@@ -1330,8 +1333,16 @@ ORDER BY m.path${where_limit};
           "$me_date" "$path" "${me_codec:-unknown}" "$me_bitrate" \
           "$me_resolution" "${me_fps:-0}" "$bpf_raw" "$me_size_mb"
 
-        notify_discord_micro_encode "$path" "$bpf_raw" "$me_bitrate" "$me_resolution"
-      else
+        if [[ "$FORCE_MICRO_ENCODE" -eq 1 ]]; then
+          log "warn" "Micro-encode guard bypassed via --force-micro-encode: path=$path"
+          # Fall through to normal eligibility logic below (no skip_reason set, no Discord alert)
+        else
+          skip_reason="micro_encode"
+          notify_discord_micro_encode "$path" "$bpf_raw" "$me_bitrate" "$me_resolution"
+        fi
+      fi
+
+      if [[ -z "$skip_reason" ]]; then
         # BPF above threshold or unreadable — fall through to normal eligibility logic
         if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
           skip_reason="already_compliant"
@@ -1848,6 +1859,16 @@ SQL
 convert_cmd() {
   acquire_convert_lock || return 0
 
+  # Load guard: skip transcode when system is overloaded
+  local _lg_load _lg_int _lg_thresh
+  _lg_load="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+  _lg_int="${_lg_load%%.*}"
+  _lg_thresh="${LOAD_GUARD_THRESHOLD:-20}"
+  if [[ "$_lg_int" -ge "$_lg_thresh" ]]; then
+    log "warn" "convert_cmd: load=${_lg_load} >= threshold=${_lg_thresh} — skipping resume run"
+    return 0
+  fi
+
   # Recover stale rows left as "running" after interrupted sessions/processes.
   local recovered
   recovered="$(db "
@@ -1952,7 +1973,7 @@ verify_and_clean_cmd() {
     return 1
   }
 
-  while IFS=$'\t' read -r media_id new_path backup_path swapped_ts; do
+  while IFS=$'\t' read -r media_id new_path backup_path _; do
     [[ -z "$media_id" ]] && continue
 
     # Check if backup exists

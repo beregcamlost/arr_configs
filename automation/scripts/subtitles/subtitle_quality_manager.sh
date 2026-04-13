@@ -907,10 +907,10 @@ cmd_mux() {
       if [[ "$is_mp4" -eq 1 ]]; then
         lang="$(lang_to_iso639_2 "$lang")"
         local abs_idx=$((total_stream_count + i))
-        map_args+=(-metadata:s:${abs_idx} "language=${lang}")
+        map_args+=(-metadata:s:"${abs_idx}" "language=${lang}")
       else
         local metadata_idx=$((existing_sub_count + i))
-        map_args+=(-metadata:s:s:${metadata_idx} "language=${lang}")
+        map_args+=(-metadata:s:s:"${metadata_idx}" "language=${lang}")
       fi
     done
 
@@ -1401,14 +1401,11 @@ run_upgrade_retries() {
   local state_db="$1"
   local retried=0 resolved=0 abandoned=0
 
-  while IFS=$'\t' read -r nu_path nu_lang nu_forced nu_rating nu_score nu_retries; do
+  while IFS=$'\t' read -r nu_path nu_lang nu_forced _ _ nu_retries; do
     [[ -z "$nu_path" ]] && continue
     [[ ! -f "$nu_path" ]] && { resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"; continue; }
 
     # Check if file already has a good sub for this lang now
-    local nu_stem nu_dir
-    nu_dir="$(dirname "$nu_path")"
-    nu_stem="$(basename "${nu_path%.*}")"
     local nu_duration
     nu_duration="$(get_video_duration "$nu_path")"
 
@@ -1476,6 +1473,7 @@ run_upgrade_retries() {
 
 cmd_auto_maintain() {
   load_streaming_candidates
+  load_guard "auto-maintain" || return 0
   log "auto-maintain: path=$PATH_PREFIX_ROOT since=$SINCE_MINUTES keep_profile_langs=$KEEP_PROFILE_LANGS bloat_threshold=$BLOAT_THRESHOLD dry_run=$DRY_RUN"
 
   local state_db="$STATE_DIR/subtitle_quality_state.db"
@@ -1731,6 +1729,7 @@ cmd_auto_maintain() {
 
     # --- Phase 0.5: Consolidated 1-best-per-lang enforcement ---
     local -a eopl_strip_indices=()
+    # shellcheck disable=SC2034
     declare -A eopl_kept_langs=()
     if enforce_one_per_lang "$mkv_file" "${duration%.*}" "$DRY_RUN" eopl_strip_indices eopl_kept_langs; then
       if [[ ${#eopl_strip_indices[@]} -gt 0 ]] && [[ "$DRY_RUN" -eq 0 ]]; then
@@ -1759,8 +1758,7 @@ cmd_auto_maintain() {
         drift_anchor_p075="$(get_drift_anchor_lang "$emb_json_p075" "$am_profile_langs")"
 
         for ((i=0; i<emb_count_p075; i++)); do
-          local p075_idx p075_lang p075_codec
-          p075_idx="$(jq -r ".[$i].index" <<<"$emb_json_p075")"
+          local p075_lang p075_codec
           p075_lang="$(jq -r ".[$i].tags.language // \"und\"" <<<"$emb_json_p075")"
           p075_codec="$(jq -r ".[$i].codec_name" <<<"$emb_json_p075")"
           is_text_sub_codec "$p075_codec" || continue
@@ -1930,10 +1928,10 @@ cmd_auto_maintain() {
           if [[ "$is_mp4" -eq 1 ]]; then
             lang="$(lang_to_iso639_2 "$lang")"
             local abs_idx=$((total_stream_count + i))
-            map_args+=(-metadata:s:${abs_idx} "language=${lang}")
+            map_args+=(-metadata:s:"${abs_idx}" "language=${lang}")
           else
             local metadata_idx=$((existing_sub_count + i))
-            map_args+=(-metadata:s:s:${metadata_idx} "language=${lang}")
+            map_args+=(-metadata:s:s:"${metadata_idx}" "language=${lang}")
           fi
         done
 
@@ -2456,9 +2454,6 @@ cmd_compliance() {
       no_profile=$((no_profile + 1))
       continue
     fi
-    local profile_set
-    profile_set="$(expand_lang_codes "$profile_langs")"
-
     # Get embedded subs
     local emb_json
     emb_json="$(get_embedded_subs "$mkv_file")"

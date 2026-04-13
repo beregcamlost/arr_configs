@@ -21,8 +21,10 @@
 SQLITE_TIMEOUT_MS=30000
 
 # Subtitle extensions that can be converted to SRT (text-based formats)
+# shellcheck disable=SC2034
 CONVERTIBLE_SUB_EXTS="ass ssa vtt"
 # All subtitle extensions we care about (convertible + srt)
+# shellcheck disable=SC2034
 ALL_TEXT_SUB_EXTS="srt ass ssa vtt"
 
 # ---------------------------------------------------------------------------
@@ -35,6 +37,27 @@ log() {
   else
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
   fi
+}
+
+load_guard() {
+  local label="${1:-}"
+  local load_1min thresh_raw threshold
+  load_1min="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+  thresh_raw="${LOAD_GUARD_THRESHOLD:-}"
+  if [[ -n "$thresh_raw" ]]; then
+    threshold="$thresh_raw"
+  else
+    local ncpu
+    ncpu="$(nproc 2>/dev/null || echo 1)"
+    threshold=$(( ncpu * 3 ))
+    (( threshold < 20 )) && threshold=20
+  fi
+  local load_int="${load_1min%%.*}"
+  if [[ "$load_int" -ge "$threshold" ]]; then
+    log "LOAD_GUARD [$label]: load=$load_1min >= threshold=$threshold — skipping"
+    return 1
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -926,6 +949,9 @@ get_stream_idx_zh() {
 # Core extraction logic
 # ---------------------------------------------------------------------------
 
+_FFPROBE_SUB_CACHE_FILE=""
+_FFPROBE_SUB_CACHE_JSON=""
+
 extract_target() {
   local file="$1"
   local code="$2"
@@ -945,7 +971,11 @@ extract_target() {
     forced_num="1"
   fi
 
-  json="$(ffprobe -v error -print_format json -show_streams -select_streams s "$file" 2>/dev/null || true)"
+  if [[ "$file" != "$_FFPROBE_SUB_CACHE_FILE" || -z "$_FFPROBE_SUB_CACHE_JSON" ]]; then
+    _FFPROBE_SUB_CACHE_FILE="$file"
+    _FFPROBE_SUB_CACHE_JSON="$(ffprobe -v error -print_format json -show_streams -select_streams s "$file" 2>/dev/null || true)"
+  fi
+  json="$_FFPROBE_SUB_CACHE_JSON"
   [ -z "$json" ] && return 0
 
   case "$code" in

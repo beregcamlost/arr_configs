@@ -96,10 +96,10 @@ notify_discord() {
 # ---------------------------------------------------------------------------
 resolve_profile_id() {
   local media_id="$1" media_path="$2"
-  local esc_path profile_id default_profile attempt
+  local esc_path profile_id default_profile _attempt
   esc_path="$(sql_escape "$media_path")"
 
-  for attempt in $(seq 1 10); do
+  for _attempt in $(seq 1 10); do
     if [[ "$ARR_TYPE" == "sonarr" ]]; then
       profile_id="$(sqlite3 "$DB" "SELECT profileId FROM table_shows WHERE sonarrSeriesId=$media_id LIMIT 1;")"
       if [[ -z "$profile_id" && -n "$media_path" ]]; then
@@ -115,7 +115,7 @@ resolve_profile_id() {
       printf '%s' "$profile_id"
       return 0
     fi
-    sleep 2
+    sleep 0.5
   done
 
   if [[ "$ARR_TYPE" == "sonarr" ]]; then
@@ -130,62 +130,17 @@ resolve_profile_id() {
 }
 
 # ---------------------------------------------------------------------------
-# Main
+# Deferred heavy work — runs in background after main() returns to arr
+# Inherits: MEDIA_PATH, MEDIA_ID, PROFILE_ID, ARR_TYPE, EVENT_TYPE,
+#           items, profile_set, WRITES, SKIPS, PRUNES (all global)
 # ---------------------------------------------------------------------------
-main() {
-  log "EVENT=$EVENT_TYPE arr=$ARR_TYPE media_id=$MEDIA_ID path=$MEDIA_PATH"
+deferred_main() {
+  # Cache raw ffprobe subtitle stream JSON once — reused by both the
+  # non-profile extraction block and the selective-strip block below.
+  local _raw_sub_json
+  _raw_sub_json="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$MEDIA_PATH" 2>/dev/null || true)"
 
-  if [[ -z "$MEDIA_PATH" || ! -f "$MEDIA_PATH" ]]; then
-    log "Skip: no media file path"
-    notify_discord "SKIP" "Reason: no media file path"
-    exit 0
-  fi
-
-  # Resolve media ID from DB if not provided
-  if [[ -z "$MEDIA_ID" ]]; then
-    local esc_path
-    esc_path="$(sql_escape "$MEDIA_PATH")"
-    if [[ "$ARR_TYPE" == "sonarr" ]]; then
-      MEDIA_ID="$(sqlite3 "$DB" "SELECT sonarrSeriesId FROM table_episodes WHERE path='$esc_path' LIMIT 1;")"
-    else
-      MEDIA_ID="$(sqlite3 "$DB" "SELECT radarrId FROM table_movies WHERE path='$esc_path' LIMIT 1;")"
-    fi
-  fi
-
-  if [[ -z "$MEDIA_ID" ]]; then
-    log "Skip: media id not found"
-    notify_discord "SKIP" "Reason: media id not found"
-    exit 0
-  fi
-
-  PROFILE_ID="$(resolve_profile_id "$MEDIA_ID" "$MEDIA_PATH")"
-
-  if [[ -z "$PROFILE_ID" ]]; then
-    log "Skip: profile not found for $ARR_TYPE id=$MEDIA_ID"
-    notify_discord "SKIP" "Reason: profile not found"
-    exit 0
-  fi
-
-  # Check profile matches media
-  local profile_check
-  if [[ "$ARR_TYPE" == "sonarr" ]]; then
-    profile_check="$(sqlite3 "$DB" "SELECT 1 FROM table_shows WHERE sonarrSeriesId=$MEDIA_ID AND profileId=$PROFILE_ID LIMIT 1;")"
-  else
-    profile_check="$(sqlite3 "$DB" "SELECT 1 FROM table_movies WHERE radarrId=$MEDIA_ID AND profileId=$PROFILE_ID LIMIT 1;")"
-  fi
-  if [[ "$profile_check" != "1" ]]; then
-    log "Fallback profile applied for $ARR_TYPE id=$MEDIA_ID: profile=$PROFILE_ID"
-  fi
-
-  local items
-  items="$(sqlite3 "$DB" "SELECT items FROM table_languages_profiles WHERE profileId=$PROFILE_ID LIMIT 1;")"
-
-  if [[ -z "$items" ]]; then
-    log "Skip: empty profile items"
-    notify_discord "SKIP" "Reason: empty profile items"
-    exit 0
-  fi
-
+  # --- Extract profile languages from embedded streams ---
   while IFS='|' read -r code forced; do
     [[ -z "$code" ]] && continue
     code="${code,,}"
@@ -199,16 +154,10 @@ main() {
 
   # Extract non-profile embedded text subs before stripping — preserves them
   # as external SRTs for DeepL translation source use.
-  local profile_set=""
-  while IFS='|' read -r _plang _; do
-    [[ -z "$_plang" ]] && continue
-    profile_set+=" $(expand_lang_codes "${_plang,,}") "
-  done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
-
+  # profile_set is already computed in main() — no recomputation needed.
   if [[ -n "$profile_set" ]]; then
     local emb_json emb_count np_dir np_stem
-    emb_json="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$MEDIA_PATH" 2>/dev/null \
-      | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und")}, forced: (.disposition.forced // 0)}]')"
+    emb_json="$(jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und")}, forced: (.disposition.forced // 0)}]' <<<"$_raw_sub_json")"
     emb_count="$(jq 'length' <<<"$emb_json")"
     np_dir="$(dirname "$MEDIA_PATH")"
     np_stem="$(basename "${MEDIA_PATH%.*}")"
@@ -272,8 +221,7 @@ main() {
   # AND remaining non-profile embedded tracks (after translation in 4C)
   # KEEP profile-lang embedded tracks that won their group
   local emb_json_sel emb_count_sel
-  emb_json_sel="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$MEDIA_PATH" 2>/dev/null \
-    | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und")}, forced: (.disposition.forced // 0)}]')"
+  emb_json_sel="$(jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und")}, forced: (.disposition.forced // 0)}]' <<<"$_raw_sub_json")"
   emb_count_sel="$(jq 'length' <<<"$emb_json_sel")"
   local -a selective_strip_indices=()
 
@@ -372,7 +320,7 @@ main() {
     local stem_tr dir_tr
     stem_tr="$(basename "${MEDIA_PATH%.*}")"
     dir_tr="$(dirname "$MEDIA_PATH")"
-    while IFS='|' read -r tr_lang tr_forced; do
+    while IFS='|' read -r tr_lang _tr_forced; do
       [[ -z "$tr_lang" ]] && continue
       tr_lang="${tr_lang,,}"
       # Skip if external SRT already exists
@@ -466,6 +414,73 @@ main() {
   fi
 
   log "Done"
+}
+
+# ---------------------------------------------------------------------------
+# Main — fast path only; spawns deferred_main in background before returning
+# ---------------------------------------------------------------------------
+main() {
+  log "EVENT=$EVENT_TYPE arr=$ARR_TYPE media_id=$MEDIA_ID path=$MEDIA_PATH"
+
+  # --- FAST PATH (synchronous) ---
+  if [[ -z "$MEDIA_PATH" || ! -f "$MEDIA_PATH" ]]; then
+    log "Skip: no media file path"
+    notify_discord "SKIP" "Reason: no media file path"
+    exit 0
+  fi
+
+  if [[ -z "$MEDIA_ID" ]]; then
+    local esc_path
+    esc_path="$(sql_escape "$MEDIA_PATH")"
+    if [[ "$ARR_TYPE" == "sonarr" ]]; then
+      MEDIA_ID="$(sqlite3 "$DB" "SELECT sonarrSeriesId FROM table_episodes WHERE path='$esc_path' LIMIT 1;")"
+    else
+      MEDIA_ID="$(sqlite3 "$DB" "SELECT radarrId FROM table_movies WHERE path='$esc_path' LIMIT 1;")"
+    fi
+  fi
+
+  if [[ -z "$MEDIA_ID" ]]; then
+    log "Skip: media id not found"
+    notify_discord "SKIP" "Reason: media id not found"
+    exit 0
+  fi
+
+  PROFILE_ID="$(resolve_profile_id "$MEDIA_ID" "$MEDIA_PATH")"
+
+  if [[ -z "$PROFILE_ID" ]]; then
+    log "Skip: profile not found for $ARR_TYPE id=$MEDIA_ID"
+    notify_discord "SKIP" "Reason: profile not found"
+    exit 0
+  fi
+
+  local profile_check
+  if [[ "$ARR_TYPE" == "sonarr" ]]; then
+    profile_check="$(sqlite3 "$DB" "SELECT 1 FROM table_shows WHERE sonarrSeriesId=$MEDIA_ID AND profileId=$PROFILE_ID LIMIT 1;")"
+  else
+    profile_check="$(sqlite3 "$DB" "SELECT 1 FROM table_movies WHERE radarrId=$MEDIA_ID AND profileId=$PROFILE_ID LIMIT 1;")"
+  fi
+  if [[ "$profile_check" != "1" ]]; then
+    log "Fallback profile applied for $ARR_TYPE id=$MEDIA_ID: profile=$PROFILE_ID"
+  fi
+
+  # Pre-compute items and profile_set for deferred work
+  items="$(sqlite3 "$DB" "SELECT items FROM table_languages_profiles WHERE profileId=$PROFILE_ID LIMIT 1;")"
+  if [[ -z "$items" ]]; then
+    log "Skip: empty profile items"
+    notify_discord "SKIP" "Reason: empty profile items"
+    exit 0
+  fi
+
+  profile_set=""
+  while IFS='|' read -r _plang _; do
+    [[ -z "$_plang" ]] && continue
+    profile_set+=" $(expand_lang_codes "${_plang,,}") "
+  done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
+
+  # --- SPAWN DEFERRED WORK IN BACKGROUND ---
+  log "Spawning deferred work for $ARR_TYPE id=$MEDIA_ID profile=$PROFILE_ID"
+  deferred_main </dev/null >> "$LOG" 2>&1 &
+  disown
 }
 
 main "$@"
