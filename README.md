@@ -32,9 +32,8 @@
 [![TMDB](https://img.shields.io/badge/TMDB-✓-01D277?style=flat-square&logo=themoviedatabase&logoColor=white)](https://www.themoviedatabase.org)
 [![Transmission](https://img.shields.io/badge/Transmission-✓-C00?style=flat-square)](https://transmissionbt.com)
 
-[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-22%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
+[![Cron Jobs](https://img.shields.io/badge/cron%20jobs-~14%20active-success?style=flat-square&logo=clockify&logoColor=white)]()
 [![Tests](https://img.shields.io/badge/tests-528%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)]()
-[![Updated](https://img.shields.io/badge/last%20updated-2026--04--06-informational?style=flat-square&logo=calendar&logoColor=white)]()
 
 </div>
 
@@ -48,9 +47,11 @@
 
 - [🗺️ Architecture Overview](#-architecture-overview)
 - [⚡ Systems at a Glance](#-systems-at-a-glance)
+- [🎯 Media Pipeline Orchestrator](#-media-pipeline-orchestrator)
 - [🎬 Subtitle System](#-subtitle-system)
 - [🔄 Codec Manager](#-codec-manager)
 - [📺 Streaming Checker](#-streaming-checker)
+- [🛡️ Deletion Safety Guards](#-deletion-safety-guards)
 - [🌐 Translation System](#-translation-system)
 - [👻 Emby Zombie Reaper](#-emby-zombie-reaper)
 - [🧹 Arr Cleanup](#-arr-cleanup)
@@ -58,6 +59,7 @@
 - [⏰ Cron Schedule](#-cron-schedule)
 - [🔌 Integration Flow](#-integration-flow)
 - [📁 Repository Structure](#-repository-structure)
+- [📚 Shared Libraries](#-shared-libraries)
 - [🛠️ Tech Stack](#-tech-stack)
 - [⚙️ Configuration](#-configuration)
 - [📖 Operational Lessons](#-operational-lessons)
@@ -164,13 +166,14 @@ graph TB
 
 | System | Language | Tests | Cron Freq | Notifications |
 |--------|----------|-------|-----------|---------------|
-| 🎬 Subtitle Manager | Bash | 159 ✅ | 5 min / 10 min / daily | ✅ Discord |
-| 🔄 Codec Manager | Bash | — | 15 min / 3 AM daily | ✅ Discord |
+| 🎯 Pipeline Orchestrator | Bash | — | Every 5 min | — |
+| 🎬 Subtitle Manager | Bash | 159 ✅ | via pipeline / daily | ✅ Discord |
+| 🔄 Codec Manager | Bash | — | via pipeline / 3 AM daily | ✅ Discord |
 | 📺 Streaming Checker | Python | 271 ✅ | Weekly / Monthly | ✅ Discord |
-| 🌐 Translation System | Python | 151 ✅ | 30 min | ✅ Discord |
-| 👻 Zombie Reaper | Bash | — | 2 min | ✅ Discord |
-| 🧹 Arr Cleanup | Bash | — | 30 min | — |
-| 🚫 Grab Monitor | Bash | — | 3 min | ✅ Discord |
+| 🌐 Translation System | Python | 151 ✅ | via pipeline | ✅ Discord |
+| 👻 Zombie Reaper | Bash | — | via pipeline | ✅ Discord |
+| 🧹 Arr Cleanup | Bash | — | via pipeline | — |
+| 🚫 Grab Monitor | Bash | — | via pipeline | ✅ Discord |
 | 📈 Trending Auto-Add | Python | 21 ✅ | Weekly (DISABLED) | — |
 | 💾 SQLite Backup | Bash | — | Every 3 days | — |
 
@@ -180,7 +183,7 @@ graph TB
 
 | Metric | Value |
 |--------|-------|
-| 📜 Total cron jobs | 22 |
+| 📜 Total cron jobs | ~14 |
 | 🧪 Total tests | 528 passing |
 | 🌐 Translation budget | Gemini primary (13 free keys), DeepL 400K/month fallback, Google last resort |
 | 💾 State databases | 6 (codec, streaming, translation, subtitle-quality, bazarr, grab-monitor) |
@@ -190,6 +193,92 @@ graph TB
 | ⏭️ Skips | UHD / 4K / HDR / streaming candidates / stale candidates |
 
 </details>
+
+---
+
+## 🎯 Media Pipeline Orchestrator
+
+> **`automation/scripts/media_pipeline.sh`** — A single cron entry that replaced 10 high-frequency independent jobs. Runs every 5 minutes and coordinates all short-cycle subsystems through a shared SQLite `pipeline_state` table, eliminating lock contention and silent skips.
+
+### 🔧 Why It Exists
+
+Before the orchestrator, each subsystem ran its own cron line with its own `flock` file. This caused:
+
+- **Lock contention** — subtitle dedupe and auto-maintain sharing one lock; codec resume and grab-monitor each grabbing their own; invocations piling up every few minutes
+- **No coordination** — codec resume could start while subtitle mux was mid-write on the same MKV
+- **Silent skips** — `flock -n` exits 1 with no output; heavy minutes had 4-5 jobs silently no-op
+- **No priority** — audio-only remuxes queued behind slow video transcodes; grab monitor ran on the same cadence regardless
+
+### ⚙️ Subsystems Coordinated
+
+| # | Subsystem | Step Role | Timeout |
+|---|-----------|-----------|---------|
+| 1 | 🚫 Grab Monitor | Quick job | 60s |
+| 2 | 🧹 Arr Cleanup | Quick job | 60s |
+| 3 | 👻 Zombie Reaper | Quick job | 60s |
+| 4 | 🎬 Subtitle Dedupe quick | Subtitle pipeline | 180s |
+| 5 | 🎬 Subtitle Auto-maintain quick | Subtitle pipeline | 180s |
+| 6 | 🎬 Bazarr Subtitle Recovery | Subtitle pipeline | 180s |
+| 7 | 🌐 Translation | Translation step | 300s |
+| 8 | 🔄 Codec Resume | Codec step | 600s |
+
+### 🗄️ DB Coordination
+
+A `pipeline_state` table in the codec SQLite database tracks which step is active, when it started, and its last heartbeat. Steps check this table before acquiring work — if another step is touching the same MKV, they yield rather than race.
+
+```sql
+-- pipeline_state table (in codec DB)
+step_name TEXT PRIMARY KEY,
+pid       INTEGER,
+started   INTEGER,   -- Unix epoch
+heartbeat INTEGER,
+status    TEXT       -- 'running' | 'done' | 'timeout'
+```
+
+### 🔢 Priority Ordering
+
+```
+Priority 0  →  Quick jobs (grab-monitor, arr-cleanup, zombie-reaper)   fast, no media I/O
+Priority 1  →  Audio-only remux in codec queue                         no quality loss, sub-second per file
+Priority 10 →  Video transcode                                         slow, CPU intensive
+Priority 99 →  Ineligible / skipped                                    never dequeued
+```
+
+Codec `resume` always drains all priority-1 items before touching priority-10, so audio fixes never wait behind a multi-hour transcode.
+
+### 🔀 Execution Flow
+
+```mermaid
+flowchart TD
+    CRON(["⏰ cron\n*/5 * * * *"]) --> PL
+
+    subgraph PL["🎯 media_pipeline.sh"]
+        QK["⚡ Quick Jobs\n(grab-monitor · arr-cleanup · zombie-reaper)\n60s timeout each"]
+        SUB["🎬 Subtitle Pipeline\n(dedupe · auto-maintain · bazarr-recovery)\n180s timeout each"]
+        TR["🌐 Translation\n300s timeout"]
+        CC["🔄 Codec Resume\n600s timeout"]
+
+        QK --> SUB --> TR --> CC
+    end
+
+    DB[("🗄️ pipeline_state\n(codec DB)")]
+
+    QK <-->|"heartbeat\n+ yield"| DB
+    SUB <-->|"heartbeat\n+ yield"| DB
+    TR <-->|"heartbeat\n+ yield"| DB
+    CC <-->|"heartbeat\n+ yield"| DB
+
+    CC --> EM["📺 Emby rescan"]
+    CC --> DC["🔔 Discord"]
+    SUB --> BZ["🔵 Bazarr rescan"]
+    TR --> DC
+
+    style QK fill:#1a3a1a,stroke:#22c55e,color:#fff
+    style SUB fill:#1a2a3a,stroke:#06b6d4,color:#fff
+    style TR fill:#2a1a3a,stroke:#818cf8,color:#fff
+    style CC fill:#3a2a1a,stroke:#f59e0b,color:#fff
+    style DB fill:#1a1a3a,stroke:#818cf8,color:#fff
+```
 
 ---
 
@@ -267,11 +356,11 @@ flowchart LR
 ### ⏱️ Scan Schedule
 
 ```
-Every  5 min  → subtitle dedupe quick scan      (--since 10 min)
-Every ~10 min → subtitle auto-maintain quick    (--since 15 min, staggered at :07/:17/...)
-Daily  1 AM   → subtitle auto-maintain full     (entire library)
-Weekly Sun 4AM→ subtitle dedupe full            (entire library)
-Every ~15 min → bazarr subtitle recovery        (--since 30 min, staggered at :03/:18/...)
+Every  5 min  → subtitle dedupe quick scan      (--since 10 min, via pipeline)
+Every  5 min  → subtitle auto-maintain quick    (--since 15 min, via pipeline)
+Every  5 min  → bazarr subtitle recovery        (--since 30 min, via pipeline)
+Daily  1 AM   → subtitle auto-maintain full     (entire library, independent cron)
+Weekly Sun 4AM→ subtitle dedupe full            (entire library, independent cron)
 ```
 
 > 💡 **`--since` logic**: checks both MKV mtime AND SRT mtime (OR logic), so new imports without SRTs are always caught by quick scans.
@@ -322,7 +411,19 @@ graph LR
 | Stale candidates | Flagged 90d+ unwatched + on streaming (tier 1.5) |
 | Already H.264 + AAC | Nothing to do |
 | Currently being converted | Concurrency guard |
-| Micro-encode (1080p MKV, BPF < 0.08) | Already-degraded source; transcoding would further harm quality. Logged to `$STATE_DIR/micro_encodes.csv` + Discord alert |
+| Micro-encode (1080p MKV, already H.264 + AAC compliant) | Already-degraded source with no codec/container/audio fix needed; only skipped when fully compliant. Logged to `$STATE_DIR/micro_encodes.csv` + Discord alert |
+
+### 🔬 Micro-Encode Detection
+
+Files that still need codec/container/audio fixes are always converted regardless of BPF. Detection only causes a skip when the file is already fully compliant (`already_compliant`).
+
+| BPF Range | Severity | Discord Alert |
+|-----------|----------|---------------|
+| < 0.02 | SEVERE — likely corrupt or near-unwatchable source | 🔴 Red alert |
+| 0.02 – 0.05 | Low bitrate — noticeable compression artifacts | 🟡 Yellow alert |
+| 0.05 – 0.08 | Borderline — marginal quality | ℹ️ Info only |
+
+> **BPF** = Bits Per Frame = `(file_size_bits) / (fps × duration_seconds)`. Calculated at audit time; stored in the codec DB alongside the conversion plan.
 
 ### 📊 Post-Swap Actions
 
@@ -401,6 +502,27 @@ flowchart TD
 
 ---
 
+## 🛡️ Deletion Safety Guards
+
+> Multiple layers of protection against accidental data loss — applied at every point where files or library entries can be permanently removed.
+
+### 📺 Streaming Checker
+
+| Guard | Protection |
+|-------|-----------|
+| `stale-cleanup` | Aborts entirely if the keep-local set is empty — indicates Radarr/Sonarr are unreachable; refuses to delete anything without a valid exclusion list |
+| `stale-delete` | Same keep-local empty-set abort before any deletion |
+
+### 🔄 Codec Manager
+
+| Guard | Protection |
+|-------|-----------|
+| `prune-backups` | Verifies the converted file exists (non-zero size, readable) before deleting the `.bak` backup; refuses to delete backup if converted file is missing or suspect |
+| MKV in-place rewrites | Every swap writes an audit record with pre/post size, mtime, and inode — lets you verify or roll back after the fact |
+| Work directory cleanup | Stale intermediate files in the codec work directory (interrupted conversions) are auto-removed after 24 hours, preventing accumulation without touching live media |
+
+---
+
 ## 🌐 Translation System
 
 > **`automation/scripts/translation/`** — Automatic subtitle translation for missing profile languages using Gemini, DeepL, and Google Translate. Bridges the gap when Bazarr can't find subtitles in the required language.
@@ -418,10 +540,10 @@ flowchart TD
 ### 🔀 Two Entry Points
 
 ```
-cron every 30 min
+pipeline every 5 min (translation step)
   └── translate --since 60
         queries Bazarr DB for missing_subtitles
-        translates in batch
+        translates in batch (300s timeout)
 
 Import Hook (background, async)
   └── translate --file /path/to/media.mkv
@@ -466,13 +588,13 @@ Import Hook (background, async)
 |---------|--------|
 | Session idle > 5 hours | 💀 Kill session |
 | 20 zombie kills accumulated | 🔄 Auto-restart Emby |
-| Every Tuesday 05:03 UTC | 🔄 Weekly safety restart |
+| Every Tuesday 05:03 UTC | 🔄 Weekly safety restart (independent cron) |
 
 ### 🔍 State Tracking
 
+- Runs as a quick-job step inside the pipeline every 5 minutes (60s timeout)
 - Tracks kill counts across invocations in state file
 - Sends Discord notification on auto-restart
-- Staggered cron timing (`2,32 *`) avoids collision with codec audit at `0 3 * * *`
 
 ---
 
@@ -483,7 +605,7 @@ Import Hook (background, async)
 ### ⚙️ What It Does
 
 ```
-Every 30 minutes (at :12 and :42):
+Every 5 minutes (via pipeline, quick-jobs step):
   1. Query Sonarr + Radarr for queue items in "importBlocked" status
   2. Blocklist queue items with executable extensions (.exe, .msi, etc.)
   3. Remove matching entries from arr queues
@@ -510,7 +632,7 @@ Every 30 minutes (at :12 and :42):
 ### ⚙️ How It Works
 
 ```
-Every 3 minutes:
+Every 5 minutes (via pipeline, quick-jobs step):
   1. Query Sonarr + Radarr history for grabs in the last 5 minutes
   2. For each grab: look up the series/movie original language via API
   3. Build allowed set: {originalLang, English, Spanish, Spanish Latino}
@@ -537,62 +659,37 @@ Every 3 minutes:
 
 ## ⏰ Cron Schedule
 
-> All jobs use `flock` for concurrency control. Subtitle dedupe + auto-maintain share a flock group. DeepL has its own. Codec manager has its own.
+> The 26-line schedule was consolidated to ~14 lines. Ten high-frequency jobs now run inside the unified pipeline. Low-frequency jobs remain as independent entries.
 
-```mermaid
-gantt
-    title Cron Job Schedule (24-hour view)
-    dateFormat HH:mm
-    axisFormat %H:%M
+### 🎯 Unified Pipeline (replaces 10 separate cron lines)
 
-    section Subtitles
-    Dedupe quick (every 5m)     :active, 00:00, 24:00
-    Auto-maintain quick (~10m staggered)   :active, 00:00, 24:00
-    Bazarr recovery (~15m staggered)       :active, 00:00, 24:00
-    Auto-maintain full          :milestone, 01:00, 0m
-
-    section Codec
-    Resume (every 15m)          :active, 00:00, 24:00
-    Audit + Plan                :milestone, 03:00, 0m
-
-    section Streaming
-    Emby last played (Tue)      :milestone, 03:35, 0m
-
-    section Emby
-    Zombie reaper (2,32)        :active, 00:00, 24:00
-    Weekly restart (Tue)        :milestone, 05:03, 0m
-
-    section Translation
-    DeepL translate (30m)       :active, 00:00, 24:00
-
-    section Cleanup
-    Arr import-blocked (30m)    :active, 00:00, 24:00
 ```
+*/5 * * * *   media_pipeline.sh
+```
+
+Coordinates inside each 5-minute window: grab-monitor → arr-cleanup → zombie-reaper → subtitle dedupe → subtitle auto-maintain → bazarr recovery → translation → codec resume.
+
+### 📅 Low-Frequency Independent Jobs
 
 | Schedule | Job | System | Notes |
 |----------|-----|--------|-------|
-| `*/3 * * * *` | 🚫 Grab monitor | Language Guard | Removes MULTI/foreign-language bad grabs |
-| `*/5 * * * *` | 🎬 Subtitle dedupe quick | Subtitles | `--since 10` min |
-| `7,17,27,37,47,57 * * * *` | 🎬 Subtitle auto-maintain quick | Subtitles | `--since 15` min |
-| `3,18,33,48 * * * *` | 🎬 Bazarr subtitle recovery | Subtitles | `--since 30` min |
-| `0 1 * * *` | 🎬 Subtitle auto-maintain full | Subtitles | Full library scan (checks SRT mtimes) |
+| `0 1 * * *` | 🎬 Subtitle auto-maintain full | Subtitles | Full library scan |
 | `0 4 * * 0` | 🎬 Subtitle dedupe full | Subtitles | Weekly, Sunday 4 AM |
-| `*/15 * * * *` | 🔄 Codec manager resume | Codec | Batch size 1 |
-| `0 3 * * *` | 🔄 Codec audit + plan | Codec | Incremental, ~7 min |
-| `*/30 * * * *` | 🌐 DeepL translation | Translation | `--since 60` min |
-| `12,42 * * * *` | 🧹 Arr import-blocked cleanup | Cleanup | — |
-| `0 5 * * 0` | 📺 Streaming availability scan | Streaming | Weekly, Sunday 5 AM |
-| `30 5 * * 0` | 📺 Tier 1.5: stale flag (90d unwatched) | Streaming | Weekly, Sunday 5:30 AM |
-| `0 6 * * 0` | 📺 Tier 1: streaming cleanup | Streaming | Weekly, Sunday 6 AM (DISABLED) |
-| `30 6 * * 0` | 📺 Tier 1.5: stale delete (15d grace) | Streaming | Weekly, Sunday 6:30 AM |
-| `0 7 1 * *` | 📺 Tier 2: stale cleanup (365d, >3GB) | Streaming | Monthly, 1st 7 AM |
-| `2,32 * * * *` | 👻 Emby zombie reaper | Emby | Staggered |
-| `3 5 * * 2` | 👻 Emby weekly restart | Emby | Tuesday 05:03 UTC |
+| `0 3 * * *` | 🔄 Codec audit | Codec | Incremental, ~7 min |
+| `45 3 * * *` | 🔄 Codec plan | Codec | Daily 3:45 AM |
+| `30 4 * * 0` | 🔄 Codec verify-and-clean | Codec | Weekly, Sunday 4:30 AM |
+| `0 5 * * 0` | 📺 Streaming scan | Streaming | Weekly, Sunday 5 AM |
+| `30 5 * * 0` | 📺 Streaming stale-flag | Streaming | Weekly, Sunday 5:30 AM |
+| `0 6 * * 0` | 📺 Streaming check-seasons | Streaming | Weekly, Sunday 6 AM |
+| `30 6 * * 0` | 📺 Streaming stale-delete | Streaming | Weekly, Sunday 6:30 AM |
+| `0 7 * * 0` | 📺 Streaming stale-cleanup | Streaming | Weekly, Sunday 7 AM |
+| `0 4 * * *` | 🔍 Streaming verify-disputed | Streaming | Daily 4 AM |
+| `0 7 1 * *` | 📺 Streaming monthly stale-cleanup | Streaming | 1st of month |
 | `35 3 * * 2` | 📊 Emby last played report | Reports | Tuesday 03:35 UTC |
-| `0 4 * * *` | 🔍 Verify disputed streaming | Streaming | Cross-validation voting |
-| `50 3 * * 1` | 🔵 Bazarr weekly restart | Maintenance | Monday — prevents FD leak exhaustion |
-| `50 3 * * 3` | 🔵 Sonarr weekly restart | Maintenance | Wednesday — prevents .NET memory growth |
-| `50 3 * * 4` | 🟡 Radarr weekly restart | Maintenance | Thursday — prevents .NET memory growth |
+| `3 5 * * 2` | 👻 Emby weekly restart | Emby | Tuesday 05:03 UTC |
+| `50 3 * * 1` | 🔵 Bazarr weekly restart | Maintenance | Monday — prevents FD leak |
+| `50 3 * * 3` | 🔵 Sonarr weekly restart | Maintenance | Wednesday — prevents .NET growth |
+| `50 3 * * 4` | 🟡 Radarr weekly restart | Maintenance | Thursday — prevents .NET growth |
 | `0 2 */3 * *` | 💾 SQLite backup | Maintenance | All state DBs |
 
 ---
@@ -627,9 +724,9 @@ sequenceDiagram
     CM->>EM: post-swap rescan
     CM->>DC: Conversion summary
 
-    Note over SUB,DL: Cron: every 5-30 min
-    Note over CM: Cron: every 15 min
-    Note over SC: Cron: weekly
+    Note over SUB,DL: Pipeline: every 5 min
+    Note over CM: Pipeline: every 5 min (codec step)
+    Note over SC: Cron: weekly (independent)
 ```
 
 ---
@@ -648,7 +745,7 @@ sequenceDiagram
 │
 ├── 📂 automation/
 │   ├── 📂 configs/                  # Tracked configs & crontab
-│   │   ├── 📄 crontab.env-sourced  # 22 cron jobs (install with: crontab <file>)
+│   │   ├── 📄 crontab.env-sourced  # ~14 cron jobs (install with: crontab <file>)
 │   │   ├── 📄 bazarr-config.yaml
 │   │   ├── 📄 radarr-config.xml
 │   │   └── 📄 sonarr-config.xml
@@ -663,6 +760,8 @@ sequenceDiagram
 │       │   ├── arr_profile_extract_on_import.sh
 │       │   ├── library_subtitle_dedupe.sh
 │       │   └── bazarr_subtitle_recovery.sh
+│       │
+│       ├── 📄 media_pipeline.sh     # 🎯 Unified pipeline orchestrator
 │       │
 │       ├── 📂 transcode/            # 🔄 Codec manager (bash)
 │       │   └── library_codec_manager.sh
@@ -684,6 +783,20 @@ sequenceDiagram
 
 ---
 
+## 📚 Shared Libraries
+
+> Reusable Bash libraries that multiple scripts source instead of duplicating logic.
+
+| Library | Path | Purpose |
+|---------|------|---------|
+| `lib_subtitle_common.sh` | `automation/scripts/subtitles/` | Language helpers, codec helpers, path classifiers, quality scoring — shared across all subtitle scripts |
+| `lib_arr_notify.sh` | `automation/scripts/` | Unified notification helpers for Emby (library refresh, rescan), Sonarr/Radarr (rescan, queue ops), and Bazarr (scan-disk, subtitle search) |
+| `lib_transmission.sh` | `automation/scripts/` | Transmission RPC wrapper — torrent lookup, removal, and status queries used by grab-monitor and arr-cleanup |
+
+> All three are sourced with `source "$(dirname "$0")/../lib_..."` patterns. Compat copies in `scripts/` must stay in sync whenever these libraries change.
+
+---
+
 ## 🛠️ Tech Stack
 
 <div align="center">
@@ -692,7 +805,7 @@ sequenceDiagram
 |-------|-----------|---------|
 | 🐚 Shell | Bash 5+ (`set -euo pipefail`) | Core automation scripts |
 | 🐍 Python | Python 3 + Click | Streaming checker + translator |
-| 🗄️ State | SQLite (5 databases) | Codec plans, streaming index, translation, subtitle quality state |
+| 🗄️ State | SQLite (6 databases) | Codec plans + pipeline_state, streaming index, translation, subtitle quality, grab-monitor |
 | 🎞️ Media | ffprobe / ffmpeg | Media analysis and conversion |
 | 🔗 *arr APIs | Sonarr · Radarr · Bazarr | Library management |
 | 📺 Server | Emby | Media server |

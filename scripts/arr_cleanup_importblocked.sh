@@ -10,6 +10,9 @@ flock -n 9 || { echo "Another instance is already running"; exit 0; }
 
 # Usage: arr_cleanup_importblocked.sh [--dry-run]
 
+# shellcheck source=lib_transmission.sh
+source "${BASH_SOURCE[0]%/*}/lib_transmission.sh"
+
 DRY_RUN=false
 for arg in "$@"; do
   [[ "$arg" == "--dry-run" ]] && DRY_RUN=true
@@ -25,9 +28,6 @@ TRANSMISSION_PASS="${TRANSMISSION_PASS:?TRANSMISSION_PASS env var required}"
 TRANSMISSION_LABELS="${TRANSMISSION_LABELS:-sonarr,radarr}"
 COMPLETED_DIR="${COMPLETED_DIR:-/APPBOX_DATA/apps/transmission.vhscave.appboxes.co/torrents/completed}"
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
-
-# Cached Transmission session ID — populated on first 409, reused for subsequent calls
-TRANSMISSION_SESSION_ID=""
 
 # Temp files for transmission operations
 _TMP_TRANSMISSION_LIST="$(mktemp /tmp/transmission_list.XXXXXX.json)"
@@ -46,35 +46,6 @@ disk_bytes_freed=0
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { printf '%s %s\n' "$(ts)" "$*"; }
-
-# transmission_rpc PAYLOAD OUTPUT_FILE
-# Makes a Transmission RPC call, retrying once on 409 to pick up the session ID.
-# Caches the session ID in TRANSMISSION_SESSION_ID for subsequent calls.
-# Prints the HTTP status code.
-transmission_rpc() {
-  local payload="$1" output_file="$2"
-  local http_code
-  local rpc_headers_file
-  rpc_headers_file="$(mktemp)"
-
-  http_code="$(curl -sS -u "${TRANSMISSION_USER}:${TRANSMISSION_PASS}" \
-    -H 'Content-Type: application/json' \
-    ${TRANSMISSION_SESSION_ID:+-H "X-Transmission-Session-Id: $TRANSMISSION_SESSION_ID"} \
-    -d "$payload" -D "$rpc_headers_file" -o "$output_file" -w '%{http_code}' \
-    "$TRANSMISSION_URL" || true)"
-
-  if [[ "$http_code" == "409" ]]; then
-    TRANSMISSION_SESSION_ID="$(awk -F': ' 'tolower($1)=="x-transmission-session-id"{gsub("\r","",$2); print $2}' "$rpc_headers_file" | tail -n1)"
-    http_code="$(curl -sS -u "${TRANSMISSION_USER}:${TRANSMISSION_PASS}" \
-      -H 'Content-Type: application/json' \
-      -H "X-Transmission-Session-Id: $TRANSMISSION_SESSION_ID" \
-      -d "$payload" -o "$output_file" -w '%{http_code}' \
-      "$TRANSMISSION_URL" || true)"
-  fi
-
-  rm -f "$rpc_headers_file"
-  printf '%s' "$http_code"
-}
 
 # cleanup_app APP BASE_URL API_KEY
 # Fetches the queue, removes stale import-blocked entries, and appends all

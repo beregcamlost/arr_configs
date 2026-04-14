@@ -1,9 +1,11 @@
 # Logs
 automation/logs/*.log
+automation/logs/*.csv*
 scripts/*.log
 
 # Backups (large, local-only)
 backups/
+arr-backups/
 
 # Symlinks to external services
 apps/

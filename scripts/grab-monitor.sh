@@ -20,15 +20,17 @@ exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "Another instance is already running"; exit 0; }
 
 # ── Source environment ────────────────────────────────────────────────────────
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly ENV_FILE="${SCRIPT_DIR}/../../.env"
 # shellcheck source=/dev/null
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+# shellcheck source=lib_transmission.sh
+source "${BASH_SOURCE[0]%/*}/lib_transmission.sh"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 readonly STATE_DIR="/APPBOX_DATA/storage/.grab-monitor-state"
 readonly STATE_DB="${STATE_DIR}/seen.db"
-readonly LOG_FILE="${STATE_DIR}/grab-monitor.log"
 readonly LOOK_BACK_SECONDS=300   # 5 minutes
 
 # Language IDs — always allowed regardless of original language
@@ -54,9 +56,6 @@ TRANSMISSION_USER="${TRANSMISSION_USER:?TRANSMISSION_USER env var required}"
 TRANSMISSION_PASS="${TRANSMISSION_PASS:?TRANSMISSION_PASS env var required}"
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
-# ── Transmission session cache ────────────────────────────────────────────────
-TRANSMISSION_SESSION_ID=""
-
 # ── Temp files ────────────────────────────────────────────────────────────────
 _TMP_RESPONSE="$(mktemp /tmp/grab-monitor-resp.XXXXXX.json)"
 _TMP_TRANS_OUT="$(mktemp /tmp/grab-monitor-trans.XXXXXX.json)"
@@ -66,7 +65,7 @@ trap 'rm -f "$_TMP_RESPONSE" "$_TMP_TRANS_OUT" ${_TMP_ITEM_JSON:+"$_TMP_ITEM_JSO
 # ── Logging ───────────────────────────────────────────────────────────────────
 ts()  { date '+%Y-%m-%d %H:%M:%S'; }
 log() {
-  printf '%s [grab-monitor] %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE" >&2
+  printf '%s [grab-monitor] %s\n' "$(ts)" "$*" >&2
 }
 die() { log "ERROR: $*"; exit 1; }
 
@@ -102,34 +101,6 @@ mark_seen() {
 purge_old_seen() {
   sqlite3 -cmd ".timeout 30000" "$STATE_DB" \
     "DELETE FROM seen_grabs WHERE processed_at < strftime('%s','now') - 86400;" </dev/null
-}
-
-# ── Transmission RPC ──────────────────────────────────────────────────────────
-# transmission_rpc PAYLOAD OUTPUT_FILE → prints HTTP status code
-transmission_rpc() {
-  local payload="$1" output_file="$2"
-  local http_code rpc_headers_file
-  rpc_headers_file="$(mktemp)"
-
-  http_code="$(curl -sS -u "${TRANSMISSION_USER}:${TRANSMISSION_PASS}" \
-    -H 'Content-Type: application/json' \
-    ${TRANSMISSION_SESSION_ID:+-H "X-Transmission-Session-Id: $TRANSMISSION_SESSION_ID"} \
-    -d "$payload" -D "$rpc_headers_file" -o "$output_file" -w '%{http_code}' \
-    "$TRANSMISSION_URL" </dev/null || true)"
-
-  if [[ "$http_code" == "409" ]]; then
-    TRANSMISSION_SESSION_ID="$(awk -F': ' \
-      'tolower($1)=="x-transmission-session-id"{gsub("\r","",$2); print $2}' \
-      "$rpc_headers_file" | tail -n1)"
-    http_code="$(curl -sS -u "${TRANSMISSION_USER}:${TRANSMISSION_PASS}" \
-      -H 'Content-Type: application/json' \
-      -H "X-Transmission-Session-Id: $TRANSMISSION_SESSION_ID" \
-      -d "$payload" -o "$output_file" -w '%{http_code}' \
-      "$TRANSMISSION_URL" </dev/null || true)"
-  fi
-
-  rm -f "$rpc_headers_file"
-  printf '%s' "$http_code"
 }
 
 # remove_from_transmission HASH
@@ -214,7 +185,7 @@ process_app() {
 
   # Fetch grabbed history — pre-load to file to avoid stdin consumption in loops
   if ! curl -sS \
-      "${base_url}/api/v3/history?eventType=grabbed&pageSize=50&sortKey=date&sortDirection=descending&apikey=${api_key}" \
+      "${base_url}/api/v3/history?eventType=1&pageSize=50&sortKey=date&sortDirection=descending&apikey=${api_key}" \
       -o "$_TMP_RESPONSE" </dev/null; then
     log "[$app] history fetch failed"
     return 0
@@ -265,7 +236,7 @@ process_app() {
   local -a rec_langs=()
   local -a rec_hashes=()
 
-  while IFS=$'\t' read -r r_id r_item_id r_title r_source r_epoch r_langs r_hash; do
+  while IFS=$'\t' read -r r_id r_item_id r_title r_source _ r_langs r_hash; do
     rec_ids+=("$r_id")
     rec_item_ids+=("$r_item_id")
     rec_titles+=("$r_title")
@@ -288,7 +259,6 @@ process_app() {
     local langs_json="${rec_langs[$i]}"
     local torrent_hash="${rec_hashes[$i]}"
 
-    # Skip if already processed
     if is_seen "$history_id"; then
       log "[$app] skip history_id=${history_id} (already seen)"
       continue
@@ -303,7 +273,6 @@ process_app() {
       continue
     fi
 
-    # Fetch original language for this series/movie
     local orig_lang_id=0
     local item_endpoint
     if [[ "$app" == "Sonarr" ]]; then
@@ -322,8 +291,6 @@ process_app() {
       allowed_ids+=("$orig_lang_id")
     fi
 
-    # Check each language in the release against allowed set
-    # Extract: array of {id, name} objects
     local -a violation_names=()
     local -a all_lang_names=()
 
@@ -342,7 +309,6 @@ process_app() {
     done <"$tmp_lang_tsv"
     rm -f "$tmp_lang_tsv"
 
-    # For each detected language, check if it's in the allowed set
     local j
     for j in "${!lang_id_arr[@]}"; do
       local lid="${lang_id_arr[$j]}"
@@ -360,7 +326,6 @@ process_app() {
       fi
     done
 
-    # Determine original language name for display
     local orig_lang_name="Unknown"
     if [[ "$orig_lang_id" -gt 0 ]]; then
       orig_lang_name="$(jq -r '.originalLanguage.name // "Unknown"' "$tmp_item_json" 2>/dev/null || echo "Unknown")"
@@ -394,7 +359,6 @@ process_app() {
     # Always mark as seen (dry-run or not) to avoid re-processing
     mark_seen "$history_id" "$app" "$title"
 
-    # Reset per-iteration arrays
     lang_id_arr=()
     lang_name_arr=()
     all_lang_names=()

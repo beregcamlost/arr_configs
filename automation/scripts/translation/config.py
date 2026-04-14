@@ -187,7 +187,7 @@ ALL_SUPPORTED_SOURCE_LANGS = frozenset(DEEPL_SOURCE_LANG_MAP) | frozenset(GEMINI
 
 @dataclass
 class Config:
-    deepl_api_key: str = ""
+    deepl_api_keys: list = field(default_factory=list)
     bazarr_api_key: str = ""
     discord_webhook_url: str = ""
     bazarr_url: str = DEFAULT_BAZARR_URL
@@ -203,19 +203,24 @@ def load_config(
     state_dir=None,
 ) -> Config:
     """Load config from environment variables with optional CLI overrides."""
-    deepl_key = os.environ.get("DEEPL_API_KEY", "")
+    deepl_keys = [k.strip() for k in os.environ.get("DEEPL_API_KEYS", "").split(",") if k.strip()]
+    # Legacy single-key support for backward compatibility — prefer DEEPL_API_KEYS
+    legacy_key = os.environ.get("DEEPL_API_KEY", "").strip()
+    if legacy_key and legacy_key not in deepl_keys:
+        deepl_keys.append(legacy_key)
+
     google_enabled = os.environ.get("GOOGLE_TRANSLATE_ENABLED", "1") != "0"
 
     gemini_keys = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
 
-    if not deepl_key and not gemini_keys and not google_enabled:
+    if not deepl_keys and not gemini_keys and not google_enabled:
         raise ValueError(
-            "No translation provider available: set DEEPL_API_KEY, "
+            "No translation provider available: set DEEPL_API_KEYS, "
             "GEMINI_API_KEYS, or enable Google Translate"
         )
 
     return Config(
-        deepl_api_key=deepl_key,
+        deepl_api_keys=deepl_keys,
         bazarr_api_key=os.environ.get("BAZARR_API_KEY", ""),
         discord_webhook_url=os.environ.get("DISCORD_WEBHOOK_URL", ""),
         bazarr_url=bazarr_url or os.environ.get("BAZARR_URL", DEFAULT_BAZARR_URL),

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=lib_arr_notify.sh
+source "${BASH_SOURCE[0]%/*}/lib_arr_notify.sh"
+
 SCRIPT_NAME="$(basename "$0")"
 BAZARR_DB_DEFAULT="/opt/bazarr/data/db/bazarr.db"
 STATE_DIR_DEFAULT="/APPBOX_DATA/storage/.transcode-state"
@@ -13,6 +16,9 @@ GRACE_DAYS_DEFAULT=3
 MIN_VERIFIED_FILE_SIZE=$((10 * 1024 * 1024))  # 10MB
 BYTES_PER_MB=$((1024 * 1024))
 BYTES_PER_GB=$((1024 * 1024 * 1024))
+readonly BPF_THRESHOLD_DETECT=0.08   # below this: worth flagging
+readonly BPF_THRESHOLD_SEVERE=0.02   # below this: severe alert + Discord
+readonly BPF_THRESHOLD_LOW=0.05      # below this: low-bitrate alert + Discord
 
 STATE_DIR="$STATE_DIR_DEFAULT"
 DB_PATH="$DB_DEFAULT"
@@ -27,7 +33,6 @@ INCLUDE_SERIES=1
 INCLUDE_MOVIES=1
 LOG_LEVEL="info"
 PATH_PREFIX=""
-FORCE_MICRO_ENCODE=0
 
 TARGET_VIDEO_CODEC="h264"
 TARGET_AUDIO_CODEC="aac"
@@ -92,7 +97,6 @@ Options:
   --limit N             Max files for audit/plan/report sampling (default: 0 = all)
   --dry-run             No media mutations; print planned actions
   --path-prefix PATH    Restrict audit source rows to paths under this prefix
-  --force-micro-encode  Allow plan to include micro-encode files (logs warn, skips Discord alert)
   --include-series      Restrict scope to series only
   --include-movies      Restrict scope to movies only
   --max-attempts N      Max conversion attempts per media before skip (default: $MAX_ATTEMPTS_DEFAULT)
@@ -115,81 +119,6 @@ log() {
   else
     printf '%s [%s] %s\n' "$ts" "$level" "$msg" >>"$LOG_PATH"
   fi
-}
-
-# Emby per-item refresh after codec conversion (self-contained, no lib dependency)
-emby_refresh_item() {
-  local file_path="$1"
-  local emby_url="${EMBY_URL:-}" emby_key="${EMBY_API_KEY:-}"
-  [[ -z "$emby_url" || -z "$emby_key" ]] && return 0
-  local search_name item_id
-  search_name="$(basename "$file_path" .mkv | sed 's/ - S[0-9]*E[0-9]*.*//' | sed 's/ ([0-9]*)$//')"
-  item_id="$(curl -fsS "${emby_url}/Items?api_key=${emby_key}&SearchTerm=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$search_name'))")&Recursive=true&Limit=10" 2>/dev/null \
-    | jq -r --arg path "$file_path" '[.Items[] | select(.Path == $path)] | .[0].Id // empty' 2>/dev/null)" || true
-  if [[ -z "$item_id" ]]; then
-    local parent_name
-    parent_name="$(basename "$(dirname "$file_path")")"
-    item_id="$(curl -fsS "${emby_url}/Items?api_key=${emby_key}&SearchTerm=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$parent_name'))")&Recursive=true&Limit=10" 2>/dev/null \
-      | jq -r --arg path "$file_path" '[.Items[] | select(.Path == $path)] | .[0].Id // empty' 2>/dev/null)" || true
-  fi
-  [[ -n "$item_id" ]] && curl -fsS -X POST "${emby_url}/Items/${item_id}/Refresh?api_key=${emby_key}&Recursive=true&MetadataRefreshMode=Default&ImageRefreshMode=Default" >/dev/null 2>&1 || true
-  return 0
-}
-
-# Trigger Sonarr RescanSeries or Radarr RescanMovie after file swap.
-# Uses the codec DB media_type + bazarr_ref_id to determine which arr to call.
-# $1=media_type  $2=bazarr_ref_id
-arr_rescan_for_media() {
-  local media_type="$1" ref_id="$2"
-  [[ -z "$ref_id" || "$ref_id" == "NULL" ]] && return 0
-
-  if [[ "$media_type" == "series" ]]; then
-    local sonarr_url="${SONARR_URL:-http://127.0.0.1:8989/sonarr}"
-    local sonarr_key="${SONARR_KEY:-}"
-    [[ -z "$sonarr_key" ]] && return 0
-    # Get sonarrSeriesId from episode ref
-    local series_id
-    series_id="$(sqlite3 -cmd ".timeout 5000" "$BAZARR_DB" \
-      "SELECT sonarrSeriesId FROM table_episodes WHERE sonarrEpisodeId = $ref_id LIMIT 1;" 2>/dev/null)" || true
-    [[ -z "$series_id" ]] && return 0
-    curl -fsS -X POST "${sonarr_url}/api/v3/command" \
-      -H "X-Api-Key: ${sonarr_key}" -H "Content-Type: application/json" \
-      -d "{\"name\":\"RescanSeries\",\"seriesId\":${series_id}}" >/dev/null 2>&1 || true
-    log "debug" "Sonarr RescanSeries id=$series_id triggered"
-  else
-    local radarr_url="${RADARR_URL:-http://127.0.0.1:7878/radarr}"
-    local radarr_key="${RADARR_KEY:-}"
-    [[ -z "$radarr_key" ]] && return 0
-    # radarr_ref_id IS the radarrId
-    curl -fsS -X POST "${radarr_url}/api/v3/command" \
-      -H "X-Api-Key: ${radarr_key}" -H "Content-Type: application/json" \
-      -d "{\"name\":\"RescanMovie\",\"movieId\":${ref_id}}" >/dev/null 2>&1 || true
-    log "debug" "Radarr RescanMovie id=$ref_id triggered"
-  fi
-}
-
-# Trigger Bazarr scan-disk for a media item after file swap.
-# $1=media_type  $2=bazarr_ref_id
-bazarr_rescan_for_media() {
-  local media_type="$1" ref_id="$2"
-  local bazarr_url="${BAZARR_URL:-http://127.0.0.1:6767/bazarr}"
-  local bazarr_key="${BAZARR_API_KEY:-}"
-  [[ -z "$bazarr_key" || -z "$ref_id" || "$ref_id" == "NULL" ]] && return 0
-
-  local endpoint http_code
-  if [[ "$media_type" == "series" ]]; then
-    local series_id
-    series_id="$(sqlite3 -cmd ".timeout 5000" "$BAZARR_DB" \
-      "SELECT sonarrSeriesId FROM table_episodes WHERE sonarrEpisodeId = $ref_id LIMIT 1;" 2>/dev/null)" || true
-    [[ -z "$series_id" ]] && return 0
-    endpoint="${bazarr_url}/api/series?seriesid=${series_id}&action=scan-disk"
-  else
-    endpoint="${bazarr_url}/api/movies?radarrid=${ref_id}&action=scan-disk"
-  fi
-
-  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
-    -H "X-API-KEY: ${bazarr_key}" "$endpoint" 2>/dev/null)" || true
-  log "debug" "Bazarr scan-disk type=$media_type ref=$ref_id http=$http_code"
 }
 
 # Map 3-letter ISO 639-2 code → English name (inverse of lang_name_to_iso).
@@ -492,7 +421,7 @@ notify_discord_micro_encode() {
     --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     '{embeds: [{
       title: "🗜️ Codec Manager — Micro-Encode Detected",
-      description: "Source quality too low to transcode — skipping to avoid converting garbage to garbage.",
+      description: "Source quality too low — warning only — file will still be processed for eligibility.",
       color: 15158332,
       fields: [
         {name: "📊 BPF",       value: $bpf,     inline: true},
@@ -570,8 +499,6 @@ parse_args() {
         DRY_RUN=1; shift ;;
       --path-prefix)
         PATH_PREFIX="$2"; shift 2 ;;
-      --force-micro-encode)
-        FORCE_MICRO_ENCODE=1; shift ;;
       --include-series)
         INCLUDE_SERIES=1; INCLUDE_MOVIES=0; shift ;;
       --include-movies)
@@ -1309,16 +1236,15 @@ ORDER BY m.path${where_limit};
         bpf_numeric=0
       fi
 
-      if [[ "$bpf_numeric" -eq 1 ]] && awk -v bpf="$bpf_raw" 'BEGIN{exit (bpf < 0.08) ? 0 : 1}'; then
+      if [[ "$bpf_numeric" -eq 1 ]] && awk -v bpf="$bpf_raw" -v d="$BPF_THRESHOLD_DETECT" 'BEGIN{exit (bpf+0 < d+0) ? 0 : 1}'; then
         log "warn" "Micro-encode detected: bpf=$bpf_raw path=$path"
 
-        # Gather additional metadata for the CSV and Discord alert
+        # Gather additional metadata for the CSV and Discord alert — single mediainfo call
         local me_width me_height me_fps me_bitrate me_codec me_size_mb me_resolution me_date
-        me_width="$(mediainfo --Inform="Video;%Width%"    "$path" </dev/null 2>/dev/null || true)"
-        me_height="$(mediainfo --Inform="Video;%Height%"  "$path" </dev/null 2>/dev/null || true)"
-        me_fps="$(mediainfo --Inform="Video;%FrameRate%"  "$path" </dev/null 2>/dev/null || true)"
-        me_bitrate="$(mediainfo --Inform="Video;%BitRate%" "$path" </dev/null 2>/dev/null || true)"
-        me_codec="$(mediainfo --Inform="Video;%Format%"   "$path" </dev/null 2>/dev/null || true)"
+        IFS='|' read -r me_width me_height me_fps me_bitrate me_codec < <(
+          mediainfo --Inform="Video;%Width%|%Height%|%FrameRate%|%BitRate%|%Format%" "$path" \
+            </dev/null 2>/dev/null || echo "0|0|0|0|unknown"
+        )
         # Convert bitrate from bps → kbps (integer division)
         if [[ "$me_bitrate" =~ ^[0-9]+$ ]]; then
           me_bitrate=$(( me_bitrate / 1000 ))
@@ -1333,17 +1259,31 @@ ORDER BY m.path${where_limit};
           "$me_date" "$path" "${me_codec:-unknown}" "$me_bitrate" \
           "$me_resolution" "${me_fps:-0}" "$bpf_raw" "$me_size_mb"
 
-        if [[ "$FORCE_MICRO_ENCODE" -eq 1 ]]; then
-          log "warn" "Micro-encode guard bypassed via --force-micro-encode: path=$path"
-          # Fall through to normal eligibility logic below (no skip_reason set, no Discord alert)
-        else
-          skip_reason="micro_encode"
-          notify_discord_micro_encode "$path" "$bpf_raw" "$me_bitrate" "$me_resolution"
-        fi
+        # Single awk pass determines severity tier; file always proceeds to eligibility logic below
+        local me_tier
+        me_tier="$(awk -v bpf="$bpf_raw" -v s="$BPF_THRESHOLD_SEVERE" -v l="$BPF_THRESHOLD_LOW" -v d="$BPF_THRESHOLD_DETECT" 'BEGIN{
+          if (bpf+0 < s+0) { print "severe"; exit }
+          if (bpf+0 < l+0) { print "low";    exit }
+          if (bpf+0 < d+0) { print "border"; exit }
+          print "ok"
+        }')"
+        case "$me_tier" in
+          severe)
+            log "warn" "SEVERE micro-encode (bpf=$bpf_raw) — source quality very poor: $path"
+            notify_discord_micro_encode "$path" "$bpf_raw" "$me_bitrate" "$me_resolution"
+            ;;
+          low)
+            log "warn" "Low bitrate encode (bpf=$bpf_raw): $path"
+            notify_discord_micro_encode "$path" "$bpf_raw" "$me_bitrate" "$me_resolution"
+            ;;
+          *)
+            log "info" "Borderline quality (bpf=$bpf_raw): $path"
+            ;;
+        esac
       fi
 
       if [[ -z "$skip_reason" ]]; then
-        # BPF above threshold or unreadable — fall through to normal eligibility logic
+        # BPF above threshold, below threshold (warning-only), or unreadable — fall through to normal eligibility logic
         if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
           skip_reason="already_compliant"
         else
@@ -1822,12 +1762,12 @@ run_convert_for_media() {
 
   local backup_path old_hash new_hash
   backup_path="$(build_backup_path "$src")"
-  mkdir -p "$(dirname "$backup_path")"
 
   old_hash="$(sha256sum "$src" | awk '{print $1}')"
   new_hash="$(sha256sum "$dst_tmp" | awk '{print $1}')"
 
   # swap with rollback safety
+  mkdir -p "${backup_path%/*}" || true
   if mv "$src" "$backup_path"; then
     if mv "$dst_tmp" "$src"; then
       db <<SQL
@@ -1867,6 +1807,12 @@ convert_cmd() {
   if [[ "$_lg_int" -ge "$_lg_thresh" ]]; then
     log "warn" "convert_cmd: load=${_lg_load} >= threshold=${_lg_thresh} — skipping resume run"
     return 0
+  fi
+
+  # Clean up stale work files from interrupted conversions (older than 24h)
+  if [[ -d "$TMP_DIR" ]]; then
+    find "$TMP_DIR" -type f -mmin +1440 -delete 2>/dev/null
+    find "$TMP_DIR" -type d -empty -delete 2>/dev/null
   fi
 
   # Recover stale rows left as "running" after interrupted sessions/processes.
@@ -1940,18 +1886,52 @@ ORDER BY cp.priority, cp.media_id${limit_clause};
 prune_backups_cmd() {
   local days="$RETENTION_DAYS"
   log "info" "Pruning backups older than ${days} days under $BACKUP_DIR"
+
+  # Collect candidates up front to avoid ffprobe/sqlite consuming the find pipe
+  local -a candidates=()
+  while IFS= read -r p; do
+    candidates+=("$p")
+  done < <(find "$BACKUP_DIR" -type f -mtime +"$days" -print 2>/dev/null)
+
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    find "$BACKUP_DIR" -type f -mtime +"$days" -print | sed -n '1,200p'
+    local shown=0
+    for p in "${candidates[@]}"; do
+      # Reconstruct original media path: strip BACKUP_DIR/YYYYMMDD/ prefix, prepend /
+      local rel_with_date="${p#"$BACKUP_DIR"/}"
+      local converted_path="/${rel_with_date#*/}"
+      if [[ -s "$converted_path" ]]; then
+        log "info" "[DRY-RUN] Would prune backup (converted exists): $p"
+      else
+        log "warn" "[DRY-RUN] Would KEEP backup (converted missing or empty): $p -> $converted_path"
+      fi
+      shown=$(( shown + 1 ))
+      [[ "$shown" -ge 200 ]] && break
+    done
     log "info" "DRY-RUN prune listed candidates only"
     return
   fi
 
-  find "$BACKUP_DIR" -type f -mtime +"$days" -print -delete | while IFS= read -r p; do
-    insert_event "info" "prune" "" "backup_deleted" "{\"path\":\"$(sql_quote "$p")\"}"
+  local deleted=0 kept=0
+  for p in "${candidates[@]}"; do
+    # Reconstruct original media path: strip BACKUP_DIR/YYYYMMDD/ prefix, prepend /
+    local rel_with_date="${p#"$BACKUP_DIR"/}"
+    local converted_path="/${rel_with_date#*/}"
+    if [[ -s "$converted_path" ]]; then
+      if rm -f "$p"; then
+        insert_event "info" "prune" "" "backup_deleted" "{\"path\":\"$(sql_quote "$p")\"}" </dev/null
+        log "info" "Pruned backup (converted verified): $p"
+        deleted=$(( deleted + 1 ))
+      else
+        log "warn" "Failed to delete backup (permissions?): $p"
+      fi
+    else
+      log "warn" "Keeping backup — converted file missing or empty: $p -> $converted_path"
+      kept=$(( kept + 1 ))
+    fi
   done
 
   find "$BACKUP_DIR" -type d -empty -delete || true
-  log "info" "Prune backups complete"
+  log "info" "Prune backups complete: deleted=$deleted kept=$kept"
 }
 
 verify_and_clean_cmd() {

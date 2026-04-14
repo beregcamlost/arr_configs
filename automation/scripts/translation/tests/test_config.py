@@ -13,7 +13,7 @@ from translation.config import (
 def test_load_config_from_env(env_config):
     """Config loads all required values from environment."""
     cfg = load_config()
-    assert cfg.deepl_api_key == "test-deepl-key:fx"
+    assert cfg.deepl_api_keys == ["test-deepl-key:fx"]
     assert cfg.bazarr_api_key == "test-bazarr-key"
     assert cfg.discord_webhook_url == "https://discord.com/api/webhooks/test"
     assert cfg.bazarr_url == "http://127.0.0.1:6767/bazarr"
@@ -24,17 +24,19 @@ def test_load_config_from_env(env_config):
 def test_load_config_no_deepl_key_google_enabled(monkeypatch):
     """Config loads fine without DEEPL_API_KEY when Google is enabled."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPL_API_KEYS", raising=False)
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "1")
     cfg = load_config()
-    assert cfg.deepl_api_key == ""
+    assert cfg.deepl_api_keys == []
     assert cfg.google_translate_enabled is True
 
 
 def test_load_config_no_providers_raises(monkeypatch):
     """Config raises ValueError when no translation provider available."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPL_API_KEYS", raising=False)
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "0")
-    with pytest.raises(ValueError, match="DEEPL_API_KEY"):
+    with pytest.raises(ValueError, match="DEEPL_API_KEYS"):
         load_config()
 
 
@@ -43,7 +45,7 @@ def test_load_config_google_disabled(env_config, monkeypatch):
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "0")
     cfg = load_config()
     assert cfg.google_translate_enabled is False
-    assert cfg.deepl_api_key == "test-deepl-key:fx"
+    assert cfg.deepl_api_keys == ["test-deepl-key:fx"]
 
 
 def test_load_config_cli_overrides(env_config):
@@ -111,6 +113,14 @@ def test_gemini_lang_map_covers_google():
         assert code in GEMINI_LANG_MAP, f"Gemini missing lang code '{code}'"
 
 
+def test_load_config_deepl_multi_keys(monkeypatch):
+    """DEEPL_API_KEYS with comma-separated keys produces a list."""
+    monkeypatch.setenv("DEEPL_API_KEYS", "k1:fx,k2:fx,k3:fx")
+    monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+    cfg = load_config()
+    assert cfg.deepl_api_keys == ["k1:fx", "k2:fx", "k3:fx"]
+
+
 def test_load_config_gemini_keys(env_config_gemini):
     """Config loads Gemini API keys from environment."""
     cfg = load_config()
@@ -129,9 +139,10 @@ def test_load_config_gemini_single_key(monkeypatch):
 def test_load_config_gemini_only_no_error(monkeypatch):
     """Config doesn't raise when only Gemini keys are set."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPL_API_KEYS", raising=False)
     monkeypatch.setenv("GEMINI_API_KEYS", "gemini-key")
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "0")
     cfg = load_config()
-    assert cfg.deepl_api_key == ""
+    assert cfg.deepl_api_keys == []
     assert cfg.gemini_api_keys == ["gemini-key"]
     assert cfg.google_translate_enabled is False

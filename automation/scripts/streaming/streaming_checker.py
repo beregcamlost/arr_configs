@@ -93,9 +93,16 @@ def _get_keep_local_tag_ids(cfg):
     return kl_radarr, kl_sonarr
 
 
-def _get_keep_local_set(cfg):
-    """Build set of (arr_id, media_type) for keep-local tagged items."""
-    kl_radarr, kl_sonarr = _get_keep_local_tag_ids(cfg)
+def _get_keep_local_set(cfg, tag_ids=None):
+    """Build set of (arr_id, media_type) for keep-local tagged items.
+
+    tag_ids: optional (kl_radarr, kl_sonarr) tuple from a prior
+             _get_keep_local_tag_ids() call; avoids a redundant API round-trip.
+    """
+    if tag_ids is not None:
+        kl_radarr, kl_sonarr = tag_ids
+    else:
+        kl_radarr, kl_sonarr = _get_keep_local_tag_ids(cfg)
     keep_local_set = set()
     try:
         if kl_radarr:
@@ -1056,9 +1063,16 @@ def stale_cleanup(no_play_days, min_size_gb, yes, dry_run, verbose, db_path, gra
     log.info("Play history: %d paths with playback data", len(play_map))
 
     # 3. Build exclusion sets
-    # a) Keep-local tags
-    keep_local_set = _get_keep_local_set(cfg)
+    # a) Keep-local tags (fetch tag IDs once, reuse in set builder)
+    kl_radarr_id, kl_sonarr_id = _get_keep_local_tag_ids(cfg)
+    keep_local_set = _get_keep_local_set(cfg, tag_ids=(kl_radarr_id, kl_sonarr_id))
     log.info("Keep-local items: %d", len(keep_local_set))
+
+    # Safety: abort if keep-local check failed (both tag ID lookups returned None)
+    if kl_radarr_id is None and kl_sonarr_id is None and all_items:
+        click.echo("Error: keep-local set is empty but library items exist. "
+                    "Sonarr/Radarr may be unreachable. Aborting to protect keep-local items.")
+        raise SystemExit(1)
 
     # b) Active streaming matches (handled by tier 1 weekly cleanup)
     streaming_paths = set()

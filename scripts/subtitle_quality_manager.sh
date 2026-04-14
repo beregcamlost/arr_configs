@@ -110,6 +110,15 @@ debug() {
   return 0
 }
 
+# Log pre-rewrite metadata for audit trail before in-place MKV overwrites.
+# Usage: log_mkv_rewrite_audit "$mkv_file"
+log_mkv_rewrite_audit() {
+  local _mkv="$1"
+  local _rw_size _rw_mtime _rw_inode
+  read -r _rw_size _rw_mtime _rw_inode < <(stat -c '%s %Y %i' "$_mkv" 2>/dev/null || echo "0 0 0")
+  log "MKV_REWRITE_AUDIT: size=$_rw_size mtime=$_rw_mtime inode=$_rw_inode path=$_mkv"
+}
+
 init_state_db() {
   local db="$1"
   mkdir -p "$(dirname "$db")"
@@ -952,6 +961,7 @@ cmd_mux() {
     fi
 
     # Swap original with muxed version
+    log_mkv_rewrite_audit "$mkv_file"
     mv "$tmp_out" "$mkv_file"
 
     # Delete external SRT files
@@ -974,6 +984,7 @@ cmd_mux() {
       local strip_tmp="${mkv_file%/*}/.${mkv_file##*/}"
       strip_tmp="${strip_tmp%.*}.collisiontmp.${strip_ext}"
       if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]] && validate_streams_match "$mkv_file" "$strip_tmp" "post_mux_strip"; then
+        log_mkv_rewrite_audit "$mkv_file"
         mv "$strip_tmp" "$mkv_file"
         log "STRIPPED ${#premux_strip_indices[@]} superseded embedded track(s) from: $basename"
       else
@@ -1124,6 +1135,7 @@ cmd_strip() {
       continue
     fi
 
+    log_mkv_rewrite_audit "$mkv_file"
     mv "$tmp_out" "$mkv_file"
     stripped=$((stripped + ${#remove_indices[@]}))
     log "STRIPPED ${#remove_indices[@]} track(s) from: $basename"
@@ -1711,6 +1723,7 @@ cmd_auto_maintain() {
             local p0_strip_tmp="${mkv_file%/*}/.${mkv_file##*/}"
             p0_strip_tmp="${p0_strip_tmp%.*}.bloattmp.${ext_p0}"
             if "${p0_strip_cmd[@]}" "$p0_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p0_strip_tmp" ]] && validate_streams_match "$mkv_file" "$p0_strip_tmp" "phase0_strip"; then
+              log_mkv_rewrite_audit "$mkv_file"
               mv "$p0_strip_tmp" "$mkv_file"
               stripped_tracks=$((stripped_tracks + ${#p0_strip_indices[@]}))
               stripped_files=$((stripped_files + 1))
@@ -1950,6 +1963,7 @@ cmd_auto_maintain() {
               rm -f "$tmp_out"
               continue
             fi
+            log_mkv_rewrite_audit "$mkv_file"
             mv "$tmp_out" "$mkv_file"
             for sf in "${good_srts[@]}"; do rm -f "$sf"; done
             muxed_tracks=$((muxed_tracks + ${#good_srts[@]}))
@@ -1968,6 +1982,7 @@ cmd_auto_maintain() {
               local p1_strip_tmp="${mkv_file%/*}/.${mkv_file##*/}"
               p1_strip_tmp="${p1_strip_tmp%.*}.collisiontmp.${p1_strip_ext}"
               if "${p1_strip_cmd[@]}" "$p1_strip_tmp" </dev/null 2>/dev/null && [[ -s "$p1_strip_tmp" ]] && validate_streams_match "$mkv_file" "$p1_strip_tmp" "phase1_collision_strip"; then
+                log_mkv_rewrite_audit "$mkv_file"
                 mv "$p1_strip_tmp" "$mkv_file"
                 stripped_tracks=$((stripped_tracks + ${#premux_strip_indices_p1[@]}))
                 stripped_files=$((stripped_files + 1))
@@ -2296,6 +2311,7 @@ cmd_auto_maintain() {
           local strip_tmp="${mkv_file%/*}/.${mkv_file##*/}"
           strip_tmp="${strip_tmp%.*}.striptmp.${ext}"
           if "${strip_cmd[@]}" "$strip_tmp" </dev/null 2>/dev/null && [[ -s "$strip_tmp" ]] && validate_streams_match "$mkv_file" "$strip_tmp" "phase2_dedup_strip"; then
+            log_mkv_rewrite_audit "$mkv_file"
             mv "$strip_tmp" "$mkv_file"
             stripped_tracks=$((stripped_tracks + ${#strip_indices[@]}))
             stripped_files=$((stripped_files + 1))

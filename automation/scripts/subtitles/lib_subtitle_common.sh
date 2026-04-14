@@ -20,6 +20,9 @@
 
 SQLITE_TIMEOUT_MS=30000
 
+# shellcheck source=../lib_arr_notify.sh
+source "${BASH_SOURCE[0]%/*}/../lib_arr_notify.sh"
+
 # Subtitle extensions that can be converted to SRT (text-based formats)
 # shellcheck disable=SC2034
 CONVERTIBLE_SUB_EXTS="ass ssa vtt"
@@ -1429,34 +1432,4 @@ is_file_being_played() {
   playing="$(curl -fsS "${emby_url}/Sessions?api_key=${emby_key}" 2>/dev/null \
     | jq --arg path "$file_path" '[.[] | select(.NowPlayingItem.Path == $path)] | length' 2>/dev/null || echo 0)"
   [[ "$playing" -gt 0 ]]
-}
-
-# Triggers Emby to rescan a specific media item by file path.
-# Non-fatal: returns 0 even on failure (caller should use || log "WARN: ...")
-emby_refresh_item() {
-  local file_path="$1"
-  local emby_url="${EMBY_URL:-}" emby_key="${EMBY_API_KEY:-}"
-  [[ -z "$emby_url" || -z "$emby_key" ]] && return 0
-
-  # Find item ID by searching for the filename
-  local search_name
-  search_name="$(basename "${file_path%.*}" | sed 's/ - S[0-9]*E[0-9]*.*//' | sed 's/ ([0-9]*)$//')"
-  local item_id
-  item_id="$(curl -fsS "${emby_url}/Items?api_key=${emby_key}&SearchTerm=$(printf '%s' "$search_name" | jq -sRr @uri)&Recursive=true&Limit=10" 2>/dev/null \
-    | jq -r --arg path "$file_path" '.Items[] | select(.Path == $path) | .Id' 2>/dev/null | head -1)"
-
-  if [[ -z "$item_id" ]]; then
-    # Fallback: try parent folder name search for movies
-    local parent_name
-    parent_name="$(basename "$(dirname "$file_path")")"
-    item_id="$(curl -fsS "${emby_url}/Items?api_key=${emby_key}&SearchTerm=$(printf '%s' "$parent_name" | jq -sRr @uri)&Recursive=true&Limit=10" 2>/dev/null \
-      | jq -r --arg path "$file_path" '.Items[] | select(.Path == $path) | .Id' 2>/dev/null | head -1)"
-  fi
-
-  if [[ -n "$item_id" ]]; then
-    curl -fsS -X POST "${emby_url}/Items/${item_id}/Refresh?api_key=${emby_key}&Recursive=true&MetadataRefreshMode=Default&ImageRefreshMode=Default" >/dev/null 2>&1
-    log "EMBY_REFRESH item=$item_id path=$(basename "$file_path")"
-    return 0
-  fi
-  return 0  # Non-fatal even if item not found
 }

@@ -7,16 +7,12 @@ from translation.translator import cli
 import translation.translator as translator_mod
 
 
-@patch("translation.translator.create_deepl_translator")
+@patch("translation.translator.deepl_get_usage")
 @patch("translation.translator.scan_recent_missing")
-def test_translate_since_no_results(mock_scan, mock_create, env_config, tmp_db, monkeypatch):
+def test_translate_since_no_results(mock_scan, mock_get_usage, env_config, tmp_db, monkeypatch):
     """translate --since with no missing subs does nothing."""
     mock_scan.return_value = []
-    mock_translator = MagicMock()
-    mock_usage = MagicMock()
-    mock_usage.character = MagicMock(count=0, limit=500000)
-    mock_translator.get_usage.return_value = mock_usage
-    mock_create.return_value = mock_translator
+    mock_get_usage.return_value = {"character_count": 0, "character_limit": 500000}
     monkeypatch.setenv("DEEPL_API_KEY", "test:fx")
     runner = CliRunner()
     result = runner.invoke(cli, ["translate", "--since", "60", "--state-dir", os.path.dirname(tmp_db)])
@@ -25,15 +21,11 @@ def test_translate_since_no_results(mock_scan, mock_create, env_config, tmp_db, 
 
 
 @patch("translation.translator.translate_file")
-@patch("translation.translator.create_deepl_translator")
-def test_translate_file_mode(mock_create, mock_translate_file, env_config, tmp_path, monkeypatch):
+@patch("translation.translator.deepl_get_usage")
+def test_translate_file_mode(mock_get_usage, mock_translate_file, env_config, tmp_path, monkeypatch):
     """translate --file calls translate_file for a single path."""
     monkeypatch.setenv("DEEPL_API_KEY", "test:fx")
-    mock_translator = MagicMock()
-    mock_usage = MagicMock()
-    mock_usage.character = MagicMock(count=0, limit=500000)
-    mock_translator.get_usage.return_value = mock_usage
-    mock_create.return_value = mock_translator
+    mock_get_usage.return_value = {"character_count": 0, "character_limit": 500000}
     mock_translate_file.return_value = ([], [])
     video = tmp_path / "Movie.mkv"
     video.write_bytes(b"\x00" * 100)
@@ -54,15 +46,15 @@ def test_status_command(env_config, tmp_db, monkeypatch):
     assert "chars" in result.output.lower() or "usage" in result.output.lower() or "0" in result.output
 
 
-@patch("translation.translator.create_deepl_translator")
-def test_usage_command(mock_create, env_config, monkeypatch):
+@patch("translation.deepl_client._get_translator")
+def test_usage_command(mock_get_translator, env_config, monkeypatch):
     """usage command queries DeepL API."""
     monkeypatch.setenv("DEEPL_API_KEY", "test:fx")
     mock_translator = MagicMock()
     mock_usage = MagicMock()
     mock_usage.character = MagicMock(count=50000, limit=500000)
     mock_translator.get_usage.return_value = mock_usage
-    mock_create.return_value = mock_translator
+    mock_get_translator.return_value = mock_translator
     runner = CliRunner()
     result = runner.invoke(cli, ["usage"])
     assert result.exit_code == 0
@@ -71,6 +63,7 @@ def test_usage_command(mock_create, env_config, monkeypatch):
 def test_usage_command_no_deepl_key(monkeypatch):
     """usage command without DeepL key shows message."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPL_API_KEYS", raising=False)
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "1")
     runner = CliRunner()
     result = runner.invoke(cli, ["usage"])
@@ -78,17 +71,13 @@ def test_usage_command_no_deepl_key(monkeypatch):
     assert "no deepl" in result.output.lower()
 
 
-@patch("translation.translator.create_deepl_translator")
+@patch("translation.translator.deepl_get_usage")
 @patch("translation.translator.scan_recent_missing")
 @patch("translation.translator.translate_file")
-def test_translate_max_chars_stops_batch(mock_tf, mock_scan, mock_create, env_config, tmp_db, monkeypatch):
+def test_translate_max_chars_stops_batch(mock_tf, mock_scan, mock_get_usage, env_config, tmp_db, monkeypatch):
     """--max-chars stops processing after budget is exhausted."""
     monkeypatch.setenv("DEEPL_API_KEY", "test:fx")
-    mock_translator = MagicMock()
-    mock_usage = MagicMock()
-    mock_usage.character = MagicMock(count=0, limit=500000)
-    mock_translator.get_usage.return_value = mock_usage
-    mock_create.return_value = mock_translator
+    mock_get_usage.return_value = {"character_count": 0, "character_limit": 500000}
     mock_scan.return_value = [
         {"path": "/path/a.mkv"},
         {"path": "/path/b.mkv"},
@@ -114,6 +103,7 @@ def test_translate_google_only_mode(mock_create_google, mock_scan, tmp_db, monke
     """translate works with Google-only mode (no DeepL key)."""
     translator_mod._deepl_quota_exceeded = False
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPL_API_KEYS", raising=False)
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "1")
     monkeypatch.setenv("BAZARR_API_KEY", "test")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "")
