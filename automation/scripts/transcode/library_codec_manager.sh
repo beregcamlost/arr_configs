@@ -16,9 +16,22 @@ GRACE_DAYS_DEFAULT=3
 MIN_VERIFIED_FILE_SIZE=$((10 * 1024 * 1024))  # 10MB
 BYTES_PER_MB=$((1024 * 1024))
 BYTES_PER_GB=$((1024 * 1024 * 1024))
-readonly BPF_THRESHOLD_DETECT=0.08   # below this: worth flagging
-readonly BPF_THRESHOLD_SEVERE=0.02   # below this: severe alert + Discord
-readonly BPF_THRESHOLD_LOW=0.05      # below this: low-bitrate alert + Discord
+# BPF thresholds per codec (lower = more efficient codec)
+# Rationale: HEVC ~50% more efficient than AVC, AV1 ~30% more efficient than HEVC
+readonly BPF_THRESHOLD_DETECT_AVC=0.08
+readonly BPF_THRESHOLD_LOW_AVC=0.05
+readonly BPF_THRESHOLD_SEVERE_AVC=0.02
+
+readonly BPF_THRESHOLD_DETECT_HEVC=0.040   # 50% of AVC
+readonly BPF_THRESHOLD_LOW_HEVC=0.025
+readonly BPF_THRESHOLD_SEVERE_HEVC=0.010
+
+readonly BPF_THRESHOLD_DETECT_AV1=0.028    # 65% of HEVC
+readonly BPF_THRESHOLD_LOW_AV1=0.017
+readonly BPF_THRESHOLD_SEVERE_AV1=0.007
+
+# Configurable compliant codec list — comma-separated; default preserves h264-only behaviour
+readonly COMPLIANT_CODECS="${TARGET_VIDEO_CODECS_COMPLIANT:-h264}"
 
 STATE_DIR="$STATE_DIR_DEFAULT"
 DB_PATH="$DB_DEFAULT"
@@ -446,6 +459,71 @@ log_micro_encode_csv() {
   fi
   printf '%s,"%s",%s,%s,%s,%s,%s,%s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" >>"$csv_path"
+}
+
+# Append one row to the transcode log CSV; create file with header if it doesn't exist.
+# $1=date $2=path $3=src_codec $4=src_container $5=tgt_codec $6=size_before_mb $7=size_after_mb $8=pct_change $9=duration_sec $10=conv_time_sec $11=bpf_before
+log_transcode_csv() {
+  local csv_path="$STATE_DIR/transcode_log.csv"
+  if [[ ! -f "$csv_path" ]]; then
+    printf 'date,path,src_codec,src_container,tgt_codec,size_before_mb,size_after_mb,pct_change,duration_sec,conv_time_sec,bpf_before\n' >"$csv_path"
+  fi
+  printf '%s,"%s",%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" >>"$csv_path"
+}
+
+# Send a Discord embed after a successful transcode swap.
+# $1=path $2=src_codec $3=src_container $4=tgt_codec $5=size_before_bytes $6=size_after_bytes $7=duration_sec $8=conv_time_sec
+notify_discord_transcode_done() {
+  local path="$1" src_codec="$2" src_container="$3" tgt_codec="$4"
+  local size_before="$5" size_after="$6" duration_sec="$7" conv_time_sec="$8"
+  [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
+
+  local basename size_before_mb size_after_mb pct_change color
+  basename="${path##*/}"
+  size_before_mb="$(awk -v b="$size_before" 'BEGIN{printf "%.0f", b/1048576}')"
+  size_after_mb="$(awk  -v b="$size_after"  'BEGIN{printf "%.0f", b/1048576}')"
+  pct_change="$(awk -v a="$size_before" -v b="$size_after" \
+    'BEGIN{if(a>0) printf "%+.1f%%", (b-a)/a*100; else print "0%"}')"
+
+  # green if file stayed same size or shrank; yellow if it grew by more than 10%
+  if awk -v a="$size_before" -v b="$size_after" 'BEGIN{exit (b <= a * 1.1) ? 0 : 1}'; then
+    color=3066993    # green
+  else
+    color=16776960   # yellow
+  fi
+
+  local payload
+  payload="$(jq -nc \
+    --arg title "Transcode: ${src_codec^^} \u2192 ${tgt_codec^^}" \
+    --arg file "$basename" \
+    --arg src  "${src_codec^^} / ${src_container}" \
+    --arg tgt  "${tgt_codec^^} / ${src_container}" \
+    --arg size_b "${size_before_mb} MB" \
+    --arg size_a "${size_after_mb} MB (${pct_change})" \
+    --arg dur  "${duration_sec}s" \
+    --arg conv "${conv_time_sec}s" \
+    --argjson color "$color" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{embeds: [{
+      title: $title,
+      color: $color,
+      fields: [
+        {name: "📁 File",        value: ("`" + $file + "`"), inline: false},
+        {name: "🎞 Source",      value: $src,   inline: true},
+        {name: "✅ Target",      value: $tgt,   inline: true},
+        {name: "📦 Before",      value: $size_b, inline: true},
+        {name: "📦 After",       value: $size_a, inline: true},
+        {name: "⏱ Duration",    value: $dur,   inline: true},
+        {name: "⚙ Conv time",   value: $conv,  inline: true}
+      ],
+      footer: {text: "Codec Manager · transcode"},
+      timestamp: $ts
+    }]}')"
+
+  curl -sS -m 20 --connect-timeout 8 --retry 2 --retry-delay 1 --retry-all-errors \
+    -H 'Content-Type: application/json' -d "$payload" "$DISCORD_WEBHOOK_URL" \
+    >/dev/null 2>&1 </dev/null || true
 }
 
 die() {
@@ -1174,13 +1252,18 @@ plan_cmd() {
     where_limit=" LIMIT $LIMIT"
   fi
 
+  # Build SQL IN-list from COMPLIANT_CODECS (e.g. "h264" → "'h264'" or "h264,hevc" → "'h264','hevc'")
+  local codec_list_sql
+  codec_list_sql="$(printf '%s' "$COMPLIANT_CODECS" | \
+    awk -F',' '{for(i=1;i<=NF;i++){gsub(/^[[:space:]]+|[[:space:]]+$/,"",$i); printf "%s'\''%s'\''", (i>1?",":""), $i}}')"
+
   db -separator $'\t' "
 SELECT m.id,m.path,m.container,
        COALESCE(a.exists_flag,0),COALESCE(a.probe_ok,0),
        COALESCE(ps_agg.max_w,0),
        COALESCE(ps_agg.max_h,0),
        COALESCE(ps_agg.has_hdr,0),
-       COALESCE(ps_agg.h264_v,0),
+       COALESCE(ps_agg.compliant_v,0),
        COALESCE(ps_agg.total_v,0),
        COALESCE(ps_agg.good_a,0),
        COALESCE(ps_agg.total_a,0)
@@ -1191,7 +1274,7 @@ LEFT JOIN (
          MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END) AS max_w,
          MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END) AS max_h,
          MAX(CASE WHEN stream_type='video' THEN is_hdr ELSE 0 END) AS has_hdr,
-         SUM(CASE WHEN stream_type='video' AND codec='h264' THEN 1 ELSE 0 END) AS h264_v,
+         SUM(CASE WHEN stream_type='video' AND codec IN ($codec_list_sql) THEN 1 ELSE 0 END) AS compliant_v,
          SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END) AS total_v,
          SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END) AS good_a,
          SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END) AS total_a
@@ -1199,7 +1282,7 @@ LEFT JOIN (
   GROUP BY media_id
 ) ps_agg ON ps_agg.media_id=m.id
 ORDER BY m.path${where_limit};
-" | while IFS=$'\t' read -r media_id path container exists_flag probe_ok max_w max_h has_hdr h264_v total_v good_a total_a; do
+" | while IFS=$'\t' read -r media_id path container exists_flag probe_ok max_w max_h has_hdr compliant_v total_v good_a total_a; do
 
     local eligible=0 reason="" skip_reason=""
     local target_container="$container"
@@ -1236,21 +1319,42 @@ ORDER BY m.path${where_limit};
         bpf_numeric=0
       fi
 
-      if [[ "$bpf_numeric" -eq 1 ]] && awk -v bpf="$bpf_raw" -v d="$BPF_THRESHOLD_DETECT" 'BEGIN{exit (bpf+0 < d+0) ? 0 : 1}'; then
-        log "warn" "Micro-encode detected: bpf=$bpf_raw path=$path"
+      # Fetch codec first so we can pick the right BPF thresholds before the check
+      local me_width me_height me_fps me_bitrate me_codec me_size_mb me_resolution me_date
+      IFS='|' read -r me_width me_height me_fps me_bitrate me_codec < <(
+        mediainfo --Inform="Video;%Width%|%Height%|%FrameRate%|%BitRate%|%Format%" "$path" \
+          </dev/null 2>/dev/null || echo "0|0|0|0|unknown"
+      )
+      # Convert bitrate from bps → kbps (integer division)
+      if [[ "$me_bitrate" =~ ^[0-9]+$ ]]; then
+        me_bitrate=$(( me_bitrate / 1000 ))
+      else
+        me_bitrate="0"
+      fi
 
-        # Gather additional metadata for the CSV and Discord alert — single mediainfo call
-        local me_width me_height me_fps me_bitrate me_codec me_size_mb me_resolution me_date
-        IFS='|' read -r me_width me_height me_fps me_bitrate me_codec < <(
-          mediainfo --Inform="Video;%Width%|%Height%|%FrameRate%|%BitRate%|%Format%" "$path" \
-            </dev/null 2>/dev/null || echo "0|0|0|0|unknown"
-        )
-        # Convert bitrate from bps → kbps (integer division)
-        if [[ "$me_bitrate" =~ ^[0-9]+$ ]]; then
-          me_bitrate=$(( me_bitrate / 1000 ))
-        else
-          me_bitrate="0"
-        fi
+      # Select codec-appropriate BPF thresholds
+      local _me_t_detect _me_t_low _me_t_severe
+      case "${me_codec,,}" in
+        hevc|h265)
+          _me_t_detect=$BPF_THRESHOLD_DETECT_HEVC
+          _me_t_low=$BPF_THRESHOLD_LOW_HEVC
+          _me_t_severe=$BPF_THRESHOLD_SEVERE_HEVC
+          ;;
+        av1)
+          _me_t_detect=$BPF_THRESHOLD_DETECT_AV1
+          _me_t_low=$BPF_THRESHOLD_LOW_AV1
+          _me_t_severe=$BPF_THRESHOLD_SEVERE_AV1
+          ;;
+        *)
+          _me_t_detect=$BPF_THRESHOLD_DETECT_AVC
+          _me_t_low=$BPF_THRESHOLD_LOW_AVC
+          _me_t_severe=$BPF_THRESHOLD_SEVERE_AVC
+          ;;
+      esac
+
+      if [[ "$bpf_numeric" -eq 1 ]] && awk -v bpf="$bpf_raw" -v d="$_me_t_detect" 'BEGIN{exit (bpf+0 < d+0) ? 0 : 1}'; then
+        log "warn" "Micro-encode detected [$me_codec]: bpf=$bpf_raw path=$path"
+
         me_resolution="${me_width:-0}x${me_height:-0}"
         me_size_mb="$(awk -v b="${size_bytes:-0}" 'BEGIN{printf "%.1f", b/1048576}')"
         me_date="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -1261,7 +1365,7 @@ ORDER BY m.path${where_limit};
 
         # Single awk pass determines severity tier; file always proceeds to eligibility logic below
         local me_tier
-        me_tier="$(awk -v bpf="$bpf_raw" -v s="$BPF_THRESHOLD_SEVERE" -v l="$BPF_THRESHOLD_LOW" -v d="$BPF_THRESHOLD_DETECT" 'BEGIN{
+        me_tier="$(awk -v bpf="$bpf_raw" -v s="$_me_t_severe" -v l="$_me_t_low" -v d="$_me_t_detect" 'BEGIN{
           if (bpf+0 < s+0) { print "severe"; exit }
           if (bpf+0 < l+0) { print "low";    exit }
           if (bpf+0 < d+0) { print "border"; exit }
@@ -1269,26 +1373,26 @@ ORDER BY m.path${where_limit};
         }')"
         case "$me_tier" in
           severe)
-            log "warn" "SEVERE micro-encode (bpf=$bpf_raw) — source quality very poor: $path"
+            log "warn" "SEVERE micro-encode [$me_codec] (bpf=$bpf_raw) — source quality very poor: $path"
             notify_discord_micro_encode "$path" "$bpf_raw" "$me_bitrate" "$me_resolution"
             ;;
           low)
-            log "warn" "Low bitrate encode (bpf=$bpf_raw): $path"
+            log "warn" "Low bitrate encode [$me_codec] (bpf=$bpf_raw): $path"
             notify_discord_micro_encode "$path" "$bpf_raw" "$me_bitrate" "$me_resolution"
             ;;
           *)
-            log "info" "Borderline quality (bpf=$bpf_raw): $path"
+            log "info" "Borderline quality [$me_codec] (bpf=$bpf_raw): $path"
             ;;
         esac
       fi
 
       if [[ -z "$skip_reason" ]]; then
         # BPF above threshold, below threshold (warning-only), or unreadable — fall through to normal eligibility logic
-        if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
+        if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$compliant_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
           skip_reason="already_compliant"
         else
           eligible=1
-          if [[ "$total_v" -gt 0 && "$h264_v" -eq "$total_v" ]]; then
+          if [[ "$total_v" -gt 0 && "$compliant_v" -eq "$total_v" ]]; then
             reason="audio_only"
             priority=1
           else
@@ -1298,11 +1402,11 @@ ORDER BY m.path${where_limit};
         fi
       fi
     else
-      if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$h264_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
+      if [[ "$container_ok" -eq 1 && "$total_v" -gt 0 && "$compliant_v" -eq "$total_v" && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
         skip_reason="already_compliant"
       else
         eligible=1
-        if [[ "$total_v" -gt 0 && "$h264_v" -eq "$total_v" ]]; then
+        if [[ "$total_v" -gt 0 && "$compliant_v" -eq "$total_v" ]]; then
           reason="audio_only"
           priority=1
         else
@@ -1679,6 +1783,15 @@ run_convert_for_media() {
 
   db "INSERT INTO conversion_runs(run_id,media_id,start_ts,status,attempt) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,'running',${attempt_no:-1});"
 
+  # Capture pre-conversion metadata for Discord notification and transcode CSV log
+  local _tc_src_codec _tc_duration_sec _tc_size_before _tc_conv_start
+  _tc_src_codec="$(ffprobe -v error -select_streams v:0 \
+    -show_entries stream=codec_name -of csv=p=0 "$src" 2>/dev/null | head -1 || echo "unknown")"
+  _tc_duration_sec="$(ffprobe -v error -show_entries format=duration \
+    -of csv=p=0 "$src" 2>/dev/null | awk '{printf "%.0f", $1+0}' || echo "0")"
+  _tc_size_before="$(stat -c '%s' "$src" 2>/dev/null || echo "0")"
+  _tc_conv_start="$SECONDS"
+
   # Resolve Bazarr profile languages + true original language for audio stream selection.
   local media_type_ref bazarr_ref_id_ref profile_langs="" profile_lang_set="" orig_lang_override=""
   media_type_ref="$media_type_val"
@@ -1783,6 +1896,25 @@ SQL
       arr_rescan_for_media "$media_type_ref" "$bazarr_ref_id_ref" || log "warn" "Arr rescan failed for media_id=$media_id (non-fatal)"
       bazarr_rescan_for_media "$media_type_ref" "$bazarr_ref_id_ref" || log "warn" "Bazarr rescan failed for media_id=$media_id (non-fatal)"
       update_bazarr_audio_language "$media_type_ref" "$bazarr_ref_id_ref" "$(IFS=,; echo "${selected_audio_desc[*]}")" || true
+
+      # Post-swap Discord alert + transcode log CSV
+      local _tc_size_after _tc_conv_time _tc_size_before_mb _tc_size_after_mb _tc_pct _tc_date
+      _tc_size_after="$(stat -c '%s' "$src" 2>/dev/null || echo "0")"
+      _tc_conv_time=$(( SECONDS - _tc_conv_start ))
+      _tc_size_before_mb="$(awk -v b="$_tc_size_before" 'BEGIN{printf "%.0f", b/1048576}')"
+      _tc_size_after_mb="$(awk  -v b="$_tc_size_after"  'BEGIN{printf "%.0f", b/1048576}')"
+      _tc_pct="$(awk -v a="$_tc_size_before" -v b="$_tc_size_after" \
+        'BEGIN{if(a>0) printf "%+.1f", (b-a)/a*100; else print "0"}')"
+      _tc_date="$(date '+%Y-%m-%d %H:%M:%S')"
+      log_transcode_csv \
+        "$_tc_date" "$src" "${_tc_src_codec:-unknown}" "$container" "$TARGET_VIDEO_CODEC" \
+        "$_tc_size_before_mb" "$_tc_size_after_mb" "$_tc_pct" \
+        "${_tc_duration_sec:-0}" "$_tc_conv_time" ""
+      notify_discord_transcode_done \
+        "$src" "${_tc_src_codec:-unknown}" "$container" "$TARGET_VIDEO_CODEC" \
+        "$_tc_size_before" "$_tc_size_after" \
+        "${_tc_duration_sec:-0}" "$_tc_conv_time" \
+        || log "warn" "Discord transcode notify failed for media_id=$media_id (non-fatal)"
     else
       mv "$backup_path" "$src" || true
       db "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='rolled_back',error='swap_failed_rolled_back' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
