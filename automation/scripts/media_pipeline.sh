@@ -2,7 +2,8 @@
 # media_pipeline.sh — Unified media pipeline orchestrator
 #
 # Replaces 10 high-frequency cron jobs with a single coordinated 5-minute run.
-# Priority order: quick jobs → subtitle pipeline → translation → codec conversion
+# Priority order: quick jobs → subtitle pipeline → translation
+# Codec conversion runs independently via its own cron (library_codec_manager.sh).
 #
 # Cron entry (single line):
 #   */5 * * * * /usr/bin/flock -n /tmp/media_pipeline.lock /bin/bash -c 'source /config/berenstuff/.env && /bin/bash /config/berenstuff/scripts/media_pipeline.sh' >> /config/berenstuff/automation/logs/media_pipeline.log 2>&1
@@ -30,9 +31,7 @@ readonly SQLITE_TIMEOUT_MS=15000   # used as .timeout dot-command (no output lea
 
 # ── Timeouts (seconds) ────────────────────────────────────────────────────────
 readonly TIMEOUT_QUICK=60
-readonly TIMEOUT_SUBTITLE=180
 readonly TIMEOUT_TRANSLATION=300
-readonly TIMEOUT_CODEC=600
 
 # ── State ─────────────────────────────────────────────────────────────────────
 PIPELINE_START_TS=""
@@ -257,7 +256,7 @@ run_import_cleanup() {
 }
 
 run_subtitle_dedupe() {
-  run_step "subtitle_dedupe" "$TIMEOUT_SUBTITLE" \
+  run_step "subtitle_dedupe" 0 \
     /bin/bash "${SCRIPTS_DIR}/library_subtitle_dedupe.sh" \
       --path-prefix  "$MEDIA_PATH_PREFIX" \
       --state-dir    "/APPBOX_DATA/storage/.subtitle-dedupe-state" \
@@ -268,7 +267,7 @@ run_subtitle_dedupe() {
 }
 
 run_subtitle_recovery() {
-  run_step "subtitle_recovery" "$TIMEOUT_SUBTITLE" \
+  run_step "subtitle_recovery" 0 \
     /bin/bash "${SCRIPTS_DIR}/bazarr_subtitle_recovery.sh" \
       --bazarr-url   "${BAZARR_URL:-http://127.0.0.1:6767/bazarr}" \
       --bazarr-db    "/opt/bazarr/data/db/bazarr.db" \
@@ -280,7 +279,8 @@ run_subtitle_recovery() {
 }
 
 run_subtitle_quality() {
-  run_step "subtitle_quality" "$TIMEOUT_SUBTITLE" \
+  # timeout=0 → no timeout; pipeline flock prevents re-entry
+  run_step "subtitle_quality" 0 \
     /bin/bash "${SCRIPTS_DIR}/subtitle_quality_manager.sh" \
       auto-maintain \
       --since            15 \
@@ -291,15 +291,6 @@ run_subtitle_quality() {
 run_translation() {
   run_step "translation" "$TIMEOUT_TRANSLATION" \
     /bin/bash -c "cd /config/berenstuff && PYTHONPATH=${CANONICAL_DIR} python3 ${CANONICAL_DIR}/translation/translator.py translate --since 60 </dev/null"
-}
-
-run_codec_convert() {
-  run_step "codec" "$TIMEOUT_CODEC" \
-    /bin/bash "${SCRIPTS_DIR}/library_codec_manager.sh" \
-      resume \
-      --state-dir   "/APPBOX_DATA/storage/.transcode-state-media" \
-      --batch-size  2 \
-      --log-level   info
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -317,16 +308,21 @@ main() {
   # Recover any stale entries from a previous unclean exit
   pipeline_recover_stale
 
-  # Load guard — skip entire pipeline if system is under heavy load
-  if ! load_guard "media_pipeline"; then
-    log "=== pipeline aborted (load_guard) ==="
-    exit 0
-  fi
-
-  # ── Phase 1: Quick jobs (always run, lightweight) ─────────────────────────
+  # ── Phase 1: Quick jobs — always run regardless of load ───────────────────
+  # These are lightweight HTTP calls; important for responsiveness/cleanup.
   run_grab_monitor
   run_zombie_reaper
   run_import_cleanup
+
+  # ── Load gate — heavy work only when load is acceptable ───────────────────
+  log "=== load gate check ==="
+  if ! load_guard "media_pipeline"; then
+    local total_duration
+    total_duration=$(( $(date '+%s') - PIPELINE_START_TS ))
+    log "=== pipeline done (quick_only) total_duration=${total_duration}s ==="
+    exit 0
+  fi
+  log "=== heavy work continuing ==="
 
   # ── Phase 2: Subtitle pipeline (coordinated, file-aware) ─────────────────
   run_subtitle_dedupe
@@ -335,9 +331,6 @@ main() {
 
   # ── Phase 3: Translation ──────────────────────────────────────────────────
   run_translation
-
-  # ── Phase 4: Codec conversion (heaviest, runs last) ───────────────────────
-  run_codec_convert
 
   local total_duration
   total_duration=$(( $(date '+%s') - PIPELINE_START_TS ))

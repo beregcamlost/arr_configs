@@ -168,7 +168,7 @@ graph TB
 |--------|----------|-------|-----------|---------------|
 | 🎯 Pipeline Orchestrator | Bash | — | Every 5 min | — |
 | 🎬 Subtitle Manager | Bash | 159 ✅ | via pipeline / daily | ✅ Discord |
-| 🔄 Codec Manager | Bash | — | via pipeline / 3 AM daily | ✅ Discord |
+| 🔄 Codec Manager | Bash | — | Every 10 min (independent) / 3 AM daily | ✅ Discord |
 | 📺 Streaming Checker | Python | 271 ✅ | Weekly / Monthly | ✅ Discord |
 | 🌐 Translation System | Python | 151 ✅ | via pipeline | ✅ Discord |
 | 👻 Zombie Reaper | Bash | — | via pipeline | ✅ Discord |
@@ -198,7 +198,7 @@ graph TB
 
 ## 🎯 Media Pipeline Orchestrator
 
-> **`automation/scripts/media_pipeline.sh`** — A single cron entry that replaced 10 high-frequency independent jobs. Runs every 5 minutes and coordinates all short-cycle subsystems through a shared SQLite `pipeline_state` table, eliminating lock contention and silent skips.
+> **`automation/scripts/media_pipeline.sh`** — A single cron entry that replaced 10 high-frequency independent jobs. Runs every 5 minutes and coordinates 7 short-cycle subsystems through a shared SQLite `pipeline_state` table, eliminating lock contention and silent skips. Codec runs as a separate independent cron.
 
 ### 🔧 Why It Exists
 
@@ -216,11 +216,12 @@ Before the orchestrator, each subsystem ran its own cron line with its own `floc
 | 1 | 🚫 Grab Monitor | Quick job | 60s |
 | 2 | 🧹 Arr Cleanup | Quick job | 60s |
 | 3 | 👻 Zombie Reaper | Quick job | 60s |
-| 4 | 🎬 Subtitle Dedupe quick | Subtitle pipeline | 180s |
-| 5 | 🎬 Subtitle Auto-maintain quick | Subtitle pipeline | 180s |
-| 6 | 🎬 Bazarr Subtitle Recovery | Subtitle pipeline | 180s |
+| 4 | 🎬 Subtitle Dedupe quick | Subtitle pipeline | uncapped |
+| 5 | 🎬 Subtitle Auto-maintain quick | Subtitle pipeline | uncapped |
+| 6 | 🎬 Bazarr Subtitle Recovery | Subtitle pipeline | uncapped |
 | 7 | 🌐 Translation | Translation step | 300s |
-| 8 | 🔄 Codec Resume | Codec step | 600s |
+
+Quick jobs (1–3) bypass the load guard — they're cheap HTTP calls with no media I/O. Subtitle steps (4–6) run to completion; the cron-level `flock` on `/tmp/media_pipeline.lock` prevents the next 5-min invocation from overlapping (queue can have 74+ files and take several minutes). Codec resume runs independently — see [🔄 Codec Manager](#-codec-manager).
 
 ### 🗄️ DB Coordination
 
@@ -252,14 +253,17 @@ Codec `resume` always drains all priority-1 items before touching priority-10, s
 flowchart TD
     CRON(["⏰ cron\n*/5 * * * *"]) --> PL
 
+    CRON2(["⏰ cron\n*/10 * * * *"]) --> CC
+
     subgraph PL["🎯 media_pipeline.sh"]
         QK["⚡ Quick Jobs\n(grab-monitor · arr-cleanup · zombie-reaper)\n60s timeout each"]
-        SUB["🎬 Subtitle Pipeline\n(dedupe · auto-maintain · bazarr-recovery)\n180s timeout each"]
+        SUB["🎬 Subtitle Pipeline\n(dedupe · auto-maintain · bazarr-recovery)\nruns to completion"]
         TR["🌐 Translation\n300s timeout"]
-        CC["🔄 Codec Resume\n600s timeout"]
 
-        QK --> SUB --> TR --> CC
+        QK --> SUB --> TR
     end
+
+    CC["🔄 Codec Resume\n(independent)"]
 
     DB[("🗄️ pipeline_state\n(codec DB)")]
 
@@ -661,13 +665,14 @@ Every 5 minutes (via pipeline, quick-jobs step):
 
 > The 26-line schedule was consolidated to ~14 lines. Ten high-frequency jobs now run inside the unified pipeline. Low-frequency jobs remain as independent entries.
 
-### 🎯 Unified Pipeline (replaces 10 separate cron lines)
+### 🎯 Unified Pipeline + Codec (replaces 10 separate cron lines)
 
 ```
-*/5 * * * *   media_pipeline.sh
+*/5  * * * *   media_pipeline.sh                           # 7 subsystems
+*/10 * * * *   library_codec_manager.sh resume --batch-size 2
 ```
 
-Coordinates inside each 5-minute window: grab-monitor → arr-cleanup → zombie-reaper → subtitle dedupe → subtitle auto-maintain → bazarr recovery → translation → codec resume.
+Pipeline coordinates inside each 5-minute window: grab-monitor → arr-cleanup → zombie-reaper → subtitle dedupe → subtitle auto-maintain → bazarr recovery → translation. Codec runs independently every 10 minutes so it operates at baseline load rather than pipeline-inflated load (subtitle processing spikes load to 85+, which would trigger codec's own load guard and cause it to always skip).
 
 ### 📅 Low-Frequency Independent Jobs
 
@@ -725,7 +730,7 @@ sequenceDiagram
     CM->>DC: Conversion summary
 
     Note over SUB,DL: Pipeline: every 5 min
-    Note over CM: Pipeline: every 5 min (codec step)
+    Note over CM: Independent cron: every 10 min
     Note over SC: Cron: weekly (independent)
 ```
 
@@ -847,7 +852,13 @@ DISCORD_WEBHOOK_URL=...
 
 # Paths
 APPBOX_DATA=/APPBOX_DATA/storage
+
+# Load guards (host has 128 CPUs; baseline 40-60, spikes to 80-95 during daily audits)
+LOAD_GUARD_THRESHOLD=90          # pipeline + subtitle/translation work
+CODEC_LOAD_GUARD_THRESHOLD=75    # codec-specific — tighter because ffmpeg adds significant load
 ```
+
+Quick jobs (grab_monitor, zombie_reaper, import_cleanup) bypass the load guard entirely — they're cheap HTTP calls with no media I/O. The two thresholds are separate because subtitle processing can spike load to 85+; if codec used the same 90 threshold it would race through the guard, but at 75 it backs off early enough to avoid compounding the spike.
 
 ### 📦 Installing Crontab
 

@@ -1803,9 +1803,9 @@ convert_cmd() {
   local _lg_load _lg_int _lg_thresh
   _lg_load="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
   _lg_int="${_lg_load%%.*}"
-  _lg_thresh="${LOAD_GUARD_THRESHOLD:-20}"
+  _lg_thresh="${CODEC_LOAD_GUARD_THRESHOLD:-${LOAD_GUARD_THRESHOLD:-75}}"
   if [[ "$_lg_int" -ge "$_lg_thresh" ]]; then
-    log "warn" "convert_cmd: load=${_lg_load} >= threshold=${_lg_thresh} — skipping resume run"
+    log "warn" "convert_cmd: load=${_lg_load} >= codec_threshold=${_lg_thresh} — skipping resume run"
     return 0
   fi
 
