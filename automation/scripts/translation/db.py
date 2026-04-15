@@ -35,7 +35,6 @@ def init_db(db_path):
             CREATE INDEX IF NOT EXISTS idx_translation_cooldown
                 ON translation_log (media_path, target_lang, created_at);
         """)
-        # Migration: add provider column if missing
         cursor = conn.execute("PRAGMA table_info(translation_log)")
         columns = {row["name"] for row in cursor.fetchall()}
         if "provider" not in columns:
@@ -44,19 +43,25 @@ def init_db(db_path):
                 "ADD COLUMN provider TEXT NOT NULL DEFAULT 'deepl'"
             )
             conn.commit()
+        if "key_index" not in columns:
+            conn.execute(
+                "ALTER TABLE translation_log "
+                "ADD COLUMN key_index INTEGER DEFAULT NULL"
+            )
+            conn.commit()
 
 
 def record_translation(db_path, media_path, source_lang, target_lang,
-                        chars_used, status, provider="deepl"):
+                        chars_used, status, provider="deepl", key_index=None):
     """Record a translation attempt."""
     with contextlib.closing(_connect(db_path)) as conn:
         conn.execute(
             """INSERT INTO translation_log
                (media_path, source_lang, target_lang, chars_used, status,
-                created_at, provider)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                created_at, provider, key_index)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (media_path, source_lang, target_lang, chars_used, status,
-             _now_iso(), provider),
+             _now_iso(), provider, key_index),
         )
         conn.commit()
 
@@ -75,14 +80,24 @@ def is_on_cooldown(db_path, media_path, target_lang, cooldown_hours=24):
     return result
 
 
-def get_monthly_chars(db_path, provider=None):
+def get_monthly_chars(db_path, provider=None, key_index=None):
     """Get total characters used this calendar month.
 
     provider: when set, restricts to a single provider (e.g. 'deepl').
-    Default None sums across all providers.
+    key_index: when set alongside provider, further restricts to a single API key.
+    Default None values sum across all providers / all keys.
     """
     with contextlib.closing(_connect(db_path)) as conn:
-        if provider is not None:
+        if provider is not None and key_index is not None:
+            cursor = conn.execute(
+                """SELECT COALESCE(SUM(chars_used), 0) as total
+                   FROM translation_log
+                   WHERE created_at >= date('now', 'start of month')
+                     AND provider = ?
+                     AND key_index = ?""",
+                (provider, key_index),
+            )
+        elif provider is not None:
             cursor = conn.execute(
                 """SELECT COALESCE(SUM(chars_used), 0) as total
                    FROM translation_log
@@ -129,21 +144,32 @@ def get_monthly_chars_by_provider(db_path):
         return {row["provider"]: row["total"] for row in cursor.fetchall()}
 
 
-def get_daily_requests(db_path, provider):
+def get_daily_requests(db_path, provider, key_index=None):
     """Count translation attempts for a provider today (UTC calendar day).
 
+    key_index: when set, restricts count to a single API key's rows.
     Each row represents one file-level translation call (which may involve
     multiple batch API calls internally). Used for daily request-budget checks
     that guard against free-tier overage.
     """
     with contextlib.closing(_connect(db_path)) as conn:
-        cursor = conn.execute(
-            """SELECT COUNT(*) as total
-               FROM translation_log
-               WHERE provider = ?
-                 AND created_at >= datetime('now', 'start of day')""",
-            (provider,),
-        )
+        if key_index is not None:
+            cursor = conn.execute(
+                """SELECT COUNT(*) as total
+                   FROM translation_log
+                   WHERE provider = ?
+                     AND key_index = ?
+                     AND created_at >= datetime('now', 'start of day')""",
+                (provider, key_index),
+            )
+        else:
+            cursor = conn.execute(
+                """SELECT COUNT(*) as total
+                   FROM translation_log
+                   WHERE provider = ?
+                     AND created_at >= datetime('now', 'start of day')""",
+                (provider,),
+            )
         return cursor.fetchone()["total"]
 
 

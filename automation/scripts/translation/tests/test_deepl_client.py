@@ -34,17 +34,18 @@ def _make_translator(texts_return=None, side_effect=None):
 
 @patch("translation.deepl_client._get_translator")
 def test_translate_texts_basic(mock_get):
-    """translate_texts sends text to DeepL and returns translations."""
+    """translate_texts sends text to DeepL and returns (translations, key_index)."""
     mock_translator = _make_translator(texts_return=["Hola, mundo!", "Esto es una prueba."])
     mock_get.return_value = mock_translator
 
-    results = translate_texts(
+    results, key_index = translate_texts(
         api_keys=["key1:fx"],
         texts=["Hello, world!", "This is a test."],
         source_lang="EN",
         target_lang="ES",
     )
     assert results == ["Hola, mundo!", "Esto es una prueba."]
+    assert key_index == 0
     mock_translator.translate_text.assert_called_once()
 
 
@@ -58,7 +59,7 @@ def test_translate_srt_cues(mock_get):
     mock_translator = _make_translator(texts_return=["Hola", "Mundo"])
     mock_get.return_value = mock_translator
 
-    translated, chars = translate_srt_cues(
+    translated, chars, key_index = translate_srt_cues(
         api_keys=["key1:fx"], cues=cues, source_lang="EN", target_lang="ES"
     )
     assert len(translated) == 2
@@ -66,6 +67,7 @@ def test_translate_srt_cues(mock_get):
     assert translated[0].start == "00:00:01,000"
     assert translated[1].text == "Mundo"
     assert chars == 10  # len("Hello") + len("World")
+    assert key_index == 0
 
 
 @patch("translation.deepl_client._get_translator")
@@ -83,7 +85,7 @@ def test_translate_srt_cues_batching(mock_get):
     mock_translator.translate_text.side_effect = side_effect
     mock_get.return_value = mock_translator
 
-    translated, chars = translate_srt_cues(
+    translated, chars, key_index = translate_srt_cues(
         api_keys=["key1:fx"], cues=cues, source_lang="EN", target_lang="ES",
         batch_size=4000,
     )
@@ -97,8 +99,9 @@ def test_translate_texts_empty(mock_get):
     """translate_texts with empty list returns empty list."""
     mock_translator = MagicMock()
     mock_get.return_value = mock_translator
-    results = translate_texts(api_keys=["key1:fx"], texts=[], source_lang="EN", target_lang="ES")
+    results, key_index = translate_texts(api_keys=["key1:fx"], texts=[], source_lang="EN", target_lang="ES")
     assert results == []
+    assert key_index == 0
     mock_translator.translate_text.assert_not_called()
 
 
@@ -110,13 +113,14 @@ def test_failover_on_disabled_key(mock_get):
     good_translator = _make_translator(texts_return=["Hola"])
     mock_get.side_effect = [bad_translator, good_translator]
 
-    results = translate_texts(
+    results, key_index = translate_texts(
         api_keys=["badkey123:fx", "goodky456:fx"],
         texts=["Hello"],
         source_lang="EN",
         target_lang="ES",
     )
     assert results == ["Hola"]
+    assert key_index == 1  # second key (index 1) succeeded
     assert "badkey123:fx" in _exhausted_keys
     assert "goodky456:fx" not in _exhausted_keys
 
@@ -197,13 +201,14 @@ def test_rate_limit_succeeds_on_retry(mock_get):
     mock_get.return_value = translator
 
     with patch("translation.deepl_client.time.sleep"):
-        results = translate_texts(
+        results, key_index = translate_texts(
             api_keys=["key1:fx"],
             texts=["Hello"],
             source_lang="EN",
             target_lang="ES",
         )
     assert results == ["Hola"]
+    assert key_index == 0
     assert "key1:fx" not in _exhausted_keys
 
 
@@ -215,13 +220,14 @@ def test_transient_deepl_error_tries_next_key(mock_get):
     good_translator = _make_translator(texts_return=["Hola"])
     mock_get.side_effect = [transient_translator, good_translator]
 
-    results = translate_texts(
+    results, key_index = translate_texts(
         api_keys=["key1:fx", "key2:fx"],
         texts=["Hello"],
         source_lang="EN",
         target_lang="ES",
     )
     assert results == ["Hola"]
+    assert key_index == 1  # key2 succeeded (index 1)
     assert "key1:fx" not in _exhausted_keys
     assert "key2:fx" not in _exhausted_keys
 
@@ -233,12 +239,13 @@ def test_already_exhausted_key_is_skipped(mock_get):
     good_translator = _make_translator(texts_return=["Hola"])
     mock_get.return_value = good_translator
 
-    results = translate_texts(
+    results, key_index = translate_texts(
         api_keys=["key1:fx", "key2:fx"],
         texts=["Hello"],
         source_lang="EN",
         target_lang="ES",
     )
     assert results == ["Hola"]
+    assert key_index == 1  # key2 is at position 1
     # _get_translator only called for key2 — key1 was skipped
     mock_get.assert_called_once_with("key2:fx")

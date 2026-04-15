@@ -146,7 +146,17 @@ BAZARR_URL=http://127.0.0.1:6767/bazarr
 BAZARR_API_KEY=...
 DISCORD_WEBHOOK_URL=...
 # State dir defaults to /APPBOX_DATA/storage/.translation-state/
+
+# Per-key budgets (default values = DeepL/Gemini free tier limits)
+DEEPL_MONTHLY_BUDGET_PER_KEY=500000      # chars/mo per DeepL key
+GEMINI_MONTHLY_BUDGET_PER_KEY=500000     # chars/mo per Gemini key
+GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY=9   # requests/day per Gemini key (~50 RPD free tier ÷ ~5 batches/file, −10% safety)
+GOOGLE_MONTHLY_BUDGET=500000             # aggregate Google chars/mo (no per-key; unauthenticated)
 ```
+
+Budget is tracked per API key via the `key_index` column in `translation_log`. A provider only falls through to the next when **all** its keys are budget-exhausted.
+
+Legacy names `DEEPL_MONTHLY_BUDGET`, `GEMINI_MONTHLY_BUDGET`, and `GEMINI_DAILY_REQUESTS_BUDGET` (without `_PER_KEY`) are still honored but emit a deprecation warning in the log.
 
 ### 📅 Cron Schedule
 

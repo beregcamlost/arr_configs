@@ -39,13 +39,14 @@ class TestTranslateCuesWithFallback:
         translator_mod._deepl_quota_exceeded = False
         cfg = _make_cfg()
         cues = _make_cues()
-        mock_deepl.return_value = (cues, 18)
+        mock_deepl.return_value = (cues, 18, 0)
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", None
         )
         assert provider == "deepl"
         assert chars == 18
+        assert key_index == 0
         mock_deepl.assert_called_once()
 
     @patch("translation.google_client.create_translator")
@@ -62,10 +63,11 @@ class TestTranslateCuesWithFallback:
         mock_google_translator = MagicMock()
         mock_create_google.return_value = mock_google_translator
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", None
         )
         assert provider == "google"
+        assert key_index is None
         assert translator_mod._deepl_quota_exceeded is True
 
     @patch("translation.google_client.translate_srt_cues")
@@ -77,10 +79,11 @@ class TestTranslateCuesWithFallback:
         mock_google_translator = MagicMock()
         mock_google.return_value = (cues, 18)
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", mock_google_translator
         )
         assert provider == "google"
+        assert key_index is None
 
     def test_no_provider_available(self):
         """When no provider supports the language, raises ValueError."""
@@ -113,10 +116,11 @@ class TestTranslateCuesWithFallback:
         mock_google_translator = MagicMock()
         mock_google.return_value = (cues, 18)
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", mock_google_translator
         )
         assert provider == "google"  # skipped DeepL entirely
+        assert key_index is None
 
     @patch("translation.gemini_client.translate_srt_cues")
     @patch("translation.translator.deepl_translate_srt_cues")
@@ -128,9 +132,9 @@ class TestTranslateCuesWithFallback:
         cfg = _make_cfg(gemini_keys=["key1", "key2"])
         cues = _make_cues()
         mock_gemini.side_effect = GeminiQuotaExhausted("all keys exhausted")
-        mock_deepl.return_value = (cues, 18)
+        mock_deepl.return_value = (cues, 18, 0)
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", None
         )
         assert provider == "deepl"
@@ -145,9 +149,9 @@ class TestTranslateCuesWithFallback:
         cfg = _make_cfg(gemini_keys=["key1", "key2"])
         cues = _make_cues()
         mock_gemini.side_effect = TypeError("the JSON object must be str, bytes or bytearray, not NoneType")
-        mock_deepl.return_value = (cues, 18)
+        mock_deepl.return_value = (cues, 18, 0)
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", None
         )
         assert provider == "deepl"
@@ -171,10 +175,11 @@ class TestTranslateCuesWithFallback:
         mock_google.return_value = (cues, 18)
         mock_create_google.return_value = MagicMock()
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", None
         )
         assert provider == "google"
+        assert key_index is None
         assert translator_mod._deepl_quota_exceeded is True
         assert translator_mod._gemini_quota_exceeded is True
 
@@ -188,10 +193,11 @@ class TestTranslateCuesWithFallback:
         mock_google_translator = MagicMock()
         mock_google.return_value = (cues, 18)
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", mock_google_translator
         )
         assert provider == "google"
+        assert key_index is None
 
     @patch("translation.gemini_client.translate_srt_cues")
     def test_gemini_success_direct(self, mock_gemini):
@@ -200,13 +206,14 @@ class TestTranslateCuesWithFallback:
         translator_mod._gemini_quota_exceeded = False
         cfg = _make_cfg(deepl_key="", gemini_keys=["key1", "key2"])
         cues = _make_cues()
-        mock_gemini.return_value = (cues, 18)
+        mock_gemini.return_value = (cues, 18, 0)
 
-        result_cues, chars, provider = _translate_cues_with_fallback(
+        result_cues, chars, provider, key_index = _translate_cues_with_fallback(
             cfg, cues, "en", "es", None
         )
         assert provider == "gemini"
         assert chars == 18
+        assert key_index == 0
 
 
 class TestTranslateFileMarkers:
@@ -241,7 +248,7 @@ class TestTranslateFileMarkers:
         mock_source.return_value = str(source_srt)
         mock_cooldown.return_value = False
         translated_cues = [Cue(1, "00:00:01,000", "00:00:02,000", "Hola")]
-        mock_translate.return_value = (translated_cues, 5, "google")
+        mock_translate.return_value = (translated_cues, 5, "google", None)
 
         t, f = translate_file(cfg, str(video))
         assert len(t) == 1
@@ -278,7 +285,7 @@ class TestTranslateFileMarkers:
         mock_source.return_value = str(source_srt)
         mock_cooldown.return_value = False
         translated_cues = [Cue(1, "00:00:01,000", "00:00:02,000", "Hola")]
-        mock_translate.return_value = (translated_cues, 5, "deepl")
+        mock_translate.return_value = (translated_cues, 5, "deepl", 0)
 
         t, f = translate_file(cfg, str(video))
         assert len(t) == 1
@@ -316,7 +323,7 @@ class TestTranslateFileMarkers:
         mock_source.return_value = str(source_srt)
         mock_cooldown.return_value = False
         translated_cues = [Cue(1, "00:00:01,000", "00:00:02,000", "Hola")]
-        mock_translate.return_value = (translated_cues, 5, "gemini")
+        mock_translate.return_value = (translated_cues, 5, "gemini", 2)
 
         t, f = translate_file(cfg, str(video))
         assert len(t) == 1

@@ -23,6 +23,27 @@ from translation.db import (
     get_monthly_chars, get_monthly_chars_by_provider, get_recent_translations,
     get_daily_requests,
 )
+
+_DEPRECATION_WARNED: set = set()
+
+
+def _get_per_key_budget(new_name: str, old_name: str, default: int) -> int:
+    """Read a per-key budget env var with backward-compat fallback.
+
+    If only the old (aggregate) name is set, honors it as the per-key value and
+    emits a one-time deprecation warning so operators know to rename it.
+    """
+    if new_name in os.environ:
+        return int(os.environ[new_name])
+    if old_name in os.environ:
+        if old_name not in _DEPRECATION_WARNED:
+            log.warning(
+                "DEPRECATED: %s should be renamed to %s (per-key semantics unchanged)",
+                old_name, new_name,
+            )
+            _DEPRECATION_WARNED.add(old_name)
+        return int(os.environ[old_name])
+    return default
 from translation.deepl_client import (
     translate_srt_cues as deepl_translate_srt_cues,
     get_usage as deepl_get_usage,
@@ -77,11 +98,36 @@ def _has_google(cfg: Config) -> bool:
     return cfg.google_translate_enabled and not _google_quota_exceeded
 
 
+def _build_available_keys(db_path, provider, all_keys,
+                           monthly_per_key, daily_per_key=None):
+    """Return [(original_index, key), ...] for keys within budget.
+
+    A key is available when it is under both its monthly char budget AND (if
+    daily_per_key is set) its daily request budget.
+    """
+    available = []
+    for i, key in enumerate(all_keys):
+        monthly_used = get_monthly_chars(db_path, provider=provider, key_index=i)
+        if monthly_used >= monthly_per_key:
+            continue
+        if daily_per_key is not None:
+            daily_used = get_daily_requests(db_path, provider, key_index=i)
+            if daily_used >= daily_per_key:
+                continue
+        available.append((i, key))
+    return available
+
+
 def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
-                                   google_translator):
+                                   google_translator, db_path=None,
+                                   deepl_monthly_per_key=500_000,
+                                   gemini_monthly_per_key=500_000,
+                                   gemini_daily_per_key=None):
     """Translate cues trying Gemini -> DeepL -> Google.
 
-    Returns (translated_cues, chars_used, provider).
+    Returns (translated_cues, chars_used, provider, key_index).
+    key_index is the original (unfiltered) position of the key used, or None
+    for Google (no per-key tracking).
     Raises on non-quota errors.
     """
     global _deepl_quota_exceeded, _gemini_quota_exceeded, _google_quota_exceeded
@@ -94,33 +140,74 @@ def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
         )
         gemini_source = GEMINI_LANG_MAP[source_lang_code]
         gemini_target = GEMINI_LANG_MAP[base_lang]
-        try:
-            translated_cues, chars_used = gemini_translate_srt_cues(
-                cfg.gemini_api_keys, cues, gemini_source, gemini_target
+
+        if db_path:
+            avail = _build_available_keys(
+                db_path, PROVIDER_GEMINI, cfg.gemini_api_keys,
+                gemini_monthly_per_key, gemini_daily_per_key,
             )
-            return translated_cues, chars_used, PROVIDER_GEMINI
-        except GeminiQuotaExhausted:
-            log.warning("All Gemini keys exhausted, trying DeepL")
-            _gemini_quota_exceeded = True
-        except Exception as e:
-            # Non-quota error — fall through without setting _gemini_quota_exceeded
-            # so Gemini is retried on the next file (transient errors may self-resolve)
-            log.warning("Gemini failed (%s), trying DeepL", e)
+            if not avail:
+                log.warning("All Gemini keys at per-key budget, trying DeepL")
+                _gemini_quota_exceeded = True
+            else:
+                filtered_keys = [k for _, k in avail]
+                try:
+                    translated_cues, chars_used, pos_in_filtered = gemini_translate_srt_cues(
+                        filtered_keys, cues, gemini_source, gemini_target
+                    )
+                    key_index = avail[pos_in_filtered][0]
+                    return translated_cues, chars_used, PROVIDER_GEMINI, key_index
+                except GeminiQuotaExhausted:
+                    log.warning("All Gemini keys exhausted, trying DeepL")
+                    _gemini_quota_exceeded = True
+                except Exception as e:
+                    log.warning("Gemini failed (%s), trying DeepL", e)
+        else:
+            try:
+                translated_cues, chars_used, pos = gemini_translate_srt_cues(
+                    cfg.gemini_api_keys, cues, gemini_source, gemini_target
+                )
+                return translated_cues, chars_used, PROVIDER_GEMINI, pos
+            except GeminiQuotaExhausted:
+                log.warning("All Gemini keys exhausted, trying DeepL")
+                _gemini_quota_exceeded = True
+            except Exception as e:
+                log.warning("Gemini failed (%s), trying DeepL", e)
 
     # Try DeepL
     if _has_deepl(cfg) and base_lang in DEEPL_LANG_MAP and source_lang_code in DEEPL_SOURCE_LANG_MAP:
         deepl_source = DEEPL_SOURCE_LANG_MAP[source_lang_code]
         deepl_target = DEEPL_LANG_MAP[base_lang]
-        try:
-            translated_cues, chars_used = deepl_translate_srt_cues(
-                cfg.deepl_api_keys, cues, deepl_source, deepl_target
-            )
-            return translated_cues, chars_used, PROVIDER_DEEPL
-        except DeeplKeysExhausted:
-            log.warning("All DeepL keys exhausted, trying Google")
-            _deepl_quota_exceeded = True
 
-    # Fall back to Google
+        if db_path:
+            avail = _build_available_keys(
+                db_path, PROVIDER_DEEPL, cfg.deepl_api_keys, deepl_monthly_per_key
+            )
+            if not avail:
+                log.warning("All DeepL keys at per-key budget, trying Google")
+                _deepl_quota_exceeded = True
+            else:
+                filtered_keys = [k for _, k in avail]
+                try:
+                    translated_cues, chars_used, pos_in_filtered = deepl_translate_srt_cues(
+                        filtered_keys, cues, deepl_source, deepl_target
+                    )
+                    key_index = avail[pos_in_filtered][0]
+                    return translated_cues, chars_used, PROVIDER_DEEPL, key_index
+                except DeeplKeysExhausted:
+                    log.warning("All DeepL keys exhausted, trying Google")
+                    _deepl_quota_exceeded = True
+        else:
+            try:
+                translated_cues, chars_used, pos = deepl_translate_srt_cues(
+                    cfg.deepl_api_keys, cues, deepl_source, deepl_target
+                )
+                return translated_cues, chars_used, PROVIDER_DEEPL, pos
+            except DeeplKeysExhausted:
+                log.warning("All DeepL keys exhausted, trying Google")
+                _deepl_quota_exceeded = True
+
+    # Fall back to Google (no per-key tracking)
     if _has_google(cfg) and base_lang in GOOGLE_LANG_MAP and source_lang_code in GOOGLE_LANG_MAP:
         from translation.google_client import translate_srt_cues as google_translate_srt_cues
         google_source = GOOGLE_LANG_MAP[source_lang_code]
@@ -131,30 +218,35 @@ def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
         translated_cues, chars_used = google_translate_srt_cues(
             google_translator, cues, google_source, google_target
         )
-        return translated_cues, chars_used, PROVIDER_GOOGLE
+        return translated_cues, chars_used, PROVIDER_GOOGLE, None
 
     raise ValueError(f"No translation provider available for {source_lang_code} -> {base_lang}")
 
 
 def translate_file(cfg: Config, media_path: str,
                    chars_remaining=None, google_translator=None,
-                   gemini_daily_budget=None):
+                   gemini_daily_budget=None,
+                   deepl_monthly_per_key=500_000,
+                   gemini_monthly_per_key=500_000,
+                   gemini_daily_per_key=None):
     """Translate missing subtitle languages for a single media file.
 
     Args:
         chars_remaining: If set, stop after consuming this many chars.
         google_translator: Optional pre-created Google translator instance.
-        gemini_daily_budget: If set, skip Gemini when today's file-level
-            request count for 'gemini' meets or exceeds this value.
+        gemini_daily_budget: Aggregate daily Gemini request gate (file-level rows).
+            Kept for backward compat; per-key daily filtering uses gemini_daily_per_key.
+        deepl_monthly_per_key: Per-key monthly char budget for DeepL.
+        gemini_monthly_per_key: Per-key monthly char budget for Gemini.
+        gemini_daily_per_key: Per-key daily request cap for Gemini (None = uncapped).
 
     Returns (list of {file, target, chars, provider}, list of {file, target, error}).
     """
     global _gemini_quota_exceeded
     db_path = _db_path(cfg.state_dir)
 
-    # Check Gemini daily request budget before spending it on this file.
-    # Each successful translate_file call records one row — count those rows
-    # to stay within the free-tier RPD limit.
+    # Aggregate daily gate — still honored for backward compat.
+    # Per-key daily cap is enforced inside _translate_cues_with_fallback.
     if gemini_daily_budget is not None and not _gemini_quota_exceeded and _has_gemini(cfg):
         used_today = get_daily_requests(db_path, PROVIDER_GEMINI)
         if used_today >= gemini_daily_budget:
@@ -237,9 +329,13 @@ def translate_file(cfg: Config, media_path: str,
             # Translate with fallback
             log.info("Translating %s: %s -> %s (%d cues)",
                      basename, source_lang_code, base_lang, len(cues))
-            translated_cues, chars_used, provider = _translate_cues_with_fallback(
+            translated_cues, chars_used, provider, key_index = _translate_cues_with_fallback(
                 cfg, cues, source_lang_code, base_lang,
                 google_translator,
+                db_path=db_path,
+                deepl_monthly_per_key=deepl_monthly_per_key,
+                gemini_monthly_per_key=gemini_monthly_per_key,
+                gemini_daily_per_key=gemini_daily_per_key,
             )
 
             # Write translated SRT + marker for deferred muxing
@@ -250,7 +346,8 @@ def translate_file(cfg: Config, media_path: str,
             open(output_path + marker_ext, "w").close()
 
             record_translation(db_path, media_path, source_lang_code,
-                               base_lang, chars_used, "success", provider)
+                               base_lang, chars_used, "success", provider,
+                               key_index=key_index)
             translated.append({
                 "file": basename, "target": base_lang,
                 "chars": chars_used, "provider": provider,
@@ -367,9 +464,20 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
     gemini_budget = int(os.environ.get("GEMINI_MONTHLY_BUDGET", "500000"))
     google_budget = int(os.environ.get("GOOGLE_MONTHLY_BUDGET", "500000"))
 
-    # Daily Gemini request cap: gemini-2.5-pro free tier is ~50 RPD per project.
-    # Each DB row = 1 file ≈ 5 batch API calls on average, so 50/5 = 10 files
-    # max; apply 10% safety margin → 9 default. Override via env var.
+    # Per-key budgets (new). Old names honored with deprecation warning.
+    deepl_monthly_per_key = _get_per_key_budget(
+        "DEEPL_MONTHLY_BUDGET_PER_KEY", "DEEPL_MONTHLY_BUDGET", 500_000
+    )
+    gemini_monthly_per_key = _get_per_key_budget(
+        "GEMINI_MONTHLY_BUDGET_PER_KEY", "GEMINI_MONTHLY_BUDGET", 500_000
+    )
+    gemini_daily_per_key = _get_per_key_budget(
+        "GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", "GEMINI_DAILY_REQUESTS_BUDGET", 9
+    )
+
+    # Aggregate daily cap (legacy behavior: total across all keys).
+    # With per-key tracking, the aggregate is gemini_daily_per_key * num_keys;
+    # keep reading the old var so existing cron invocations are unaffected.
     gemini_daily_budget = int(os.environ.get("GEMINI_DAILY_REQUESTS_BUDGET", "9"))
 
     deepl_used = get_monthly_chars(db, provider="deepl")
@@ -437,7 +545,10 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
             return
         t, f = translate_file(cfg, file_path,
                               chars_remaining, google_translator,
-                              gemini_daily_budget=gemini_daily_budget)
+                              gemini_daily_budget=gemini_daily_budget,
+                              deepl_monthly_per_key=deepl_monthly_per_key,
+                              gemini_monthly_per_key=gemini_monthly_per_key,
+                              gemini_daily_per_key=gemini_daily_per_key)
         all_translated.extend(t)
         all_failed.extend(f)
 
@@ -458,7 +569,10 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
             try:
                 t, f = translate_file(cfg, item["path"],
                                       chars_remaining, google_translator,
-                                      gemini_daily_budget=gemini_daily_budget)
+                                      gemini_daily_budget=gemini_daily_budget,
+                                      deepl_monthly_per_key=deepl_monthly_per_key,
+                                      gemini_monthly_per_key=gemini_monthly_per_key,
+                                      gemini_daily_per_key=gemini_daily_per_key)
                 all_translated.extend(t)
                 all_failed.extend(f)
                 if chars_remaining is not None:

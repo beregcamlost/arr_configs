@@ -155,7 +155,8 @@ class TestPerProviderBudgetFlags:
         calls = []
 
         def capture_translate_file(cfg, path, chars_remaining=None,
-                                   google_translator=None, gemini_daily_budget=None):
+                                   google_translator=None, gemini_daily_budget=None,
+                                   **kwargs):
             calls.append(chars_remaining)
             return [], []
 
@@ -456,7 +457,8 @@ class TestGeminiDailyBudgetFallthrough:
         captured = {}
 
         def capture_translate_file(cfg, path, chars_remaining=None,
-                                   google_translator=None, gemini_daily_budget=None):
+                                   google_translator=None, gemini_daily_budget=None,
+                                   **kwargs):
             captured["gemini_daily_budget"] = gemini_daily_budget
             return [], []
 
@@ -475,3 +477,129 @@ class TestGeminiDailyBudgetFallthrough:
             ])
 
         assert captured.get("gemini_daily_budget") == 7
+
+
+# ---------------------------------------------------------------------------
+# Per-key budget filtering
+# ---------------------------------------------------------------------------
+
+class TestPerKeyBudgetFiltering:
+    """_build_available_keys filters exhausted keys; provider sentinel fires only when all exhausted."""
+
+    def _db(self, tmp_path):
+        db = str(tmp_path / "state" / "translation_state.db")
+        os.makedirs(os.path.dirname(db), exist_ok=True)
+        init_db(db)
+        return db
+
+    def test_one_key_exhausted_other_still_available(self, tmp_path):
+        """When key 0 is at monthly limit, key 1 remains in available list."""
+        from translation.translator import _build_available_keys
+        db = self._db(tmp_path)
+        # Exhaust key 0 monthly budget
+        record_translation(db, "/p/v.mkv", "en", "es", 500_000, "success", "gemini", key_index=0)
+        keys = ["key-a", "key-b"]
+        avail = _build_available_keys(db, "gemini", keys, monthly_per_key=500_000)
+        assert len(avail) == 1
+        assert avail[0] == (1, "key-b")
+
+    def test_all_keys_exhausted_returns_empty(self, tmp_path):
+        """When all keys are at limit, available list is empty."""
+        from translation.translator import _build_available_keys
+        db = self._db(tmp_path)
+        record_translation(db, "/p/v1.mkv", "en", "es", 500_000, "success", "gemini", key_index=0)
+        record_translation(db, "/p/v2.mkv", "en", "es", 500_000, "success", "gemini", key_index=1)
+        keys = ["key-a", "key-b"]
+        avail = _build_available_keys(db, "gemini", keys, monthly_per_key=500_000)
+        assert avail == []
+
+    def test_daily_cap_filters_key(self, tmp_path):
+        """A key at its daily request cap is excluded even if monthly is fine."""
+        from translation.translator import _build_available_keys
+        from datetime import datetime, timezone
+        db = self._db(tmp_path)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn = sqlite3.connect(db)
+        # 9 daily rows for key 0
+        for i in range(9):
+            conn.execute(
+                """INSERT INTO translation_log
+                   (media_path, source_lang, target_lang, chars_used, status, created_at, provider, key_index)
+                   VALUES (?, 'en', 'es', 100, 'success', ?, 'gemini', 0)""",
+                (f"/f{i}.mkv", today),
+            )
+        conn.commit()
+        conn.close()
+        keys = ["key-a", "key-b"]
+        # daily_per_key=9 means key 0 is at limit; key 1 has 0 — still available
+        avail = _build_available_keys(
+            db, "gemini", keys, monthly_per_key=500_000, daily_per_key=9
+        )
+        assert len(avail) == 1
+        assert avail[0][0] == 1
+
+    def test_key_index_mapping_preserved_after_filter(self, tmp_path):
+        """Original index is preserved: if key 0 is filtered out, key 1's index is still 1."""
+        from translation.translator import _build_available_keys
+        db = self._db(tmp_path)
+        record_translation(db, "/p/v.mkv", "en", "es", 500_000, "success", "deepl", key_index=0)
+        keys = ["deepl-key-0", "deepl-key-1", "deepl-key-2"]
+        avail = _build_available_keys(db, "deepl", keys, monthly_per_key=500_000)
+        original_indices = [idx for idx, _ in avail]
+        assert 0 not in original_indices
+        assert 1 in original_indices
+        assert 2 in original_indices
+
+
+class TestBackwardCompatEnvVars:
+    """Old env var names are honored with a deprecation warning."""
+
+    def test_old_gemini_daily_name_honored(self, monkeypatch):
+        """GEMINI_DAILY_REQUESTS_BUDGET (old) is read when _PER_KEY variant is absent."""
+        import translation.translator as mod
+        monkeypatch.delenv("GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", raising=False)
+        monkeypatch.setenv("GEMINI_DAILY_REQUESTS_BUDGET", "5")
+        mod._DEPRECATION_WARNED.clear()
+        val = mod._get_per_key_budget(
+            "GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", "GEMINI_DAILY_REQUESTS_BUDGET", 9
+        )
+        assert val == 5
+
+    def test_new_name_takes_precedence_over_old(self, monkeypatch):
+        """_PER_KEY var wins when both names are set."""
+        import translation.translator as mod
+        monkeypatch.setenv("GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", "12")
+        monkeypatch.setenv("GEMINI_DAILY_REQUESTS_BUDGET", "5")
+        mod._DEPRECATION_WARNED.clear()
+        val = mod._get_per_key_budget(
+            "GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", "GEMINI_DAILY_REQUESTS_BUDGET", 9
+        )
+        assert val == 12
+
+    def test_default_used_when_neither_set(self, monkeypatch):
+        """Default is returned when neither env var is set."""
+        import translation.translator as mod
+        monkeypatch.delenv("GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_DAILY_REQUESTS_BUDGET", raising=False)
+        mod._DEPRECATION_WARNED.clear()
+        val = mod._get_per_key_budget(
+            "GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", "GEMINI_DAILY_REQUESTS_BUDGET", 9
+        )
+        assert val == 9
+
+    def test_deprecation_warned_only_once(self, monkeypatch, caplog):
+        """Deprecation warning emitted once per old var name per process lifetime."""
+        import logging
+        import translation.translator as mod
+        monkeypatch.delenv("GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", raising=False)
+        monkeypatch.setenv("GEMINI_DAILY_REQUESTS_BUDGET", "7")
+        mod._DEPRECATION_WARNED.clear()
+        with caplog.at_level(logging.WARNING, logger="translation.translator"):
+            mod._get_per_key_budget(
+                "GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", "GEMINI_DAILY_REQUESTS_BUDGET", 9
+            )
+            mod._get_per_key_budget(
+                "GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", "GEMINI_DAILY_REQUESTS_BUDGET", 9
+            )
+        deprecation_msgs = [r for r in caplog.records if "DEPRECATED" in r.message]
+        assert len(deprecation_msgs) == 1

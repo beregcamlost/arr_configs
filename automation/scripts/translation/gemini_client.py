@@ -104,12 +104,15 @@ def _translate_batch(
     source_lang: str,
     target_lang: str,
     model: str = DEFAULT_MODEL,
-) -> List[str]:
+) -> Tuple[List[str], int]:
     """Translate a batch of cues, rotating keys on quota exhaustion.
 
     Tries all keys with the requested model first.  If every key is
     exhausted on that model and a FALLBACK_MODEL exists, retries the
     full key ring with the fallback model before giving up.
+
+    Returns (translated_strings, key_index) where key_index is the 0-based
+    position within api_keys of the key that succeeded.
     """
     prompt = _build_prompt(cues, source_lang, target_lang)
     models_to_try = [model]
@@ -119,7 +122,7 @@ def _translate_batch(
     for current_model in models_to_try:
         exhausted = _exhausted_for(current_model)
 
-        for api_key in api_keys:
+        for pos, api_key in enumerate(api_keys):
             if api_key in exhausted:
                 continue
 
@@ -134,7 +137,7 @@ def _translate_batch(
                         break
                     if current_model != model:
                         log.info("Using fallback model %s", current_model)
-                    return _parse_response(response.text, len(cues))
+                    return _parse_response(response.text, len(cues)), pos
                 except ResourceExhausted as e:
                     if attempt == 0:
                         error_msg = str(e).lower()
@@ -162,21 +165,23 @@ def translate_srt_cues(
     target_lang: str,
     batch_size: int = DEFAULT_BATCH_SIZE,
     model: str = DEFAULT_MODEL,
-) -> Tuple[List[Cue], int]:
+) -> Tuple[List[Cue], int, int]:
     """Translate SRT cues via Gemini, batching to stay under size limits.
 
-    Returns (translated_cues, total_chars_used).
+    Returns (translated_cues, total_chars_used, key_index) where key_index is
+    the 0-based position within api_keys of the last key used.
     Raises GeminiQuotaExhausted if all keys are exhausted.
     """
     if not cues:
-        return [], 0
+        return [], 0, 0
 
     total_chars = 0
     translated_cues = []
+    last_key_index = 0
 
     for batch in batch_cues(cues, batch_size):
         total_chars += sum(len(c.text) for c in batch)
-        translated_texts = _translate_batch(
+        translated_texts, last_key_index = _translate_batch(
             api_keys, batch, source_lang, target_lang, model
         )
         for cue, translated_text in zip(batch, translated_texts):
@@ -187,4 +192,4 @@ def translate_srt_cues(
                 text=translated_text,
             ))
 
-    return translated_cues, total_chars
+    return translated_cues, total_chars, last_key_index

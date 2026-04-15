@@ -96,7 +96,7 @@ class TestTranslateSrtCues:
         mock_genai.GenerativeModel.return_value = mock_model
 
         cues = _make_cues(3)
-        result_cues, chars = translate_srt_cues(
+        result_cues, chars, key_index = translate_srt_cues(
             KEYS, cues, "English", "Spanish"
         )
         assert len(result_cues) == 3
@@ -104,13 +104,15 @@ class TestTranslateSrtCues:
         assert result_cues[1].text == "Mundo"
         assert result_cues[2].text == "Adios"
         assert chars == sum(len(c.text) for c in cues)
+        assert key_index == 0
 
     @patch("translation.gemini_client.genai")
     def test_empty_cues(self, mock_genai):
         """Empty input returns empty output."""
-        result_cues, chars = translate_srt_cues(KEYS, [], "English", "Spanish")
+        result_cues, chars, key_index = translate_srt_cues(KEYS, [], "English", "Spanish")
         assert result_cues == []
         assert chars == 0
+        assert key_index == 0
         mock_genai.GenerativeModel.assert_not_called()
 
     @patch("translation.gemini_client.genai")
@@ -123,7 +125,7 @@ class TestTranslateSrtCues:
         mock_genai.GenerativeModel.return_value = mock_model
 
         cues = [Cue(1, "00:00:01,000", "00:00:02,000", "Hello\nWorld")]
-        result_cues, chars = translate_srt_cues(KEYS, cues, "English", "Spanish")
+        result_cues, chars, key_index = translate_srt_cues(KEYS, cues, "English", "Spanish")
         assert result_cues[0].text == "Hola\nMundo"
 
     @patch("translation.gemini_client.genai")
@@ -136,7 +138,7 @@ class TestTranslateSrtCues:
         mock_genai.GenerativeModel.return_value = mock_model
 
         cues = [Cue(42, "00:01:23,456", "00:01:25,789", "Hello")]
-        result_cues, _ = translate_srt_cues(KEYS, cues, "English", "Spanish")
+        result_cues, _, _ki = translate_srt_cues(KEYS, cues, "English", "Spanish")
         assert result_cues[0].index == 42
         assert result_cues[0].start == "00:01:23,456"
         assert result_cues[0].end == "00:01:25,789"
@@ -167,8 +169,9 @@ class TestKeyRotation:
         mock_genai.GenerativeModel.side_effect = make_model
 
         cues = _make_cues(1)
-        result_cues, chars = translate_srt_cues(KEYS, cues, "English", "Spanish")
+        result_cues, chars, key_index = translate_srt_cues(KEYS, cues, "English", "Spanish")
         assert result_cues[0].text == "Hola"
+        assert key_index == 1  # second key succeeded
         assert KEYS[0] in _exhausted_for(DEFAULT_MODEL)
         assert KEYS[1] not in _exhausted_for(DEFAULT_MODEL)
 
@@ -189,7 +192,7 @@ class TestKeyRotation:
         mock_genai.GenerativeModel.return_value = mock_model
 
         cues = _make_cues(1)
-        result_cues, _ = translate_srt_cues(KEYS, cues, "English", "Spanish")
+        result_cues, _, _ki = translate_srt_cues(KEYS, cues, "English", "Spanish")
         assert result_cues[0].text == "Hola"
         mock_sleep.assert_called_once_with(4)
         # Key should NOT be exhausted since retry succeeded
@@ -227,7 +230,7 @@ class TestKeyRotation:
         mock_genai.GenerativeModel.return_value = mock_model
 
         cues = _make_cues(1)
-        result_cues, _ = translate_srt_cues(KEYS, cues, "English", "Spanish")
+        result_cues, _, _ki = translate_srt_cues(KEYS, cues, "English", "Spanish")
         assert result_cues[0].text == "Hola"
         # genai.configure should only be called with second key
         mock_genai.configure.assert_called_with(api_key=KEYS[1])

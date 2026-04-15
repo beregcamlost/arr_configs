@@ -51,16 +51,18 @@ def translate_texts(
     texts: List[str],
     source_lang: str,
     target_lang: str,
-) -> List[str]:
+) -> Tuple[List[str], int]:
     """Translate a list of texts via DeepL API with key failover.
 
     Rotates through api_keys on AuthorizationException or QuotaExceededException.
-    Returns translated strings, or raises DeeplKeysExhausted if all keys fail.
+    Returns (translated_strings, key_index) where key_index is the 0-based
+    position within api_keys of the key that succeeded.
+    Raises DeeplKeysExhausted if all keys fail.
     """
     if not texts:
-        return []
+        return [], 0
 
-    for api_key in api_keys:
+    for pos, api_key in enumerate(api_keys):
         if api_key in _exhausted_keys:
             continue
 
@@ -74,7 +76,7 @@ def translate_texts(
                     source_lang=source_lang,
                     target_lang=target_lang,
                 )
-                return [r.text for r in results]
+                return [r.text for r in results], pos
             except deepl.AuthorizationException:
                 log.warning("DeepL key %s disabled/unauthorized, skipping", key_label)
                 _exhausted_keys.add(api_key)
@@ -105,22 +107,27 @@ def translate_srt_cues(
     source_lang: str,
     target_lang: str,
     batch_size: int = DEFAULT_BATCH_SIZE,
-) -> Tuple[List[Cue], int]:
+) -> Tuple[List[Cue], int, int]:
     """Translate SRT cues via DeepL, batching to stay under size limits.
 
-    Returns (translated_cues, total_chars_used).
+    Returns (translated_cues, total_chars_used, key_index) where key_index is
+    the 0-based position within api_keys of the last key used (batches may
+    rotate keys; tracking last is sufficient for budget accounting).
     Raises DeeplKeysExhausted if all keys are exhausted.
     """
     if not cues:
-        return [], 0
+        return [], 0, 0
 
     total_chars = 0
     translated_cues = []
+    last_key_index = 0
 
     for batch in batch_cues(cues, batch_size):
         texts = [c.text for c in batch]
         total_chars += sum(len(t) for t in texts)
-        translated_texts = translate_texts(api_keys, texts, source_lang, target_lang)
+        translated_texts, last_key_index = translate_texts(
+            api_keys, texts, source_lang, target_lang
+        )
         for cue, translated_text in zip(batch, translated_texts):
             translated_cues.append(Cue(
                 index=cue.index,
@@ -129,4 +136,4 @@ def translate_srt_cues(
                 text=translated_text,
             ))
 
-    return translated_cues, total_chars
+    return translated_cues, total_chars, last_key_index

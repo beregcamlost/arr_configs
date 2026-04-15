@@ -8,6 +8,7 @@ from translation.db import (
     get_monthly_chars,
     get_monthly_chars_by_provider,
     get_recent_translations,
+    get_daily_requests,
 )
 
 
@@ -212,3 +213,84 @@ def test_cooldown_still_works_for_transient_failures(tmp_db):
     assert is_on_cooldown(tmp_db, "/path/ok.mkv", "es", cooldown_hours=24) is True
     # But permanent skip must NOT fire
     assert is_permanently_failed(tmp_db, "/path/ok.mkv", "es") is False
+
+
+# --- Per-key budget tracking ---
+
+def test_init_db_has_key_index_column(tmp_db):
+    """init_db creates key_index column."""
+    import sqlite3
+    conn = sqlite3.connect(tmp_db)
+    cursor = conn.execute("PRAGMA table_info(translation_log)")
+    columns = {row[1] for row in cursor.fetchall()}
+    assert "key_index" in columns
+    conn.close()
+
+
+def test_init_db_key_index_migration_idempotent(tmp_path):
+    """Running init_db twice on an existing DB with key_index does not fail."""
+    db = str(tmp_path / "migration_test.db")
+    init_db(db)
+    init_db(db)  # second call must not raise
+    record_translation(db, "/p/v.mkv", "en", "es", 100, "success", "gemini", key_index=2)
+    rows = get_recent_translations(db)
+    assert rows[0]["key_index"] == 2
+
+
+def test_record_translation_stores_key_index(tmp_db):
+    """record_translation persists key_index."""
+    record_translation(tmp_db, "/p/v.mkv", "en", "es", 500, "success", "gemini", key_index=3)
+    rows = get_recent_translations(tmp_db)
+    assert rows[0]["key_index"] == 3
+
+
+def test_record_translation_key_index_defaults_null(tmp_db):
+    """record_translation stores NULL key_index when not provided."""
+    record_translation(tmp_db, "/p/v.mkv", "en", "es", 100, "success", "deepl")
+    rows = get_recent_translations(tmp_db)
+    assert rows[0]["key_index"] is None
+
+
+def test_get_monthly_chars_per_key_filter(tmp_db):
+    """get_monthly_chars with key_index only counts rows for that key."""
+    record_translation(tmp_db, "/p/v1.mkv", "en", "es", 1000, "success", "gemini", key_index=0)
+    record_translation(tmp_db, "/p/v2.mkv", "en", "fr", 2000, "success", "gemini", key_index=1)
+    record_translation(tmp_db, "/p/v3.mkv", "en", "de", 500,  "success", "gemini", key_index=0)
+    assert get_monthly_chars(tmp_db, provider="gemini", key_index=0) == 1500
+    assert get_monthly_chars(tmp_db, provider="gemini", key_index=1) == 2000
+
+
+def test_get_monthly_chars_key_index_zero_for_missing(tmp_db):
+    """get_monthly_chars returns 0 for a key_index with no rows."""
+    record_translation(tmp_db, "/p/v.mkv", "en", "es", 1000, "success", "gemini", key_index=0)
+    assert get_monthly_chars(tmp_db, provider="gemini", key_index=5) == 0
+
+
+def test_get_daily_requests_per_key_filter(tmp_db):
+    """get_daily_requests with key_index counts only that key's rows today."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    import sqlite3
+    conn = sqlite3.connect(tmp_db)
+    for path, ki in [("/a.mkv", 0), ("/b.mkv", 0), ("/c.mkv", 1)]:
+        conn.execute(
+            """INSERT INTO translation_log
+               (media_path, source_lang, target_lang, chars_used, status, created_at, provider, key_index)
+               VALUES (?, 'en', 'es', 100, 'success', ?, 'gemini', ?)""",
+            (path, today, ki),
+        )
+    conn.commit()
+    conn.close()
+    assert get_daily_requests(tmp_db, "gemini", key_index=0) == 2
+    assert get_daily_requests(tmp_db, "gemini", key_index=1) == 1
+    assert get_daily_requests(tmp_db, "gemini", key_index=2) == 0
+
+
+def test_get_monthly_chars_null_key_index_excluded_from_per_key_query(tmp_db):
+    """Rows with NULL key_index (old data) are not counted in per-key queries."""
+    # Old row without key_index
+    record_translation(tmp_db, "/p/old.mkv", "en", "es", 9999, "success", "gemini")
+    # New row with key_index=0
+    record_translation(tmp_db, "/p/new.mkv", "en", "es", 100, "success", "gemini", key_index=0)
+    # Per-key query must only see the 100-char row, not the 9999-char legacy row
+    assert get_monthly_chars(tmp_db, provider="gemini", key_index=0) == 100
