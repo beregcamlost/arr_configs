@@ -1353,7 +1353,7 @@ try_providers_for_lang() {
 try_translate_inline() {
   local mkv_file="$1" target_lang="$2"
   log "TRANSLATE_INLINE: attempting translation for lang=$target_lang: $(basename "$mkv_file")"
-  PYTHONPATH="${SCRIPT_DIR}/../../scripts" python3 \
+  PYTHONPATH=/config/berenstuff/automation/scripts python3 \
     -m translation.translator translate --file "$mkv_file" </dev/null 2>&1 | while IFS= read -r line; do
     log "TRANSLATE_INLINE: $line"
   done

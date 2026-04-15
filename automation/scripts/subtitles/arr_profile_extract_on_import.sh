@@ -358,6 +358,22 @@ deferred_main() {
       fi
     done < <(printf '%s' "$items" | jq -r '.[] | "\(.language)|\(.forced)"' | sort -u)
 
+    # Remove non-profile sidecar SRTs left over from extraction/translation
+    if [[ -n "$profile_set" ]]; then
+      while IFS= read -r stale_srt; do
+        [[ -z "$stale_srt" ]] && continue
+        local stale_base stale_lang
+        stale_base="$(basename "$stale_srt")"
+        stale_lang="$(extract_srt_lang "$stale_base" "$stem_tr")"
+        [[ -z "$stale_lang" ]] && stale_lang="und"
+        stale_lang="$(normalize_track_lang "$stale_lang")"
+        if ! lang_in_set "$stale_lang" "$profile_set"; then
+          rm -f "$stale_srt" "${stale_srt}.gtranslate"
+          log "CLEANUP: removed non-profile sidecar: $stale_base"
+        fi
+      done < <(find "$dir_tr" -maxdepth 1 -name "${stem_tr}.*.srt" -type f 2>/dev/null)
+    fi
+
     # Mark remaining profile language gaps for upgrade retry
     local upgrade_state_db="/APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db"
     while IFS='|' read -r gap_lang gap_forced; do
