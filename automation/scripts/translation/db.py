@@ -75,16 +75,46 @@ def is_on_cooldown(db_path, media_path, target_lang, cooldown_hours=24):
     return result
 
 
-def get_monthly_chars(db_path):
-    """Get total characters used this calendar month."""
+def get_monthly_chars(db_path, provider=None):
+    """Get total characters used this calendar month.
+
+    provider: when set, restricts to a single provider (e.g. 'deepl').
+    Default None sums across all providers.
+    """
     with contextlib.closing(_connect(db_path)) as conn:
-        cursor = conn.execute(
-            """SELECT COALESCE(SUM(chars_used), 0) as total
-               FROM translation_log
-               WHERE created_at >= date('now', 'start of month')"""
-        )
+        if provider is not None:
+            cursor = conn.execute(
+                """SELECT COALESCE(SUM(chars_used), 0) as total
+                   FROM translation_log
+                   WHERE created_at >= date('now', 'start of month')
+                     AND provider = ?""",
+                (provider,),
+            )
+        else:
+            cursor = conn.execute(
+                """SELECT COALESCE(SUM(chars_used), 0) as total
+                   FROM translation_log
+                   WHERE created_at >= date('now', 'start of month')"""
+            )
         total = cursor.fetchone()["total"]
     return total
+
+
+def is_permanently_failed(db_path, media_path, target_lang):
+    """Return True if (media_path, target_lang) has a prior NoneType parse failure.
+
+    NoneType errors arise from source SRTs that cannot be parsed — retrying
+    never helps, so these are skipped permanently rather than cycling every 24h.
+    """
+    with contextlib.closing(_connect(db_path)) as conn:
+        cursor = conn.execute(
+            """SELECT 1 FROM translation_log
+               WHERE media_path = ? AND target_lang = ?
+                 AND (status LIKE '%NoneType%' OR status LIKE '%the JSON%')
+               LIMIT 1""",
+            (media_path, target_lang),
+        )
+        return cursor.fetchone() is not None
 
 
 def get_monthly_chars_by_provider(db_path):
@@ -97,6 +127,24 @@ def get_monthly_chars_by_provider(db_path):
                GROUP BY provider"""
         )
         return {row["provider"]: row["total"] for row in cursor.fetchall()}
+
+
+def get_daily_requests(db_path, provider):
+    """Count translation attempts for a provider today (UTC calendar day).
+
+    Each row represents one file-level translation call (which may involve
+    multiple batch API calls internally). Used for daily request-budget checks
+    that guard against free-tier overage.
+    """
+    with contextlib.closing(_connect(db_path)) as conn:
+        cursor = conn.execute(
+            """SELECT COUNT(*) as total
+               FROM translation_log
+               WHERE provider = ?
+                 AND created_at >= datetime('now', 'start of day')""",
+            (provider,),
+        )
+        return cursor.fetchone()["total"]
 
 
 def get_recent_translations(db_path, limit=20):

@@ -19,8 +19,9 @@ from translation.config import (
     PROVIDER_DEEPL, PROVIDER_GEMINI, PROVIDER_GOOGLE,
 )
 from translation.db import (
-    init_db, record_translation, is_on_cooldown, get_monthly_chars,
-    get_monthly_chars_by_provider, get_recent_translations,
+    init_db, record_translation, is_on_cooldown, is_permanently_failed,
+    get_monthly_chars, get_monthly_chars_by_provider, get_recent_translations,
+    get_daily_requests,
 )
 from translation.deepl_client import (
     translate_srt_cues as deepl_translate_srt_cues,
@@ -42,9 +43,11 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# Session-level flags: once quota is exceeded, skip to next provider
+# Session-level flags: once a provider's budget or API quota is exceeded,
+# skip it for the rest of the run and fall through to the next provider.
 _deepl_quota_exceeded = False
 _gemini_quota_exceeded = False
+_google_quota_exceeded = False
 
 MARKER_EXTENSIONS = {
     PROVIDER_DEEPL: ".deepl",
@@ -70,8 +73,8 @@ def _has_gemini(cfg: Config) -> bool:
 
 
 def _has_google(cfg: Config) -> bool:
-    """Check if Google Translate is available."""
-    return cfg.google_translate_enabled
+    """Check if Google Translate is available (enabled and budget not exceeded)."""
+    return cfg.google_translate_enabled and not _google_quota_exceeded
 
 
 def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
@@ -81,7 +84,7 @@ def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
     Returns (translated_cues, chars_used, provider).
     Raises on non-quota errors.
     """
-    global _deepl_quota_exceeded, _gemini_quota_exceeded
+    global _deepl_quota_exceeded, _gemini_quota_exceeded, _google_quota_exceeded
 
     # Try Gemini first
     if _has_gemini(cfg) and base_lang in GEMINI_LANG_MAP and source_lang_code in GEMINI_LANG_MAP:
@@ -134,16 +137,33 @@ def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
 
 
 def translate_file(cfg: Config, media_path: str,
-                   chars_remaining=None, google_translator=None):
+                   chars_remaining=None, google_translator=None,
+                   gemini_daily_budget=None):
     """Translate missing subtitle languages for a single media file.
 
     Args:
         chars_remaining: If set, stop after consuming this many chars.
         google_translator: Optional pre-created Google translator instance.
+        gemini_daily_budget: If set, skip Gemini when today's file-level
+            request count for 'gemini' meets or exceeds this value.
 
     Returns (list of {file, target, chars, provider}, list of {file, target, error}).
     """
+    global _gemini_quota_exceeded
     db_path = _db_path(cfg.state_dir)
+
+    # Check Gemini daily request budget before spending it on this file.
+    # Each successful translate_file call records one row — count those rows
+    # to stay within the free-tier RPD limit.
+    if gemini_daily_budget is not None and not _gemini_quota_exceeded and _has_gemini(cfg):
+        used_today = get_daily_requests(db_path, PROVIDER_GEMINI)
+        if used_today >= gemini_daily_budget:
+            log.warning(
+                "GEMINI_DAILY_BUDGET_EXCEEDED: %d/%d requests today — skipping Gemini",
+                used_today, gemini_daily_budget,
+            )
+            _gemini_quota_exceeded = True
+
     basename = os.path.basename(media_path)
     stem = os.path.splitext(basename)[0]
     directory = os.path.dirname(media_path)
@@ -174,6 +194,13 @@ def translate_file(cfg: Config, media_path: str,
         # Check if any provider supports this language
         if base_lang not in ALL_SUPPORTED_LANGS:
             log.info("No translation mapping for '%s', skipping", base_lang)
+            continue
+
+        if is_permanently_failed(db_path, media_path, base_lang):
+            log.info(
+                "SKIP_PERMANENT: %s (%s) — prior NoneType parse failure",
+                media_path, base_lang,
+            )
             continue
 
         if is_on_cooldown(db_path, media_path, base_lang):
@@ -320,9 +347,10 @@ def cli():
 @click.option("--bazarr-db", type=str, default=None)
 def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db):
     """Translate missing subtitles via DeepL with Google fallback."""
-    global _deepl_quota_exceeded, _gemini_quota_exceeded
+    global _deepl_quota_exceeded, _gemini_quota_exceeded, _google_quota_exceeded
     _deepl_quota_exceeded = False  # Reset per invocation
     _gemini_quota_exceeded = False
+    _google_quota_exceeded = False
 
     # Reset Gemini and DeepL key rotation state
     from translation.gemini_client import reset_exhausted_keys
@@ -333,33 +361,55 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
     db = _db_path(cfg.state_dir)
     init_db(db)
 
-    # Enforce monthly budget — DeepL only, Gemini/Google fallback stays available
-    monthly_used = get_monthly_chars(db)
-    _budget_exceeded = False
-    if monthly_budget and monthly_used >= monthly_budget:
-        log.warning(
-            "Monthly DeepL budget reached: %s / %s chars — using Gemini/Google fallback",
-            f"{monthly_used:,}", f"{monthly_budget:,}",
-        )
-        _budget_exceeded = True
+    # Per-provider monthly budget enforcement.
+    # Each provider is checked independently so that one provider exhausting its
+    # budget does not uncap (chars_remaining=None) the remaining providers.
+    gemini_budget = int(os.environ.get("GEMINI_MONTHLY_BUDGET", "500000"))
+    google_budget = int(os.environ.get("GOOGLE_MONTHLY_BUDGET", "500000"))
 
-    # Cap max_chars to remaining budget (DeepL portion)
-    if not _budget_exceeded and monthly_budget:
-        budget_remaining = monthly_budget - monthly_used
+    # Daily Gemini request cap: gemini-2.5-pro free tier is ~50 RPD per project.
+    # Each DB row = 1 file ≈ 5 batch API calls on average, so 50/5 = 10 files
+    # max; apply 10% safety margin → 9 default. Override via env var.
+    gemini_daily_budget = int(os.environ.get("GEMINI_DAILY_REQUESTS_BUDGET", "9"))
+
+    deepl_used = get_monthly_chars(db, provider="deepl")
+    if monthly_budget and deepl_used >= monthly_budget:
+        log.warning(
+            "Monthly DeepL budget reached: %s / %s chars — DeepL disabled for this run",
+            f"{deepl_used:,}", f"{monthly_budget:,}",
+        )
+        _deepl_quota_exceeded = True
+    elif not _deepl_quota_exceeded and monthly_budget:
+        # Cap max_chars to DeepL's remaining budget slice only when DeepL is active
+        budget_remaining = monthly_budget - deepl_used
         if max_chars is None or max_chars > budget_remaining:
             max_chars = budget_remaining
-            log.info("Capped to %d chars (monthly budget remaining)", max_chars)
+            log.info("Capped to %d chars (DeepL monthly budget remaining)", max_chars)
+
+    gemini_used = get_monthly_chars(db, provider="gemini")
+    if gemini_budget and gemini_used >= gemini_budget:
+        log.warning(
+            "Monthly Gemini budget reached: %s / %s chars — Gemini disabled for this run",
+            f"{gemini_used:,}", f"{gemini_budget:,}",
+        )
+        _gemini_quota_exceeded = True
+
+    google_used = get_monthly_chars(db, provider="google")
+    if google_budget and google_used >= google_budget:
+        log.warning(
+            "Monthly Google budget reached: %s / %s chars — Google disabled for this run",
+            f"{google_used:,}", f"{google_budget:,}",
+        )
+        _google_quota_exceeded = True
 
     google_translator = None
 
-    # Check DeepL availability
+    # Check DeepL availability (date-skip and API-level quota)
     deepl_skipped_by_date = DEEPL_SKIP_UNTIL and date.today() <= DEEPL_SKIP_UNTIL
     if deepl_skipped_by_date:
         log.info("DeepL skipped until %s — using Gemini/Google", DEEPL_SKIP_UNTIL)
         _deepl_quota_exceeded = True
-    elif _budget_exceeded:
-        _deepl_quota_exceeded = True
-    elif cfg.deepl_api_keys:
+    elif not _deepl_quota_exceeded and cfg.deepl_api_keys:
         # Pre-flight usage check on first key only — non-fatal
         try:
             usage = deepl_get_usage(cfg.deepl_api_keys[0])
@@ -368,16 +418,15 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
                 _deepl_quota_exceeded = True
         except Exception as e:
             log.warning("Could not check DeepL usage: %s", e)
-    else:
+    elif not _deepl_quota_exceeded:
         log.info("No DeepL API keys configured, using Gemini/Google")
         _deepl_quota_exceeded = True
 
-    if not cfg.deepl_api_keys and not cfg.gemini_api_keys and not cfg.google_translate_enabled and not _budget_exceeded:
+    if not cfg.deepl_api_keys and not cfg.gemini_api_keys and not cfg.google_translate_enabled:
         click.echo("Error: No translation provider available")
         return
 
-    # When budget-exceeded and using Google only, don't cap chars
-    chars_remaining = None if _budget_exceeded else max_chars
+    chars_remaining = max_chars
     all_translated = []
     all_failed = []
 
@@ -387,7 +436,8 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
             log.error("File not found: %s", file_path)
             return
         t, f = translate_file(cfg, file_path,
-                              chars_remaining, google_translator)
+                              chars_remaining, google_translator,
+                              gemini_daily_budget=gemini_daily_budget)
         all_translated.extend(t)
         all_failed.extend(f)
 
@@ -407,7 +457,8 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
                 break
             try:
                 t, f = translate_file(cfg, item["path"],
-                                      chars_remaining, google_translator)
+                                      chars_remaining, google_translator,
+                                      gemini_daily_budget=gemini_daily_budget)
                 all_translated.extend(t)
                 all_failed.extend(f)
                 if chars_remaining is not None:

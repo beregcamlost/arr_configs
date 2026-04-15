@@ -4,6 +4,7 @@ from translation.db import (
     init_db,
     record_translation,
     is_on_cooldown,
+    is_permanently_failed,
     get_monthly_chars,
     get_monthly_chars_by_provider,
     get_recent_translations,
@@ -109,3 +110,105 @@ def test_init_db_migration_idempotent(tmp_path):
     record_translation(db_path, "/path/v.mkv", "en", "es", 100, "success", "google")
     rows = get_recent_translations(db_path)
     assert rows[0]["provider"] == "google"
+
+
+# --- Fix 1: provider-scoped get_monthly_chars ---
+
+def test_get_monthly_chars_no_filter_sums_all_providers(tmp_db):
+    """get_monthly_chars() with no provider arg sums across all providers."""
+    record_translation(tmp_db, "/path/v1.mkv", "en", "es", 1000, "success", "deepl")
+    record_translation(tmp_db, "/path/v2.mkv", "en", "fr", 2000, "success", "gemini")
+    record_translation(tmp_db, "/path/v3.mkv", "en", "de", 500, "success", "google")
+    total = get_monthly_chars(tmp_db)
+    assert total == 3500
+
+
+def test_get_monthly_chars_provider_deepl(tmp_db):
+    """get_monthly_chars(provider='deepl') only counts DeepL rows."""
+    record_translation(tmp_db, "/path/v1.mkv", "en", "es", 1000, "success", "deepl")
+    record_translation(tmp_db, "/path/v2.mkv", "en", "fr", 2000, "success", "gemini")
+    record_translation(tmp_db, "/path/v3.mkv", "en", "de", 500, "success", "google")
+    assert get_monthly_chars(tmp_db, provider="deepl") == 1000
+
+
+def test_get_monthly_chars_provider_gemini(tmp_db):
+    """get_monthly_chars(provider='gemini') only counts Gemini rows."""
+    record_translation(tmp_db, "/path/v1.mkv", "en", "es", 1000, "success", "deepl")
+    record_translation(tmp_db, "/path/v2.mkv", "en", "fr", 2000, "success", "gemini")
+    record_translation(tmp_db, "/path/v3.mkv", "en", "de", 500, "success", "google")
+    assert get_monthly_chars(tmp_db, provider="gemini") == 2000
+
+
+def test_get_monthly_chars_provider_google(tmp_db):
+    """get_monthly_chars(provider='google') only counts Google rows."""
+    record_translation(tmp_db, "/path/v1.mkv", "en", "es", 1000, "success", "deepl")
+    record_translation(tmp_db, "/path/v2.mkv", "en", "fr", 2000, "success", "gemini")
+    record_translation(tmp_db, "/path/v3.mkv", "en", "de", 500, "success", "google")
+    assert get_monthly_chars(tmp_db, provider="google") == 500
+
+
+def test_get_monthly_chars_provider_zero_when_no_rows(tmp_db):
+    """get_monthly_chars returns 0 when no rows exist for that provider."""
+    record_translation(tmp_db, "/path/v1.mkv", "en", "es", 1000, "success", "deepl")
+    assert get_monthly_chars(tmp_db, provider="gemini") == 0
+    assert get_monthly_chars(tmp_db, provider="google") == 0
+
+
+# --- Fix 3: permanent-skip for NoneType parse failures ---
+
+def test_is_permanently_failed_nonetype_status(tmp_db):
+    """is_permanently_failed returns True when a NoneType error row exists."""
+    record_translation(
+        tmp_db, "/path/bad.mkv", "en", "es", 0,
+        "error: 'NoneType' object has no attribute 'encode'",
+    )
+    assert is_permanently_failed(tmp_db, "/path/bad.mkv", "es") is True
+
+
+def test_is_permanently_failed_json_nonetype_status(tmp_db):
+    """is_permanently_failed triggers on 'the JSON object ... NoneType' errors."""
+    record_translation(
+        tmp_db, "/path/bad.mkv", "en", "es", 0,
+        "error: the JSON object must be str, bytes or bytearray, not NoneType",
+    )
+    assert is_permanently_failed(tmp_db, "/path/bad.mkv", "es") is True
+
+
+def test_is_permanently_failed_normal_error_not_triggered(tmp_db):
+    """is_permanently_failed returns False for transient (non-NoneType) errors."""
+    record_translation(tmp_db, "/path/ok.mkv", "en", "es", 0, "error: timeout")
+    assert is_permanently_failed(tmp_db, "/path/ok.mkv", "es") is False
+
+
+def test_is_permanently_failed_success_not_triggered(tmp_db):
+    """is_permanently_failed returns False for successfully translated files."""
+    record_translation(tmp_db, "/path/ok.mkv", "en", "es", 1000, "success", "deepl")
+    assert is_permanently_failed(tmp_db, "/path/ok.mkv", "es") is False
+
+
+def test_is_permanently_failed_different_lang_not_triggered(tmp_db):
+    """is_permanently_failed is scoped to (media_path, target_lang) pair."""
+    record_translation(
+        tmp_db, "/path/bad.mkv", "en", "es", 0,
+        "error: 'NoneType' object has no attribute 'encode'",
+    )
+    # Same file, different target lang must not be blocked
+    assert is_permanently_failed(tmp_db, "/path/bad.mkv", "fr") is False
+
+
+def test_is_permanently_failed_different_path_not_triggered(tmp_db):
+    """is_permanently_failed is scoped per file path."""
+    record_translation(
+        tmp_db, "/path/bad.mkv", "en", "es", 0,
+        "error: 'NoneType' object has no attribute 'encode'",
+    )
+    assert is_permanently_failed(tmp_db, "/path/other.mkv", "es") is False
+
+
+def test_cooldown_still_works_for_transient_failures(tmp_db):
+    """Normal transient errors (non-NoneType) are subject to cooldown, not permanent skip."""
+    record_translation(tmp_db, "/path/ok.mkv", "en", "es", 0, "error: network timeout")
+    # Cooldown should fire (row is recent)
+    assert is_on_cooldown(tmp_db, "/path/ok.mkv", "es", cooldown_hours=24) is True
+    # But permanent skip must NOT fire
+    assert is_permanently_failed(tmp_db, "/path/ok.mkv", "es") is False
