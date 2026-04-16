@@ -9,6 +9,8 @@ from translation.db import (
     get_monthly_chars_by_provider,
     get_recent_translations,
     get_daily_requests,
+    get_monthly_chars_by_key,
+    get_daily_requests_by_key,
 )
 
 
@@ -284,6 +286,85 @@ def test_get_daily_requests_per_key_filter(tmp_db):
     assert get_daily_requests(tmp_db, "gemini", key_index=0) == 2
     assert get_daily_requests(tmp_db, "gemini", key_index=1) == 1
     assert get_daily_requests(tmp_db, "gemini", key_index=2) == 0
+
+
+def test_idx_per_key_budget_created(tmp_db):
+    """init_db creates idx_per_key_budget index on translation_log."""
+    import sqlite3
+    conn = sqlite3.connect(tmp_db)
+    cursor = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_per_key_budget'"
+    )
+    assert cursor.fetchone() is not None
+    conn.close()
+
+
+# --- Grouped bulk helpers ---
+
+def test_get_monthly_chars_by_key_groups_correctly(tmp_db):
+    """get_monthly_chars_by_key returns per-key totals for the current month."""
+    record_translation(tmp_db, "/p/v1.mkv", "en", "es", 1000, "success", "gemini", key_index=0)
+    record_translation(tmp_db, "/p/v2.mkv", "en", "fr", 2000, "success", "gemini", key_index=1)
+    record_translation(tmp_db, "/p/v3.mkv", "en", "de", 500,  "success", "gemini", key_index=0)
+    result = get_monthly_chars_by_key(tmp_db, "gemini")
+    assert result == {0: 1500, 1: 2000}
+
+
+def test_get_monthly_chars_by_key_excludes_null_key_index(tmp_db):
+    """Rows with NULL key_index are excluded from grouped result."""
+    record_translation(tmp_db, "/p/old.mkv", "en", "es", 9999, "success", "gemini")
+    record_translation(tmp_db, "/p/new.mkv", "en", "es", 100,  "success", "gemini", key_index=0)
+    result = get_monthly_chars_by_key(tmp_db, "gemini")
+    assert result == {0: 100}
+
+
+def test_get_monthly_chars_by_key_excludes_other_providers(tmp_db):
+    """get_monthly_chars_by_key is scoped to the requested provider."""
+    record_translation(tmp_db, "/p/v1.mkv", "en", "es", 1000, "success", "deepl", key_index=0)
+    record_translation(tmp_db, "/p/v2.mkv", "en", "fr", 500,  "success", "gemini", key_index=0)
+    assert get_monthly_chars_by_key(tmp_db, "deepl") == {0: 1000}
+    assert get_monthly_chars_by_key(tmp_db, "gemini") == {0: 500}
+
+
+def test_get_monthly_chars_by_key_empty_when_no_rows(tmp_db):
+    """get_monthly_chars_by_key returns empty dict when no rows exist."""
+    assert get_monthly_chars_by_key(tmp_db, "gemini") == {}
+
+
+def test_get_daily_requests_by_key_groups_correctly(tmp_db):
+    """get_daily_requests_by_key returns per-key counts for today."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    import sqlite3
+    conn = sqlite3.connect(tmp_db)
+    for path, ki in [("/a.mkv", 0), ("/b.mkv", 0), ("/c.mkv", 1)]:
+        conn.execute(
+            """INSERT INTO translation_log
+               (media_path, source_lang, target_lang, chars_used, status, created_at, provider, key_index)
+               VALUES (?, 'en', 'es', 100, 'success', ?, 'gemini', ?)""",
+            (path, today, ki),
+        )
+    conn.commit()
+    conn.close()
+    result = get_daily_requests_by_key(tmp_db, "gemini")
+    assert result == {0: 2, 1: 1}
+
+
+def test_get_daily_requests_by_key_excludes_null_key_index(tmp_db):
+    """Rows with NULL key_index are excluded from grouped result."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    import sqlite3
+    conn = sqlite3.connect(tmp_db)
+    conn.execute(
+        """INSERT INTO translation_log
+           (media_path, source_lang, target_lang, chars_used, status, created_at, provider, key_index)
+           VALUES ('/a.mkv', 'en', 'es', 100, 'success', ?, 'gemini', NULL)""",
+        (today,),
+    )
+    conn.commit()
+    conn.close()
+    assert get_daily_requests_by_key(tmp_db, "gemini") == {}
 
 
 def test_get_monthly_chars_null_key_index_excluded_from_per_key_query(tmp_db):

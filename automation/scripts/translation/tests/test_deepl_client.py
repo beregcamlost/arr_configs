@@ -101,7 +101,7 @@ def test_translate_texts_empty(mock_get):
     mock_get.return_value = mock_translator
     results, key_index = translate_texts(api_keys=["key1:fx"], texts=[], source_lang="EN", target_lang="ES")
     assert results == []
-    assert key_index == 0
+    assert key_index is None
     mock_translator.translate_text.assert_not_called()
 
 

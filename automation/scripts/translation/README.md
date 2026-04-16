@@ -154,9 +154,11 @@ GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY=9   # requests/day per Gemini key (~50 RPD 
 GOOGLE_MONTHLY_BUDGET=500000             # aggregate Google chars/mo (no per-key; unauthenticated)
 ```
 
-Budget is tracked per API key via the `key_index` column in `translation_log`. A provider only falls through to the next when **all** its keys are budget-exhausted.
+Budget is tracked per API key via the `key_index` column in `translation_log`. A provider only falls through to the next when **all** its keys are budget-exhausted. Per-key budget exhaustion drops that key from the available list; it does **not** trip the session quota flag (`_deepl_quota_exceeded` / `_gemini_quota_exceeded`) — those flags flip only on genuine API quota errors.
 
-Legacy names `DEEPL_MONTHLY_BUDGET`, `GEMINI_MONTHLY_BUDGET`, and `GEMINI_DAILY_REQUESTS_BUDGET` (without `_PER_KEY`) are still honored but emit a deprecation warning in the log.
+Per-key budget checks use 2 grouped SQL queries per provider (`get_monthly_chars_by_key`, `get_daily_requests_by_key`) rather than per-key lookups. The index `idx_per_key_budget (provider, key_index, created_at)` covers these hot-path queries.
+
+Only `GEMINI_DAILY_REQUESTS_BUDGET` (without `_PER_KEY`) is legacy-honored and emits a deprecation warning in the log. `DEEPL_MONTHLY_BUDGET` and `GEMINI_MONTHLY_BUDGET` are not legacy names — use the `_PER_KEY` variants.
 
 ### 📅 Cron Schedule
 

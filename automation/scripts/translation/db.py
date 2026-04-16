@@ -5,6 +5,8 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
+from translation.config import PROVIDER_DEEPL, PROVIDER_GEMINI, PROVIDER_GOOGLE  # noqa: F401
+
 
 def _now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -38,6 +40,7 @@ def init_db(db_path):
         cursor = conn.execute("PRAGMA table_info(translation_log)")
         columns = {row["name"] for row in cursor.fetchall()}
         if "provider" not in columns:
+            # SQL literal must be a string; PROVIDER_DEEPL is the source of truth
             conn.execute(
                 "ALTER TABLE translation_log "
                 "ADD COLUMN provider TEXT NOT NULL DEFAULT 'deepl'"
@@ -49,10 +52,15 @@ def init_db(db_path):
                 "ADD COLUMN key_index INTEGER DEFAULT NULL"
             )
             conn.commit()
+        conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_per_key_budget
+            ON translation_log (provider, key_index, created_at)
+        ''')
+        conn.commit()
 
 
 def record_translation(db_path, media_path, source_lang, target_lang,
-                        chars_used, status, provider="deepl", key_index=None):
+                        chars_used, status, provider=PROVIDER_DEEPL, key_index=None):
     """Record a translation attempt."""
     with contextlib.closing(_connect(db_path)) as conn:
         conn.execute(
@@ -171,6 +179,36 @@ def get_daily_requests(db_path, provider, key_index=None):
                 (provider,),
             )
         return cursor.fetchone()["total"]
+
+
+def get_monthly_chars_by_key(db_path, provider):
+    """Return {key_index: chars_used} for the current calendar month."""
+    with contextlib.closing(_connect(db_path)) as conn:
+        cursor = conn.execute(
+            """SELECT key_index, COALESCE(SUM(chars_used), 0) as total
+               FROM translation_log
+               WHERE provider = ?
+                 AND created_at >= date('now', 'start of month')
+                 AND key_index IS NOT NULL
+               GROUP BY key_index""",
+            (provider,),
+        )
+        return {row["key_index"]: row["total"] for row in cursor.fetchall()}
+
+
+def get_daily_requests_by_key(db_path, provider):
+    """Return {key_index: request_count} for today."""
+    with contextlib.closing(_connect(db_path)) as conn:
+        cursor = conn.execute(
+            """SELECT key_index, COUNT(*) as total
+               FROM translation_log
+               WHERE provider = ?
+                 AND created_at >= datetime('now', 'start of day')
+                 AND key_index IS NOT NULL
+               GROUP BY key_index""",
+            (provider,),
+        )
+        return {row["key_index"]: row["total"] for row in cursor.fetchall()}
 
 
 def get_recent_translations(db_path, limit=20):

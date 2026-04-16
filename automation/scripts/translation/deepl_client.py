@@ -60,7 +60,7 @@ def translate_texts(
     Raises DeeplKeysExhausted if all keys fail.
     """
     if not texts:
-        return [], 0
+        return [], None
 
     for pos, api_key in enumerate(api_keys):
         if api_key in _exhausted_keys:
@@ -116,11 +116,11 @@ def translate_srt_cues(
     Raises DeeplKeysExhausted if all keys are exhausted.
     """
     if not cues:
-        return [], 0, 0
+        return [], 0, None
 
     total_chars = 0
     translated_cues = []
-    last_key_index = 0
+    last_key_index = None
 
     for batch in batch_cues(cues, batch_size):
         texts = [c.text for c in batch]

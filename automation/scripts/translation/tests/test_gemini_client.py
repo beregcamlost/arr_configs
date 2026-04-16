@@ -112,7 +112,7 @@ class TestTranslateSrtCues:
         result_cues, chars, key_index = translate_srt_cues(KEYS, [], "English", "Spanish")
         assert result_cues == []
         assert chars == 0
-        assert key_index == 0
+        assert key_index is None
         mock_genai.GenerativeModel.assert_not_called()
 
     @patch("translation.gemini_client.genai")

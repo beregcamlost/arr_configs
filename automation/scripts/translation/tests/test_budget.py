@@ -155,8 +155,7 @@ class TestPerProviderBudgetFlags:
         calls = []
 
         def capture_translate_file(cfg, path, chars_remaining=None,
-                                   google_translator=None, gemini_daily_budget=None,
-                                   **kwargs):
+                                   google_translator=None, **kwargs):
             calls.append(chars_remaining)
             return [], []
 
@@ -361,7 +360,11 @@ class TestGetDailyRequests:
 
 
 class TestGeminiDailyBudgetFallthrough:
-    """When daily budget is hit, Gemini is skipped and the flag is set."""
+    """Per-key daily budget filtering via gemini_daily_per_key.
+
+    The aggregate gemini_daily_budget gate was removed in favor of per-key
+    filtering in _build_available_keys. These tests verify the per-key path.
+    """
 
     def _make_cfg_gemini(self, tmp_path):
         cfg = _make_cfg(deepl_key="test:fx", google_enabled=True, gemini_keys=["gem-key"])
@@ -370,76 +373,8 @@ class TestGeminiDailyBudgetFallthrough:
         init_db(os.path.join(cfg.state_dir, "translation_state.db"))
         return cfg
 
-    def test_gemini_skipped_when_daily_budget_reached(self, tmp_path):
-        """translate_file sets _gemini_quota_exceeded when daily budget is exhausted."""
-        translator_mod._gemini_quota_exceeded = False
-        translator_mod._deepl_quota_exceeded = False
-
-        cfg = self._make_cfg_gemini(tmp_path)
-        db = os.path.join(cfg.state_dir, "translation_state.db")
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Seed 5 gemini rows today — exceeds budget of 5
-        for i in range(5):
-            _insert_with_timestamp(db, f"/f{i}.mkv", "gemini", today)
-
-        with patch("translation.translator._resolve_profile_for_path", return_value=None):
-            from translation.translator import translate_file
-            translate_file(cfg, "/any.mkv", gemini_daily_budget=5)
-
-        assert translator_mod._gemini_quota_exceeded is True
-
-    def test_gemini_not_skipped_when_under_budget(self, tmp_path):
-        """translate_file does NOT set flag when today's count is below budget."""
-        translator_mod._gemini_quota_exceeded = False
-        translator_mod._deepl_quota_exceeded = False
-
-        cfg = self._make_cfg_gemini(tmp_path)
-        db = os.path.join(cfg.state_dir, "translation_state.db")
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Seed 3 gemini rows today — under budget of 9
-        for i in range(3):
-            _insert_with_timestamp(db, f"/f{i}.mkv", "gemini", today)
-
-        with patch("translation.translator._resolve_profile_for_path", return_value=None):
-            from translation.translator import translate_file
-            translate_file(cfg, "/any.mkv", gemini_daily_budget=9)
-
-        assert translator_mod._gemini_quota_exceeded is False
-
-    def test_daily_budget_zero_disables_gemini(self, tmp_path):
-        """Budget of 0 means Gemini is disabled immediately (0 >= 0)."""
-        translator_mod._gemini_quota_exceeded = False
-        translator_mod._deepl_quota_exceeded = False
-
-        cfg = self._make_cfg_gemini(tmp_path)
-
-        with patch("translation.translator._resolve_profile_for_path", return_value=None):
-            from translation.translator import translate_file
-            translate_file(cfg, "/any.mkv", gemini_daily_budget=0)
-
-        assert translator_mod._gemini_quota_exceeded is True
-
-    def test_daily_budget_none_skips_check(self, tmp_path):
-        """gemini_daily_budget=None means no daily check — flag stays clear."""
-        translator_mod._gemini_quota_exceeded = False
-        translator_mod._deepl_quota_exceeded = False
-
-        cfg = self._make_cfg_gemini(tmp_path)
-        db = os.path.join(cfg.state_dir, "translation_state.db")
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Seed 100 gemini rows — would exceed any reasonable budget
-        for i in range(100):
-            _insert_with_timestamp(db, f"/f{i}.mkv", "gemini", today)
-
-        with patch("translation.translator._resolve_profile_for_path", return_value=None):
-            from translation.translator import translate_file
-            translate_file(cfg, "/any.mkv", gemini_daily_budget=None)
-
-        # Flag must NOT be set — budget=None means uncapped
-        assert translator_mod._gemini_quota_exceeded is False
-
-    def test_cli_passes_daily_budget_to_translate_file(self, tmp_path, monkeypatch):
-        """The translate CLI command reads GEMINI_DAILY_REQUESTS_BUDGET and passes it down."""
+    def test_cli_passes_per_key_daily_budget_to_translate_file(self, tmp_path, monkeypatch):
+        """CLI reads GEMINI_DAILY_REQUESTS_BUDGET(_PER_KEY) and passes gemini_daily_per_key."""
         from click.testing import CliRunner
         from translation.translator import cli
 
@@ -450,16 +385,15 @@ class TestGeminiDailyBudgetFallthrough:
 
         monkeypatch.setenv("DEEPL_API_KEY", "test:fx")
         monkeypatch.setenv("GEMINI_API_KEYS", "gem-key")
-        monkeypatch.setenv("GEMINI_DAILY_REQUESTS_BUDGET", "7")
+        monkeypatch.setenv("GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY", "7")
         monkeypatch.setenv("GEMINI_MONTHLY_BUDGET", "500000")
         monkeypatch.setenv("GOOGLE_MONTHLY_BUDGET", "500000")
 
         captured = {}
 
         def capture_translate_file(cfg, path, chars_remaining=None,
-                                   google_translator=None, gemini_daily_budget=None,
-                                   **kwargs):
-            captured["gemini_daily_budget"] = gemini_daily_budget
+                                   google_translator=None, **kwargs):
+            captured["gemini_daily_per_key"] = kwargs.get("gemini_daily_per_key")
             return [], []
 
         video = tmp_path / "Movie.mkv"
@@ -476,7 +410,7 @@ class TestGeminiDailyBudgetFallthrough:
                 "--state-dir", str(db_dir),
             ])
 
-        assert captured.get("gemini_daily_budget") == 7
+        assert captured.get("gemini_daily_per_key") == 7
 
 
 # ---------------------------------------------------------------------------
@@ -486,16 +420,10 @@ class TestGeminiDailyBudgetFallthrough:
 class TestPerKeyBudgetFiltering:
     """_build_available_keys filters exhausted keys; provider sentinel fires only when all exhausted."""
 
-    def _db(self, tmp_path):
-        db = str(tmp_path / "state" / "translation_state.db")
-        os.makedirs(os.path.dirname(db), exist_ok=True)
-        init_db(db)
-        return db
-
     def test_one_key_exhausted_other_still_available(self, tmp_path):
         """When key 0 is at monthly limit, key 1 remains in available list."""
         from translation.translator import _build_available_keys
-        db = self._db(tmp_path)
+        db = _db_path(tmp_path)
         # Exhaust key 0 monthly budget
         record_translation(db, "/p/v.mkv", "en", "es", 500_000, "success", "gemini", key_index=0)
         keys = ["key-a", "key-b"]
@@ -506,7 +434,7 @@ class TestPerKeyBudgetFiltering:
     def test_all_keys_exhausted_returns_empty(self, tmp_path):
         """When all keys are at limit, available list is empty."""
         from translation.translator import _build_available_keys
-        db = self._db(tmp_path)
+        db = _db_path(tmp_path)
         record_translation(db, "/p/v1.mkv", "en", "es", 500_000, "success", "gemini", key_index=0)
         record_translation(db, "/p/v2.mkv", "en", "es", 500_000, "success", "gemini", key_index=1)
         keys = ["key-a", "key-b"]
@@ -517,7 +445,7 @@ class TestPerKeyBudgetFiltering:
         """A key at its daily request cap is excluded even if monthly is fine."""
         from translation.translator import _build_available_keys
         from datetime import datetime, timezone
-        db = self._db(tmp_path)
+        db = _db_path(tmp_path)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         conn = sqlite3.connect(db)
         # 9 daily rows for key 0
@@ -541,7 +469,7 @@ class TestPerKeyBudgetFiltering:
     def test_key_index_mapping_preserved_after_filter(self, tmp_path):
         """Original index is preserved: if key 0 is filtered out, key 1's index is still 1."""
         from translation.translator import _build_available_keys
-        db = self._db(tmp_path)
+        db = _db_path(tmp_path)
         record_translation(db, "/p/v.mkv", "en", "es", 500_000, "success", "deepl", key_index=0)
         keys = ["deepl-key-0", "deepl-key-1", "deepl-key-2"]
         avail = _build_available_keys(db, "deepl", keys, monthly_per_key=500_000)
