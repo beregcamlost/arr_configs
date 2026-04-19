@@ -17,6 +17,7 @@ DEEPL_SKIP_UNTIL = date.fromisoformat(_skip_raw) if _skip_raw else None
 PROVIDER_DEEPL = "deepl"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_GOOGLE = "google"
+PROVIDER_OLLAMA = "ollama"
 
 # Bazarr 2-letter code → DeepL target language code
 DEEPL_LANG_MAP = {
@@ -180,9 +181,12 @@ GEMINI_LANG_MAP = {
     "tl": "Filipino",
 }
 
+# Ollama uses the same natural language names as Gemini
+OLLAMA_LANG_MAP = GEMINI_LANG_MAP
+
 # Merged set of all supported target/source language codes (for quick "any provider" checks)
-ALL_SUPPORTED_LANGS = frozenset(DEEPL_LANG_MAP) | frozenset(GEMINI_LANG_MAP) | frozenset(GOOGLE_LANG_MAP)
-ALL_SUPPORTED_SOURCE_LANGS = frozenset(DEEPL_SOURCE_LANG_MAP) | frozenset(GEMINI_LANG_MAP) | frozenset(GOOGLE_LANG_MAP)
+ALL_SUPPORTED_LANGS = frozenset(DEEPL_LANG_MAP) | frozenset(GEMINI_LANG_MAP) | frozenset(GOOGLE_LANG_MAP) | frozenset(OLLAMA_LANG_MAP)
+ALL_SUPPORTED_SOURCE_LANGS = frozenset(DEEPL_SOURCE_LANG_MAP) | frozenset(GEMINI_LANG_MAP) | frozenset(GOOGLE_LANG_MAP) | frozenset(OLLAMA_LANG_MAP)
 
 
 @dataclass
@@ -195,6 +199,8 @@ class Config:
     state_dir: str = DEFAULT_STATE_DIR
     google_translate_enabled: bool = True
     gemini_api_keys: list = field(default_factory=list)
+    ollama_base_url: str = ""
+    ollama_model: str = "phi4-mini-subs"
 
 
 def load_config(
@@ -212,11 +218,13 @@ def load_config(
     google_enabled = os.environ.get("GOOGLE_TRANSLATE_ENABLED", "1") != "0"
 
     gemini_keys = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
+    ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "").strip()
+    ollama_model = os.environ.get("OLLAMA_MODEL", "phi4-mini-subs").strip()
 
-    if not deepl_keys and not gemini_keys and not google_enabled:
+    if not deepl_keys and not gemini_keys and not google_enabled and not ollama_base_url:
         raise ValueError(
             "No translation provider available: set DEEPL_API_KEYS, "
-            "GEMINI_API_KEYS, or enable Google Translate"
+            "GEMINI_API_KEYS, OLLAMA_BASE_URL, or enable Google Translate"
         )
 
     return Config(
@@ -228,4 +236,6 @@ def load_config(
         state_dir=state_dir or DEFAULT_STATE_DIR,
         google_translate_enabled=google_enabled,
         gemini_api_keys=gemini_keys,
+        ollama_base_url=ollama_base_url,
+        ollama_model=ollama_model,
     )

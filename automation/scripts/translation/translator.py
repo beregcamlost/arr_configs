@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # automation/scripts/translation/translator.py
-"""Subtitle translator CLI with DeepL -> Gemini -> Google fallback chain."""
+"""Subtitle translator CLI with Ollama -> Gemini -> DeepL -> Google fallback chain."""
 
 import logging
 import os
@@ -16,7 +16,8 @@ from translation.config import (
     DEEPL_LANG_MAP, DEEPL_SOURCE_LANG_MAP, DEEPL_SKIP_UNTIL,
     GEMINI_LANG_MAP,
     GOOGLE_LANG_MAP,
-    PROVIDER_DEEPL, PROVIDER_GEMINI, PROVIDER_GOOGLE,
+    OLLAMA_LANG_MAP,
+    PROVIDER_DEEPL, PROVIDER_GEMINI, PROVIDER_GOOGLE, PROVIDER_OLLAMA,
 )
 from translation.db import (
     init_db, record_translation, is_on_cooldown, is_permanently_failed,
@@ -69,11 +70,14 @@ logging.basicConfig(
 _deepl_quota_exceeded = False
 _gemini_quota_exceeded = False
 _google_quota_exceeded = False
+_ollama_unavailable = False
 
 MARKER_EXTENSIONS = {
     PROVIDER_DEEPL: ".deepl",
     PROVIDER_GEMINI: ".gemini",
     PROVIDER_GOOGLE: ".gtranslate",
+    PROVIDER_OLLAMA: ".ollama",
+    "ollama+gemini": ".ollama",
 }
 
 
@@ -96,6 +100,11 @@ def _has_gemini(cfg: Config) -> bool:
 def _has_google(cfg: Config) -> bool:
     """Check if Google Translate is available (enabled and budget not exceeded)."""
     return cfg.google_translate_enabled and not _google_quota_exceeded
+
+
+def _has_ollama(cfg: Config) -> bool:
+    """Check if Ollama is available (URL configured and not marked unavailable)."""
+    return bool(cfg.ollama_base_url) and not _ollama_unavailable
 
 
 def _build_available_keys(db_path, provider, all_keys,
@@ -142,21 +151,119 @@ def _try_provider(provider_name, client_fn, exc_class, avail, cues,
     return translated_cues, chars_used, key_index
 
 
+def _flag_low_quality_lines(source_cues, translated_cues):
+    """Flag translated lines that look low-quality based on heuristics."""
+    from translation.spell_check import validate_translated_cues
+
+    flagged = set()
+    source_texts = [c.text for c in source_cues]
+    translated_texts = [c.text for c in translated_cues]
+
+    issues = validate_translated_cues(translated_texts, source_texts)
+    for issue in issues:
+        flagged.add(issue["index"])
+
+    for i, (src, tgt) in enumerate(zip(source_texts, translated_texts)):
+        src_len = len(src.strip())
+        tgt_len = len(tgt.strip())
+        if src_len == 0:
+            continue
+        ratio = tgt_len / src_len
+        if ratio > 2.0 or ratio < 0.3:
+            flagged.add(i)
+
+    for i, tgt in enumerate(translated_texts):
+        if not tgt.strip():
+            flagged.add(i)
+
+    return sorted(flagged)
+
+
 def _translate_cues_with_fallback(cfg, cues, source_lang_code, base_lang,
                                    google_translator, db_path=None,
                                    deepl_monthly_per_key=500_000,
                                    gemini_monthly_per_key=500_000,
                                    gemini_daily_per_key=None):
-    """Translate cues trying Gemini -> DeepL -> Google.
+    """Translate cues trying Ollama -> Gemini -> DeepL -> Google.
 
     Returns (translated_cues, chars_used, provider, key_index).
     key_index is the original (unfiltered) position of the key used, or None
     for Google (no per-key tracking).
     Raises on non-quota errors.
     """
-    global _deepl_quota_exceeded, _gemini_quota_exceeded, _google_quota_exceeded
+    global _deepl_quota_exceeded, _gemini_quota_exceeded, _google_quota_exceeded, _ollama_unavailable
 
-    # Try Gemini first
+    # Try Ollama first (free, local)
+    if _has_ollama(cfg) and base_lang in OLLAMA_LANG_MAP and source_lang_code in OLLAMA_LANG_MAP:
+        from translation.ollama_client import (
+            translate_srt_cues as ollama_translate_srt_cues,
+            OllamaUnavailable,
+        )
+        ollama_source = OLLAMA_LANG_MAP[source_lang_code]
+        ollama_target = OLLAMA_LANG_MAP[base_lang]
+        try:
+            translated_cues, chars_used, _ = ollama_translate_srt_cues(
+                cfg.ollama_base_url, cues, ollama_source, ollama_target,
+                model=cfg.ollama_model,
+            )
+
+            flagged = _flag_low_quality_lines(cues, translated_cues)
+            if not flagged or not _has_gemini(cfg):
+                if flagged:
+                    log.info("Ollama: %d lines flagged but Gemini unavailable", len(flagged))
+                return translated_cues, chars_used, PROVIDER_OLLAMA, None
+
+            log.info("Ollama: %d/%d lines flagged, correcting via Gemini", len(flagged), len(cues))
+
+            from translation.gemini_client import (
+                translate_srt_cues as gemini_translate_srt_cues,
+                GeminiQuotaExhausted,
+            )
+            gemini_source = GEMINI_LANG_MAP.get(source_lang_code, source_lang_code)
+            gemini_target = GEMINI_LANG_MAP.get(base_lang, base_lang)
+
+            flagged_cues = [cues[i] for i in flagged]
+            try:
+                if db_path:
+                    avail = _build_available_keys(
+                        db_path, PROVIDER_GEMINI, cfg.gemini_api_keys,
+                        gemini_monthly_per_key, gemini_daily_per_key,
+                    )
+                    if not avail:
+                        log.warning("All Gemini keys at budget, returning Ollama-only")
+                        return translated_cues, chars_used, PROVIDER_OLLAMA, None
+                    filtered_keys = [k for _, k in avail]
+                    gemini_result, gemini_chars, pos = gemini_translate_srt_cues(
+                        filtered_keys, flagged_cues, gemini_source, gemini_target
+                    )
+                    gemini_key_index = avail[pos][0]
+                else:
+                    gemini_result, gemini_chars, pos = gemini_translate_srt_cues(
+                        cfg.gemini_api_keys, flagged_cues, gemini_source, gemini_target
+                    )
+                    gemini_key_index = pos
+
+                for fi, gi in enumerate(flagged):
+                    translated_cues[gi] = gemini_result[fi]
+
+                log.info("Gemini corrected %d lines (%d chars)", len(flagged), gemini_chars)
+                return translated_cues, chars_used + gemini_chars, "ollama+gemini", gemini_key_index
+
+            except GeminiQuotaExhausted:
+                log.warning("Gemini quota exhausted during correction, returning Ollama-only")
+                _gemini_quota_exceeded = True
+                return translated_cues, chars_used, PROVIDER_OLLAMA, None
+            except Exception as e:
+                log.warning("Gemini correction failed (%s), returning Ollama-only", e)
+                return translated_cues, chars_used, PROVIDER_OLLAMA, None
+
+        except OllamaUnavailable as e:
+            log.warning("Ollama unavailable (%s), trying Gemini", e)
+            _ollama_unavailable = True
+        except Exception as e:
+            log.warning("Ollama failed (%s), trying Gemini", e)
+
+    # Try Gemini
     if _has_gemini(cfg) and base_lang in GEMINI_LANG_MAP and source_lang_code in GEMINI_LANG_MAP:
         from translation.gemini_client import (
             translate_srt_cues as gemini_translate_srt_cues,
@@ -440,6 +547,8 @@ def cli():
 @cli.command()
 @click.option("--since", type=int, default=None,
               help="Only process files modified in the last N minutes")
+@click.option("--all", "scan_all", is_flag=True, default=False,
+              help="Translate all files with missing subtitles")
 @click.option("--file", "file_path", type=str, default=None,
               help="Translate a single file")
 @click.option("--max-chars", type=int, default=None,
@@ -448,12 +557,13 @@ def cli():
               help="Monthly character budget (default: 400000)")
 @click.option("--state-dir", type=str, default=None)
 @click.option("--bazarr-db", type=str, default=None)
-def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db):
+def translate(since, scan_all, file_path, max_chars, monthly_budget, state_dir, bazarr_db):
     """Translate missing subtitles via DeepL with Google fallback."""
-    global _deepl_quota_exceeded, _gemini_quota_exceeded, _google_quota_exceeded
+    global _deepl_quota_exceeded, _gemini_quota_exceeded, _google_quota_exceeded, _ollama_unavailable
     _deepl_quota_exceeded = False  # Reset per invocation
     _gemini_quota_exceeded = False
     _google_quota_exceeded = False
+    _ollama_unavailable = False
 
     # Reset Gemini and DeepL key rotation state
     from translation.gemini_client import reset_exhausted_keys
@@ -528,7 +638,7 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
         log.info("No DeepL API keys configured, using Gemini/Google")
         _deepl_quota_exceeded = True
 
-    if not cfg.deepl_api_keys and not cfg.gemini_api_keys and not cfg.google_translate_enabled:
+    if not cfg.deepl_api_keys and not cfg.gemini_api_keys and not cfg.google_translate_enabled and not cfg.ollama_base_url:
         click.echo("Error: No translation provider available")
         return
 
@@ -552,11 +662,16 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
         # Trigger Bazarr rescan
         if all_translated and cfg.bazarr_api_key:
             _trigger_bazarr_rescan(cfg, file_path)
-    elif since:
-        # Cron mode — scan for recent missing
+    elif since or scan_all:
+        if since and scan_all:
+            click.echo("Error: --since and --all are mutually exclusive")
+            return
         results = scan_recent_missing(cfg.bazarr_db, since)
         if not results:
-            click.echo(f"No files with missing subtitles in last {since} minutes")
+            msg = "No files with missing subtitles"
+            if since:
+                msg += f" in last {since} minutes"
+            click.echo(msg)
             return
         click.echo(f"Found {len(results)} file(s) with missing subtitles")
         for item in results:
@@ -585,7 +700,7 @@ def translate(since, file_path, max_chars, monthly_budget, state_dir, bazarr_db)
             except Exception as e:
                 log.error("Error processing %s: %s", item["path"], e)
     else:
-        click.echo("Must specify --since N or --file PATH")
+        click.echo("Must specify --since N, --file PATH, or --all")
         return
 
     # Summary
