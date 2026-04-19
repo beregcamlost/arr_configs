@@ -25,6 +25,8 @@ def test_load_config_no_deepl_key_google_enabled(monkeypatch):
     """Config loads fine without DEEPL_API_KEY when Google is enabled."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
     monkeypatch.delenv("DEEPL_API_KEYS", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "1")
     cfg = load_config()
     assert cfg.deepl_api_keys == []
@@ -35,6 +37,8 @@ def test_load_config_no_providers_raises(monkeypatch):
     """Config raises ValueError when no translation provider available."""
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
     monkeypatch.delenv("DEEPL_API_KEYS", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.setenv("GOOGLE_TRANSLATE_ENABLED", "0")
     with pytest.raises(ValueError, match="DEEPL_API_KEYS"):
         load_config()

@@ -7,14 +7,13 @@ from translation.gemini_client import (
     translate_srt_cues,
     reset_exhausted_keys,
     has_available_keys,
-    _build_prompt,
-    _parse_response,
     _exhausted_for,
     GeminiQuotaExhausted,
     _exhausted_keys,
     DEFAULT_MODEL,
     FALLBACK_MODEL,
 )
+from translation.prompt_utils import build_prompt, parse_response
 from translation.srt_parser import Cue
 
 
@@ -38,14 +37,14 @@ def _reset_keys():
 class TestBuildPrompt:
     def test_basic_prompt(self):
         cues = _make_cues(2)
-        prompt = _build_prompt(cues, "English", "Spanish")
+        prompt = build_prompt(cues, "English", "Spanish")
         assert "Translate from English to Spanish:" in prompt
         assert "1: Line 1" in prompt
         assert "2: Line 2" in prompt
 
     def test_multiline_cue_encodes_br(self):
         cues = [Cue(1, "00:00:01,000", "00:00:02,000", "Hello\nWorld")]
-        prompt = _build_prompt(cues, "English", "Spanish")
+        prompt = build_prompt(cues, "English", "Spanish")
         assert "Hello<br>World" in prompt
         assert "Hello\nWorld" not in prompt.split("\n", 1)[1]  # not raw newline in cue
 
@@ -53,22 +52,22 @@ class TestBuildPrompt:
 class TestParseResponse:
     def test_basic_numbered_response(self):
         response = "1: Hola\n2: Mundo\n3: Adios"
-        result = _parse_response(response, 3)
+        result = parse_response(response, 3)
         assert result == ["Hola", "Mundo", "Adios"]
 
     def test_strips_various_prefixes(self):
         response = "1. Hola\n2) Mundo\n3- Adios"
-        result = _parse_response(response, 3)
+        result = parse_response(response, 3)
         assert result == ["Hola", "Mundo", "Adios"]
 
     def test_decodes_br_to_newlines(self):
         response = "1: Hola<br>Mundo"
-        result = _parse_response(response, 1)
+        result = parse_response(response, 1)
         assert result == ["Hola\nMundo"]
 
     def test_pads_missing_results(self):
         response = "1: Hola"
-        result = _parse_response(response, 3)
+        result = parse_response(response, 3)
         assert len(result) == 3
         assert result[0] == "Hola"
         assert result[1] == ""
@@ -76,12 +75,12 @@ class TestParseResponse:
 
     def test_truncates_extra_results(self):
         response = "1: Hola\n2: Mundo\n3: Extra\n4: More"
-        result = _parse_response(response, 2)
+        result = parse_response(response, 2)
         assert len(result) == 2
 
     def test_skips_empty_lines(self):
         response = "1: Hola\n\n2: Mundo"
-        result = _parse_response(response, 2)
+        result = parse_response(response, 2)
         assert result == ["Hola", "Mundo"]
 
 

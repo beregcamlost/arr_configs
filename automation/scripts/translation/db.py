@@ -74,13 +74,32 @@ def record_translation(db_path, media_path, source_lang, target_lang,
         conn.commit()
 
 
-def is_on_cooldown(db_path, media_path, target_lang, cooldown_hours=24):
-    """Check if a (media_path, target_lang) pair is within cooldown."""
+_TRANSIENT_PREFIXES = ("error: timed out", "error: Ollama unreachable", "error: Connection")
+
+
+def _get_cooldown_hours(db_path, media_path, target_lang):
+    with contextlib.closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            """SELECT status FROM translation_log
+               WHERE media_path = ? AND target_lang = ?
+                 AND status != 'no_source' AND status != 'success'
+               ORDER BY created_at DESC LIMIT 1""",
+            (media_path, target_lang),
+        ).fetchone()
+    if row and any(row[0].startswith(p) for p in _TRANSIENT_PREFIXES):
+        return 1
+    return 24
+
+
+def is_on_cooldown(db_path, media_path, target_lang, cooldown_hours=None):
+    if cooldown_hours is None:
+        cooldown_hours = _get_cooldown_hours(db_path, media_path, target_lang)
     with contextlib.closing(_connect(db_path)) as conn:
         cursor = conn.execute(
             """SELECT 1 FROM translation_log
                WHERE media_path = ? AND target_lang = ?
                  AND created_at > datetime('now', ?)
+                 AND status != 'no_source'
                LIMIT 1""",
             (media_path, target_lang, f"-{cooldown_hours} hours"),
         )

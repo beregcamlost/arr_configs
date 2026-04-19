@@ -879,12 +879,12 @@ get_stream_idx_standard() {
   local extra_rx=""
   local title_rx=""
 
-  IFS='|' read -r code3 code3b lname <<<"$(sqlite3 -separator '|' "$DB" "
+  IFS='|' read -r code3 code3b lname <<<"$(sqlite3 -separator '|' -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "
     SELECT lower(coalesce(code3,'')), lower(coalesce(code3b,'')), lower(coalesce(name,''))
     FROM table_settings_languages
     WHERE lower(code2)='${code}'
     LIMIT 1;
-  ")"
+  " 2>/dev/null)"
 
   extra_rx="$(extra_title_regex "$code")"
   if [ -n "$lname" ]; then

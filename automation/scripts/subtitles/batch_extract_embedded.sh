@@ -155,7 +155,7 @@ resolve_profile_ids() {
 
   if [[ "$PROFILE_MODE" == "all" ]]; then
     mapfile -t ids < <(
-      sqlite3 "$DB" "SELECT profileId FROM table_languages_profiles ORDER BY profileId;"
+      sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT profileId FROM table_languages_profiles ORDER BY profileId;" 2>>"$LOG"
     )
   else
     IFS=',' read -ra ids <<< "$PROFILE_IDS_CSV"
@@ -177,9 +177,9 @@ parse_profile_languages() {
   local profile_id="$1"
   local items_json
 
-  items_json="$(sqlite3 "$DB" "
+  items_json="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "
     SELECT items FROM table_languages_profiles WHERE profileId = $profile_id;
-  ")"
+  " 2>>"$LOG" || true)"
 
   if [[ -z "$items_json" ]]; then
     log "WARN: Profile $profile_id not found or has no items."
@@ -197,7 +197,7 @@ parse_profile_languages() {
 
 query_episodes() {
   local profile_id="$1"
-  sqlite3 "$DB" "
+  sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "
     SELECT e.path
     FROM table_episodes e
     JOIN table_shows s ON s.sonarrSeriesId = e.sonarrSeriesId
@@ -205,18 +205,18 @@ query_episodes() {
       AND s.monitored = 'True'
       AND e.monitored = 'True'
     ORDER BY e.path;
-  "
+  " 2>>"$LOG"
 }
 
 query_movies() {
   local profile_id="$1"
-  sqlite3 "$DB" "
+  sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "
     SELECT path
     FROM table_movies
     WHERE profileId = $profile_id
       AND monitored = 'True'
     ORDER BY path;
-  "
+  " 2>>"$LOG"
 }
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,6 @@ process_file() {
     for lp in "${lang_pairs[@]}"; do
       local lang forced
       read -r lang forced <<< "$lp"
-      local suffix="$lang"
       local forced_label=""
       if [[ "$forced" == "True" ]]; then
         forced_label=" (forced)"
@@ -351,7 +350,7 @@ main() {
     [[ -z "$pid" ]] && continue
 
     local profile_name
-    profile_name="$(sqlite3 "$DB" "SELECT name FROM table_languages_profiles WHERE profileId = $pid;" 2>/dev/null || echo "unknown")"
+    profile_name="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT name FROM table_languages_profiles WHERE profileId = $pid;" 2>/dev/null || echo "unknown")"
     log "--- Processing profile $pid ($profile_name) ---"
 
     # Parse language items for this profile

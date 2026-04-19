@@ -101,14 +101,14 @@ resolve_profile_id() {
 
   for _attempt in $(seq 1 10); do
     if [[ "$ARR_TYPE" == "sonarr" ]]; then
-      profile_id="$(sqlite3 "$DB" "SELECT profileId FROM table_shows WHERE sonarrSeriesId=$media_id LIMIT 1;")"
+      profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT profileId FROM table_shows WHERE sonarrSeriesId=$media_id LIMIT 1;" 2>>"$LOG" || true)"
       if [[ -z "$profile_id" && -n "$media_path" ]]; then
-        profile_id="$(sqlite3 "$DB" "SELECT s.profileId FROM table_episodes e JOIN table_shows s ON s.sonarrSeriesId=e.sonarrSeriesId WHERE e.path='$esc_path' LIMIT 1;")"
+        profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT s.profileId FROM table_episodes e JOIN table_shows s ON s.sonarrSeriesId=e.sonarrSeriesId WHERE e.path='$esc_path' LIMIT 1;" 2>>"$LOG" || true)"
       fi
     else
-      profile_id="$(sqlite3 "$DB" "SELECT profileId FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
+      profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT profileId FROM table_movies WHERE radarrId=$media_id LIMIT 1;" 2>>"$LOG" || true)"
       if [[ -z "$profile_id" && -n "$media_path" ]]; then
-        profile_id="$(sqlite3 "$DB" "SELECT profileId FROM table_movies WHERE path='$esc_path' LIMIT 1;")"
+        profile_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT profileId FROM table_movies WHERE path='$esc_path' LIMIT 1;" 2>>"$LOG" || true)"
       fi
     fi
     if [[ -n "$profile_id" ]]; then
@@ -119,12 +119,12 @@ resolve_profile_id() {
   done
 
   if [[ "$ARR_TYPE" == "sonarr" ]]; then
-    default_profile="$(sqlite3 "$DB" "SELECT profileId FROM table_shows WHERE profileId IS NOT NULL GROUP BY profileId ORDER BY COUNT(*) DESC LIMIT 1;")"
+    default_profile="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT profileId FROM table_shows WHERE profileId IS NOT NULL GROUP BY profileId ORDER BY COUNT(*) DESC LIMIT 1;" 2>>"$LOG" || true)"
   else
-    default_profile="$(sqlite3 "$DB" "SELECT profileId FROM table_movies WHERE profileId IS NOT NULL GROUP BY profileId ORDER BY COUNT(*) DESC LIMIT 1;")"
+    default_profile="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT profileId FROM table_movies WHERE profileId IS NOT NULL GROUP BY profileId ORDER BY COUNT(*) DESC LIMIT 1;" 2>>"$LOG" || true)"
   fi
   if [[ -z "$default_profile" ]]; then
-    default_profile="$(sqlite3 "$DB" "SELECT profileId FROM table_languages_profiles ORDER BY profileId LIMIT 1;")"
+    default_profile="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT profileId FROM table_languages_profiles ORDER BY profileId LIMIT 1;" 2>>"$LOG" || true)"
   fi
   printf '%s' "$default_profile"
 }
@@ -135,10 +135,12 @@ resolve_profile_id() {
 #           items, profile_set, WRITES, SKIPS, PRUNES (all global)
 # ---------------------------------------------------------------------------
 deferred_main() {
+  sleep $(( RANDOM % 5 + 1 ))
+
   # Cache raw ffprobe subtitle stream JSON once — reused by both the
   # non-profile extraction block and the selective-strip block below.
   local _raw_sub_json
-  _raw_sub_json="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$MEDIA_PATH" 2>/dev/null || true)"
+  _raw_sub_json="$(ffprobe -v quiet -print_format json -show_streams -select_streams s "$MEDIA_PATH" 2>>"$LOG" || true)"
 
   # --- Extract profile languages from embedded streams ---
   while IFS='|' read -r code forced; do
@@ -288,7 +290,7 @@ deferred_main() {
     if [[ "$ARR_TYPE" == "sonarr" ]]; then
       local esc_path
       esc_path="$(sql_escape "$MEDIA_PATH")"
-      bazarr_ref_id="$(sqlite3 "$DB" "SELECT sonarrEpisodeId FROM table_episodes WHERE path='$esc_path' LIMIT 1;" 2>/dev/null)" || true
+      bazarr_ref_id="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT sonarrEpisodeId FROM table_episodes WHERE path='$esc_path' LIMIT 1;" 2>>"$LOG")" || true
     else
       bazarr_ref_id="$MEDIA_ID"
     fi
@@ -439,9 +441,19 @@ main() {
   log "EVENT=$EVENT_TYPE arr=$ARR_TYPE media_id=$MEDIA_ID path=$MEDIA_PATH"
 
   # --- FAST PATH (synchronous) ---
-  if [[ -z "$MEDIA_PATH" || ! -f "$MEDIA_PATH" ]]; then
+  if [[ -z "$MEDIA_PATH" ]]; then
     log "Skip: no media file path"
     notify_discord "SKIP" "Reason: no media file path"
+    exit 0
+  fi
+  local _fw
+  for _fw in 1 2 3; do
+    [[ -f "$MEDIA_PATH" ]] && break
+    sleep "$_fw"
+  done
+  if [[ ! -f "$MEDIA_PATH" ]]; then
+    log "Skip: media file not found after retries: $MEDIA_PATH"
+    notify_discord "SKIP" "Reason: media file not found after retries"
     exit 0
   fi
 
@@ -449,9 +461,9 @@ main() {
     local esc_path
     esc_path="$(sql_escape "$MEDIA_PATH")"
     if [[ "$ARR_TYPE" == "sonarr" ]]; then
-      MEDIA_ID="$(sqlite3 "$DB" "SELECT sonarrSeriesId FROM table_episodes WHERE path='$esc_path' LIMIT 1;")"
+      MEDIA_ID="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT sonarrSeriesId FROM table_episodes WHERE path='$esc_path' LIMIT 1;" 2>>"$LOG" || true)"
     else
-      MEDIA_ID="$(sqlite3 "$DB" "SELECT radarrId FROM table_movies WHERE path='$esc_path' LIMIT 1;")"
+      MEDIA_ID="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT radarrId FROM table_movies WHERE path='$esc_path' LIMIT 1;" 2>>"$LOG" || true)"
     fi
   fi
 
@@ -461,7 +473,7 @@ main() {
     exit 0
   fi
 
-  PROFILE_ID="$(resolve_profile_id "$MEDIA_ID" "$MEDIA_PATH")"
+  PROFILE_ID="$(resolve_profile_id "$MEDIA_ID" "$MEDIA_PATH" || true)"
 
   if [[ -z "$PROFILE_ID" ]]; then
     log "Skip: profile not found for $ARR_TYPE id=$MEDIA_ID"
@@ -471,16 +483,16 @@ main() {
 
   local profile_check
   if [[ "$ARR_TYPE" == "sonarr" ]]; then
-    profile_check="$(sqlite3 "$DB" "SELECT 1 FROM table_shows WHERE sonarrSeriesId=$MEDIA_ID AND profileId=$PROFILE_ID LIMIT 1;")"
+    profile_check="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT 1 FROM table_shows WHERE sonarrSeriesId=$MEDIA_ID AND profileId=$PROFILE_ID LIMIT 1;" 2>>"$LOG" || true)"
   else
-    profile_check="$(sqlite3 "$DB" "SELECT 1 FROM table_movies WHERE radarrId=$MEDIA_ID AND profileId=$PROFILE_ID LIMIT 1;")"
+    profile_check="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT 1 FROM table_movies WHERE radarrId=$MEDIA_ID AND profileId=$PROFILE_ID LIMIT 1;" 2>>"$LOG" || true)"
   fi
   if [[ "$profile_check" != "1" ]]; then
     log "Fallback profile applied for $ARR_TYPE id=$MEDIA_ID: profile=$PROFILE_ID"
   fi
 
   # Pre-compute items and profile_set for deferred work
-  items="$(sqlite3 "$DB" "SELECT items FROM table_languages_profiles WHERE profileId=$PROFILE_ID LIMIT 1;")"
+  items="$(sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$DB" "SELECT items FROM table_languages_profiles WHERE profileId=$PROFILE_ID LIMIT 1;" 2>>"$LOG" || true)"
   if [[ -z "$items" ]]; then
     log "Skip: empty profile items"
     notify_discord "SKIP" "Reason: empty profile items"

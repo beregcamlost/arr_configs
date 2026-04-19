@@ -1,7 +1,6 @@
 """Gemini API client for subtitle translation with multi-key rotation."""
 
 import logging
-import re
 import time
 from typing import Callable, List, Tuple
 
@@ -9,6 +8,7 @@ import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 
 from translation.srt_parser import Cue, batch_cues
+from translation.prompt_utils import build_prompt, parse_response
 
 log = logging.getLogger(__name__)
 
@@ -21,10 +21,6 @@ _exhausted_keys: dict = {}  # model -> set of keys
 
 # Cached model instances per (api_key, model, source_lang, target_lang)
 _model_cache: dict = {}
-
-# Pre-compiled regex for stripping numbered prefixes from response lines
-_NUMBER_PREFIX_RE = re.compile(r"^\d+[\s]*[:.)\-]\s*")
-
 
 class GeminiQuotaExhausted(Exception):
     """All Gemini API keys have exhausted their quota."""
@@ -67,37 +63,6 @@ def _get_model(api_key: str, source_lang: str, target_lang: str,
     return _model_cache[cache_key]
 
 
-def _build_prompt(cues: List[Cue], source_lang: str, target_lang: str) -> str:
-    """Build the numbered translation prompt from cues."""
-    lines = []
-    for i, cue in enumerate(cues, 1):
-        # Encode multi-line cues as <br> for transport
-        text = cue.text.replace("\n", "<br>")
-        lines.append(f"{i}: {text}")
-    header = f"Translate from {source_lang} to {target_lang}:\n"
-    return header + "\n".join(lines)
-
-
-def _parse_response(response_text: str, expected_count: int) -> List[str]:
-    """Parse numbered response lines back into text strings."""
-    lines = response_text.strip().split("\n")
-    results = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # Strip leading number + colon/dot/paren prefix
-        cleaned = _NUMBER_PREFIX_RE.sub("", line)
-        # Decode <br> back to newlines
-        cleaned = cleaned.replace("<br>", "\n")
-        results.append(cleaned)
-    # If we got fewer results than expected, pad with empty strings
-    while len(results) < expected_count:
-        results.append("")
-    # If we got more, truncate
-    return results[:expected_count]
-
-
 def _translate_batch(
     api_keys: list,
     cues: List[Cue],
@@ -114,7 +79,7 @@ def _translate_batch(
     Returns (translated_strings, key_index) where key_index is the 0-based
     position within api_keys of the key that succeeded.
     """
-    prompt = _build_prompt(cues, source_lang, target_lang)
+    prompt = build_prompt(cues, source_lang, target_lang)
     models_to_try = [model]
     if model != FALLBACK_MODEL:
         models_to_try.append(FALLBACK_MODEL)
@@ -137,7 +102,7 @@ def _translate_batch(
                         break
                     if current_model != model:
                         log.info("Using fallback model %s", current_model)
-                    return _parse_response(response.text, len(cues)), pos
+                    return parse_response(response.text, len(cues)), pos
                 except ResourceExhausted as e:
                     if attempt == 0:
                         error_msg = str(e).lower()
