@@ -85,8 +85,11 @@ def _apply_hunspell(texts: List[str], source_texts: List[str]) -> Tuple[List[str
             if not bad["suggestions"]:
                 continue
             suggestion = bad["suggestions"][0]
+            if ' ' in suggestion:
+                log.debug("Rejecting '%s' -> '%s' (contains space) in line %d", word, suggestion, idx)
+                continue
             ratio = SequenceMatcher(None, word.lower(), suggestion.lower()).ratio()
-            if ratio < 0.6:
+            if ratio < 0.80:
                 log.debug("Rejecting '%s' -> '%s' (similarity %.2f) in line %d", word, suggestion, ratio, idx)
                 continue
             corrected = re.sub(r'\b' + re.escape(word) + r'\b', suggestion, corrected)

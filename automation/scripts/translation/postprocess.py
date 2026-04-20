@@ -20,6 +20,19 @@ _ENGLISH_PASSLIST = frozenset({
     "they", "been", "said", "each", "will", "into", "about",
     "after", "back", "down", "more", "only", "some", "that", "these",
     "this", "were", "your", "which",
+    # Proper nouns / brands
+    "youtuber", "youtube", "instagram", "tiktok", "twitter", "facebook",
+    "netflix", "spotify", "amazon", "google", "twitch", "reddit", "discord",
+    "whatsapp", "telegram", "zoom", "microsoft", "apple", "samsung", "sony",
+    "nintendo", "playstation", "xbox",
+    # Informal/slang English that survives translation
+    "bastard", "bitch", "asshole", "crap", "dude", "guys", "guy", "bro", "sis",
+    "lol", "omg", "wtf", "btw", "bruh", "nah", "yep", "yup", "nope", "eh",
+    "huh", "wow", "whoa", "ouch", "oops", "ugh", "shhh", "psst",
+    "mom", "dad", "mama", "papa", "bye",
+    # Common English verbs/adjectives that tend to leak through translation
+    "please", "thanks", "welcome", "sorry", "alright", "right", "wrong",
+    "nice", "sweet", "awesome", "fine", "hello", "hi",
 })
 
 SPANISH_PATTERN_FIXES = [
@@ -61,8 +74,11 @@ def apply_hunspell(texts: List[str], source_texts: List[str]) -> List[str]:
             if not bad["suggestions"]:
                 continue
             suggestion = bad["suggestions"][0]
+            if ' ' in suggestion:
+                log.debug("Rejecting '%s' -> '%s' (contains space) in line %d", word, suggestion, idx)
+                continue
             ratio = SequenceMatcher(None, word.lower(), suggestion.lower()).ratio()
-            if ratio < 0.6:
+            if ratio < 0.80:
                 log.debug("Rejecting '%s' -> '%s' (similarity %.2f) in line %d", word, suggestion, ratio, idx)
                 continue
             corrected = re.sub(r'\b' + re.escape(word) + r'\b', suggestion, corrected)
