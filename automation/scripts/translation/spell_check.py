@@ -12,6 +12,7 @@ _ASS_BLOCK_RE = re.compile(r"\{[^}]*\}")
 _ASS_TAG_RE = re.compile(r"\\(?:fn|fb|fi|fe)[^\\]*|\\[a-z]+\S*", re.IGNORECASE)
 _HUNSPELL_DICT = "es_ES"
 _HUNSPELL_DICT_EN = "en_US"
+_HUNSPELL_TIMEOUT = 120  # seconds — applies to both en_US and es_ES batch calls
 
 
 def _strip_ass_tags(text: str) -> str:
@@ -38,7 +39,7 @@ def _detect_english_survivors(words: List[str]) -> set:
         input_text = "\n".join(lowered)
         result = subprocess.run(
             ["hunspell", "-d", _HUNSPELL_DICT_EN, "-a"],
-            input=input_text, capture_output=True, text=True, timeout=30,
+            input=input_text, capture_output=True, text=True, timeout=_HUNSPELL_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         log.warning("hunspell (en_US) unavailable: %s", e)
@@ -82,7 +83,7 @@ def _run_hunspell_batch(words: List[str]) -> dict:
         input_text = "\n".join(words)
         result = subprocess.run(
             ["hunspell", "-d", _HUNSPELL_DICT, "-a"],
-            input=input_text, capture_output=True, text=True, timeout=30,
+            input=input_text, capture_output=True, text=True, timeout=_HUNSPELL_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         log.warning("hunspell unavailable: %s", e)
@@ -138,8 +139,8 @@ def validate_translated_cues(translated_texts: List[str],
     # untranslated English words as Spanish misspellings.
     english_survivors = _detect_english_survivors(sorted(all_unique_words))
     if english_survivors:
-        log.info("spell_check: %d English survivor(s) skipped: %s",
-                 len(english_survivors), sorted(english_survivors))
+        log.debug("spell_check: %d English survivor(s) skipped: %s",
+                  len(english_survivors), sorted(english_survivors))
 
     issues = []
     for i, words in enumerate(cue_words):

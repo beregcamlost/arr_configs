@@ -44,6 +44,37 @@ SPANISH_PATTERN_FIXES = [
 
 _DASH_FIX_RE = re.compile(r'(\w)\.\-\s*')
 
+_SURVIVOR_TOKEN_RE = re.compile(r"[A-Za-záéíóúüñ']+")
+
+_SPANISH_STOPWORDS = frozenset({
+    "de","el","la","los","las","no","en","es","a","al","se","me","te","lo","le",
+    "con","para","un","una","y","o","ha","ya","si","tan","mi","su","tu","era",
+    "eras","ser","soy","son","sea","fue","fui","fuera","del","por","que","qué",
+    "como","cómo","ni","nos","vos","ti","ella","ellas","ellos","él","muy","bien",
+    "bueno","mala","malo","grande","nuevo","viejo","solo","sólo","todo","toda",
+    "todos","todas","cada","di","he","hay","hoy","voy","vas","va","vamos","ven",
+    "ir","estar","ave","corona","presa","marinas","viva","favor","pronto",
+    "persona","personas","amigos","hombre","gran","sake","pasado","ayer",
+    "allí","aquí","esto","ese","esa","este","esta","eso","mas","más","pero",
+    "dos","tres","sí",
+})
+
+
+def _is_prefix_suffix_shift(word: str, suggestion: str) -> bool:
+    """Return True if suggestion is the word with 1-2 leading/trailing chars removed (or added).
+
+    Blocks semantic-shift corrections like Sostente->Ostente (drops leading S)
+    or Cantamos->Cantamo (drops trailing s). These are usually worse than the original.
+    Internal typo fixes (creaturas->criaturas) are not caught by this rule.
+    """
+    w = word.lower()
+    s = suggestion.lower()
+    if w == s:
+        return False
+    if abs(len(w) - len(s)) > 2:
+        return False
+    return w.startswith(s) or w.endswith(s) or s.startswith(w) or s.endswith(w)
+
 
 def apply_pattern_fixes(text: str, target_lang: str) -> str:
     if target_lang.lower() not in ("spanish", "español"):
@@ -78,8 +109,11 @@ def apply_hunspell(texts: List[str], source_texts: List[str]) -> List[str]:
                 log.debug("Rejecting '%s' -> '%s' (contains space) in line %d", word, suggestion, idx)
                 continue
             ratio = SequenceMatcher(None, word.lower(), suggestion.lower()).ratio()
-            if ratio < 0.80:
+            if ratio < 0.90:
                 log.debug("Rejecting '%s' -> '%s' (similarity %.2f) in line %d", word, suggestion, ratio, idx)
+                continue
+            if _is_prefix_suffix_shift(word, suggestion):
+                log.debug("Rejecting '%s' -> '%s' (prefix/suffix shift) in line %d", word, suggestion, idx)
                 continue
             corrected = re.sub(r'\b' + re.escape(word) + r'\b', suggestion, corrected)
             log.info("Fixed '%s' -> '%s' (similarity %.2f) in line %d", word, suggestion, ratio, idx)
@@ -105,13 +139,41 @@ def apply_local_proofreader(
     if target_lang.lower() not in ("spanish", "español"):
         return texts
 
-    from translation.spell_check import validate_translated_cues
+    from translation.spell_check import validate_translated_cues, _detect_english_survivors
 
     issues = validate_translated_cues(texts, source_texts)
-    if not issues:
+    es_flagged = {issue["index"] for issue in issues}
+
+    # Collect all unique words across all translated texts for English survivor detection
+    all_words = list({
+        tok.lower()
+        for text in texts
+        for tok in _SURVIVOR_TOKEN_RE.findall(text)
+    })
+    english_survivors = _detect_english_survivors(all_words)
+    # Filter out Spanish stopwords that hunspell-en wrongly marks as valid English
+    actionable_survivors = english_survivors - _SPANISH_STOPWORDS
+
+    # Flag cues that contain English survivor tokens (untranslated English words)
+    survivor_flagged: set = set()
+    if actionable_survivors:
+        for i, text in enumerate(texts):
+            tokens = {t.lower() for t in _SURVIVOR_TOKEN_RE.findall(text)}
+            if tokens & actionable_survivors:
+                survivor_flagged.add(i)
+
+    survivor_only = survivor_flagged - es_flagged
+    flagged_indices = sorted(es_flagged | survivor_flagged)
+
+    if not flagged_indices:
         return texts
 
-    flagged_indices = [issue["index"] for issue in issues]
+    log.info(
+        "proofreader: %d cues flagged by hunspell-es, %d additional by English survivors (%d actionable)",
+        len(es_flagged),
+        len(survivor_only),
+        len(actionable_survivors),
+    )
     log.debug("apply_local_proofreader: %d flagged cue(s): %s", len(flagged_indices), flagged_indices)
 
     from translation.local_proofreader import proofread_cues

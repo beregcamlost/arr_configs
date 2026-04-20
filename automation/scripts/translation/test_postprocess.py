@@ -68,7 +68,7 @@ def _apply_name_corrections(text: str) -> Tuple[str, int]:
 
 def _apply_hunspell(texts: List[str], source_texts: List[str]) -> Tuple[List[str], List[int]]:
     """Apply hunspell suggestions to texts. Returns (corrected_list, per_cue_change_counts)."""
-    from translation.postprocess import _ENGLISH_PASSLIST
+    from translation.postprocess import _ENGLISH_PASSLIST, _is_prefix_suffix_shift
 
     issues = validate_translated_cues(texts, source_texts)
     result = list(texts)
@@ -89,8 +89,11 @@ def _apply_hunspell(texts: List[str], source_texts: List[str]) -> Tuple[List[str
                 log.debug("Rejecting '%s' -> '%s' (contains space) in line %d", word, suggestion, idx)
                 continue
             ratio = SequenceMatcher(None, word.lower(), suggestion.lower()).ratio()
-            if ratio < 0.80:
+            if ratio < 0.90:
                 log.debug("Rejecting '%s' -> '%s' (similarity %.2f) in line %d", word, suggestion, ratio, idx)
+                continue
+            if _is_prefix_suffix_shift(word, suggestion):
+                log.debug("Rejecting '%s' -> '%s' (prefix/suffix shift) in line %d", word, suggestion, idx)
                 continue
             corrected = re.sub(r'\b' + re.escape(word) + r'\b', suggestion, corrected)
             changes[idx] += 1
