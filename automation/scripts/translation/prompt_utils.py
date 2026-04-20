@@ -7,6 +7,22 @@ from translation.srt_parser import Cue
 
 _NUMBER_PREFIX_RE = re.compile(r"^\d+[\s]*[:.)\-]\s*")
 
+_FULL_PARENTHETICAL_RE = re.compile(r'^\s*[\(\[].*[\)\]]\s*$')
+_TRAILING_NOTE_RE = re.compile(
+    r'\s*[\(\[][^)\]]*\b(?:translation|incomplete|note|audio|unclear|inaudible|untranslated|no[ _-]?context|unable|n/a)\b[^)\]]*[\)\]]\s*$',
+    re.IGNORECASE,
+)
+
+
+def _strip_translator_notes(text: str) -> str:
+    """Remove parenthetical translator notes from Ollama output without breaking real dialogue."""
+    # Full-line parenthetical: drop entire line
+    if _FULL_PARENTHETICAL_RE.match(text):
+        return ""
+    # Trailing English-note parenthetical at end of line
+    cleaned = _TRAILING_NOTE_RE.sub('', text)
+    return cleaned.strip() or text  # if strip emptied everything, fall back to original
+
 
 def build_prompt(cues: List[Cue], source_lang: str, target_lang: str) -> str:
     """Build the numbered translation prompt from cues."""
@@ -28,6 +44,7 @@ def parse_response(response_text: str, expected_count: int) -> List[str]:
             continue
         cleaned = _NUMBER_PREFIX_RE.sub("", line)
         cleaned = cleaned.replace("<br>", "\n")
+        cleaned = _strip_translator_notes(cleaned)
         results.append(cleaned)
     while len(results) < expected_count:
         results.append("")
