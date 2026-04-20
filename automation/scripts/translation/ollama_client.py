@@ -91,9 +91,14 @@ def _is_effectively_empty(text: str) -> bool:
     return not text or not text.strip() or bool(_EMPTY_RE.match(text))
 
 
-def _apply_corrections(target_lang: str, source_texts: List[str], translated_texts: List[str]) -> List[str]:
+def _apply_corrections(target_lang: str, source_texts: List[str], translated_texts: List[str], base_url: str) -> List[str]:
     from translation.postprocess import postprocess_translations
-    return postprocess_translations(translated_texts, source_texts, target_lang)
+    import os
+    proofread_enabled = os.environ.get("TRANSLATION_PROOFREAD_ENABLED", "1") == "1"
+    return postprocess_translations(
+        translated_texts, source_texts, target_lang,
+        proofread_base_url=base_url, proofread_enabled=proofread_enabled,
+    )
 
 
 def _retry_empty_cue(
@@ -151,7 +156,7 @@ def translate_srt_cues(
                 retried = _retry_empty_cue(base_url, cue, source_lang, target_lang, model, DEFAULT_TIMEOUT)
                 if retried:
                     translated_texts[j] = retried
-        translated_texts = _apply_corrections(target_lang, all_source_texts, translated_texts)
+        translated_texts = _apply_corrections(target_lang, all_source_texts, translated_texts, base_url)
         return [
             Cue(index=cue.index, start=cue.start, end=cue.end, text=text)
             for cue, text in zip(batch, translated_texts)
@@ -172,7 +177,7 @@ def translate_srt_cues(
                 retried = _retry_empty_cue(base_url, cue, source_lang, target_lang, model, DEFAULT_TIMEOUT)
                 if retried:
                     translated_texts[j] = retried
-        translated_texts = _apply_corrections(target_lang, all_source_texts, translated_texts)
+        translated_texts = _apply_corrections(target_lang, all_source_texts, translated_texts, base_url)
         results.append((batch, translated_texts))
 
     translated_cues = []

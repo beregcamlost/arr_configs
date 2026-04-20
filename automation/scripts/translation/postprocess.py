@@ -3,7 +3,7 @@
 import re
 import logging
 from difflib import SequenceMatcher
-from typing import List
+from typing import List, Optional
 
 log = logging.getLogger(__name__)
 
@@ -87,11 +87,50 @@ def apply_hunspell(texts: List[str], source_texts: List[str]) -> List[str]:
     return result
 
 
+def apply_local_proofreader(
+    texts: List[str],
+    source_texts: List[str],
+    target_lang: str,
+    base_url: Optional[str] = None,
+    enabled: bool = True,
+) -> List[str]:
+    """After hunspell, send remaining flagged cues through the local Ollama proofreader.
+
+    'Flagged' = cues that still have hunspell issues after the hunspell pass.
+    Only runs for Spanish target. Skipped when disabled or no base_url provided.
+    """
+    if not enabled or not base_url:
+        return texts
+
+    if target_lang.lower() not in ("spanish", "español"):
+        return texts
+
+    from translation.spell_check import validate_translated_cues
+
+    issues = validate_translated_cues(texts, source_texts)
+    if not issues:
+        return texts
+
+    flagged_indices = [issue["index"] for issue in issues]
+    log.debug("apply_local_proofreader: %d flagged cue(s): %s", len(flagged_indices), flagged_indices)
+
+    from translation.local_proofreader import proofread_cues
+    return proofread_cues(
+        source_texts=source_texts,
+        translated_texts=texts,
+        indices=flagged_indices,
+        base_url=base_url,
+    )
+
+
 def postprocess_translations(
     translated_texts: List[str],
     source_texts: List[str],
     target_lang: str,
+    proofread_base_url: Optional[str] = None,
+    proofread_enabled: bool = True,
 ) -> List[str]:
     result = [apply_pattern_fixes(t, target_lang) for t in translated_texts]
     result = apply_hunspell(result, source_texts)
+    result = apply_local_proofreader(result, source_texts, target_lang, proofread_base_url, proofread_enabled)
     return result
