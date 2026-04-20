@@ -1,8 +1,10 @@
 """Benchmark post-processing pipeline for Ollama subtitle translation."""
 
 import logging
+import re
 import sys
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -66,6 +68,8 @@ def _apply_name_corrections(text: str) -> Tuple[str, int]:
 
 def _apply_hunspell(texts: List[str], source_texts: List[str]) -> Tuple[List[str], List[int]]:
     """Apply hunspell suggestions to texts. Returns (corrected_list, per_cue_change_counts)."""
+    from translation.postprocess import _ENGLISH_PASSLIST
+
     issues = validate_translated_cues(texts, source_texts)
     result = list(texts)
     changes = [0] * len(texts)
@@ -74,9 +78,19 @@ def _apply_hunspell(texts: List[str], source_texts: List[str]) -> Tuple[List[str
         idx = issue["index"]
         corrected = result[idx]
         for bad in issue["bad_words"]:
-            if bad["suggestions"]:
-                corrected = corrected.replace(bad["word"], bad["suggestions"][0])
-                changes[idx] += 1
+            word = bad["word"]
+            if word.lower() in _ENGLISH_PASSLIST:
+                log.debug("Skipping English word '%s' in line %d", word, idx)
+                continue
+            if not bad["suggestions"]:
+                continue
+            suggestion = bad["suggestions"][0]
+            ratio = SequenceMatcher(None, word.lower(), suggestion.lower()).ratio()
+            if ratio < 0.6:
+                log.debug("Rejecting '%s' -> '%s' (similarity %.2f) in line %d", word, suggestion, ratio, idx)
+                continue
+            corrected = re.sub(r'\b' + re.escape(word) + r'\b', suggestion, corrected)
+            changes[idx] += 1
         result[idx] = corrected
 
     return result, changes
