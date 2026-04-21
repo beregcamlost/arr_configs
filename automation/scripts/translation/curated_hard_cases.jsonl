@@ -1,0 +1,801 @@
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a famous YouTuber.", "output": "Es un YouTuber famoso.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She started her Instagram account last year.", "output": "Empezó su cuenta de Instagram el año pasado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Did you see his TikTok video?", "output": "¿Viste su video de TikTok?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Netflix just dropped a new series.", "output": "Netflix acaba de estrenar una nueva serie.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm listening to Spotify.", "output": "Estoy escuchando Spotify.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You can order it on Amazon.", "output": "Puedes pedirlo en Amazon.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Microsoft released a new update.", "output": "Microsoft lanzó una nueva actualización.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a big YouTuber with millions of subscribers.", "output": "Es una YouTuber muy popular con millones de suscriptores.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He posted it on Instagram.", "output": "Lo publicó en Instagram.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That TikTok went viral.", "output": "Ese TikTok se volvió viral.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She has a YouTube channel about cooking.", "output": "Tiene un canal de YouTube sobre cocina.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Are you watching it on Netflix?", "output": "¿Lo estás viendo en Netflix?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He works at Google.", "output": "Trabaja en Google.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She messaged me on WhatsApp.", "output": "Me mandó un mensaje por WhatsApp.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They found it on Wikipedia.", "output": "Lo encontraron en Wikipedia.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "His Twitter account got suspended.", "output": "Le suspendieron la cuenta de Twitter.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Download the app on your iPhone.", "output": "Descarga la aplicación en tu iPhone.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's streaming on Twitch.", "output": "Está haciendo streaming en Twitch.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's a PayPal transfer.", "output": "Es una transferencia por PayPal.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He drives a Tesla.", "output": "Conduce un Tesla.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I met her at a Marvel event.", "output": "La conocí en un evento de Marvel.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "His character is from the DC universe.", "output": "Su personaje es del universo DC.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She plays Fortnite every day.", "output": "Juega Fortnite todos los días.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Have you tried Minecraft?", "output": "¿Has probado Minecraft?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's from The Legend of Zelda.", "output": "Eso es de The Legend of Zelda.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a Call of Duty streamer.", "output": "Es un streamer de Call of Duty.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She works at Disney.", "output": "Trabaja en Disney.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's from a Star Wars movie.", "output": "Eso es de una película de Star Wars.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's obsessed with Harry Potter.", "output": "Está obsesionado con Harry Potter.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She cosplays as Wonder Woman.", "output": "Se disfraza de Wonder Woman.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Send me an email.", "output": "Mándame un email.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I need to update the software.", "output": "Necesito actualizar el software.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Check the hardware first.", "output": "Primero revisa el hardware.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's available on the web.", "output": "Está disponible en la web.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You can do it online.", "output": "Puedes hacerlo online.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Make a backup first.", "output": "Haz un backup primero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Is the WiFi working?", "output": "¿Funciona el WiFi?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Open the browser.", "output": "Abre el browser.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The app crashed.", "output": "La app se cayó.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Reboot the server.", "output": "Reinicia el server.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's a startup.", "output": "Es una startup.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We need more storage.", "output": "Necesitamos más storage.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's a big download.", "output": "Es una descarga grande.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The streaming quality is bad.", "output": "La calidad del streaming es mala.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Check your spam folder.", "output": "Revisa tu carpeta de spam.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It requires a login.", "output": "Requiere un login.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Use the laptop.", "output": "Usa el laptop.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's on my tablet.", "output": "Está en mi tablet.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's offline.", "output": "Está offline.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That was a great podcast.", "output": "Ese podcast estuvo genial.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Damn it.", "output": "Maldita sea.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Damn it all.", "output": "Maldita sea todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Oh, damn it!", "output": "¡Maldita sea!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Fuck!", "output": "¡Mierda!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What the fuck is this?", "output": "¿Qué mierda es esto?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Shit.", "output": "Mierda.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Holy shit!", "output": "¡Dios mío!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What the hell?", "output": "¿Qué diablos?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What the hell is going on?", "output": "¿Qué diablos está pasando?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Oh my God.", "output": "Dios mío.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Oh my God, are you serious?", "output": "Dios mío, ¿en serio?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hell yeah!", "output": "¡Claro que sí!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hell yeah, let's do it!", "output": "¡Claro que sí, hagámoslo!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Son of a bitch.", "output": "Hijo de puta.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You bastard!", "output": "¡Bastardo!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Crap!", "output": "¡Maldición!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Screw this.", "output": "Al diablo con esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Get the hell out of here.", "output": "Sal de aquí de una vez.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What the hell were you thinking?", "output": "¿En qué diablos estabas pensando?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "For God's sake!", "output": "¡Por el amor de Dios!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Oh hell.", "output": "Ay, no.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was excited.", "output": "Ella estaba emocionada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was very tired.", "output": "Ella estaba muy cansada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She is so brave.", "output": "Ella es muy valiente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She looked beautiful.", "output": "Ella estaba hermosa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She seemed confused.", "output": "Ella parecía confundida.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was scared.", "output": "Ella estaba asustada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She felt betrayed.", "output": "Ella se sintió traicionada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was wrong.", "output": "Ella estaba equivocada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was ready.", "output": "Ella estaba lista.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was surprised.", "output": "Ella estaba sorprendida.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was excited.", "output": "Él estaba emocionado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was very tired.", "output": "Él estaba muy cansado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He is so brave.", "output": "Él es muy valiente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He looked confident.", "output": "Él parecía seguro de sí mismo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He seemed confused.", "output": "Él parecía confundido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was scared.", "output": "Él estaba asustado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He felt betrayed.", "output": "Él se sintió traicionado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was wrong.", "output": "Él estaba equivocado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was ready.", "output": "Él estaba listo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was surprised.", "output": "Él estaba sorprendido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They were all excited.", "output": "Todos estaban emocionados.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The children were happy.", "output": "Los niños estaban felices.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The girls were ready.", "output": "Las chicas estaban listas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The boys were confused.", "output": "Los chicos estaban confundidos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The doctor was a woman.", "output": "La doctora era una mujer.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a good doctor.", "output": "Ella es una buena doctora.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a good doctor.", "output": "Él es un buen médico.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a talented artist.", "output": "Ella es una artista talentosa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a talented artist.", "output": "Él es un artista talentoso.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's my best friend.", "output": "Ella es mi mejor amiga.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's my best friend.", "output": "Él es mi mejor amigo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's been elected president.", "output": "Ella ha sido elegida presidenta.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's been elected president.", "output": "Él ha sido elegido presidente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hello, how are you?", "output": "Hola, ¿cómo estás?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What's up?", "output": "¿Qué tal?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Good morning.", "output": "Buenos días.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Good afternoon.", "output": "Buenas tardes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Good evening.", "output": "Buenas noches.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Good night.", "output": "Buenas noches.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Thank you.", "output": "Gracias.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Thank you very much.", "output": "Muchas gracias.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're welcome.", "output": "De nada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm sorry.", "output": "Lo siento.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm so sorry.", "output": "Lo siento mucho.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Excuse me.", "output": "Perdona.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Please.", "output": "Por favor.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Nice to meet you.", "output": "Mucho gusto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "See you later.", "output": "Hasta luego.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "See you tomorrow.", "output": "Hasta mañana.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Take care.", "output": "Cuídate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Have a good day.", "output": "Que tengas un buen día.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Welcome.", "output": "Bienvenido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Congratulations!", "output": "¡Felicidades!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Happy birthday!", "output": "¡Feliz cumpleaños!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Is everything okay?", "output": "¿Está todo bien?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Are you serious?", "output": "¿Es en serio?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What happened?", "output": "¿Qué pasó?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What's wrong?", "output": "¿Qué pasa?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Are you okay?", "output": "¿Estás bien?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Do you understand?", "output": "¿Entiendes?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Are you sure?", "output": "¿Estás seguro?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Are you coming?", "output": "¿Vienes?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Can you hear me?", "output": "¿Me escuchas?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Do you know what this is?", "output": "¿Sabes qué es esto?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Have you seen him?", "output": "¿Lo has visto?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Is that true?", "output": "¿Es verdad?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What do you think?", "output": "¿Qué te parece?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Did you do it?", "output": "¿Lo hiciste?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I don't know.", "output": "No sé.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I don't care.", "output": "No me importa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I don't want to.", "output": "No quiero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Nothing happened.", "output": "No pasó nada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Nothing's wrong.", "output": "No pasa nada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I don't understand.", "output": "No entiendo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I can't do it.", "output": "No puedo hacerlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I didn't do anything.", "output": "No hice nada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I can't believe this.", "output": "No puedo creer esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I don't think so.", "output": "No creo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm not sure.", "output": "No estoy seguro.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I have no idea.", "output": "No tengo ni idea.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's not possible.", "output": "Eso no es posible.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I didn't see it.", "output": "No lo vi.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Nobody told me.", "output": "Nadie me dijo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Break a leg.", "output": "¡Mucha suerte!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's raining cats and dogs.", "output": "Está lloviendo a cántaros.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Piece of cake.", "output": "Pan comido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hit the road.", "output": "Ponerse en camino.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's not rocket science.", "output": "No es ninguna ciencia.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Bite the bullet.", "output": "Aguantar el tipo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's the last straw.", "output": "Es el colmo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Once in a blue moon.", "output": "De vez en cuando.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Spill the beans.", "output": "Irse de la lengua.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hit the nail on the head.", "output": "Dar en el clavo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Kill two birds with one stone.", "output": "Matar dos pájaros de un tiro.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The ball is in your court.", "output": "Te toca a ti.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Under the weather.", "output": "Sintiéndose mal.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't beat around the bush.", "output": "No te andes por las ramas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let the cat out of the bag.", "output": "Descubrir el pastel.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Cost an arm and a leg.", "output": "Costar un ojo de la cara.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Speak of the devil.", "output": "Hablando del rey de Roma.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Yeah.", "output": "Sí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "No.", "output": "No.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What?", "output": "¿Qué?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Really?", "output": "¿En serio?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Oh.", "output": "Ah.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hey.", "output": "Oye.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Okay.", "output": "Bien.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Sure.", "output": "Claro.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Right.", "output": "Exacto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Fine.", "output": "Está bien.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Wait.", "output": "Espera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Stop.", "output": "Para.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Go.", "output": "Ve.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Come.", "output": "Ven.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Run!", "output": "¡Corre!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Help!", "output": "¡Ayuda!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Look.", "output": "Mira.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Listen.", "output": "Escucha.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Please!", "output": "¡Por favor!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Enough.", "output": "Basta.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Perfect.", "output": "Perfecto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Impossible.", "output": "Imposible.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I understand.", "output": "Entiendo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I agree.", "output": "Estoy de acuerdo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I love you.", "output": "Te quiero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I miss you.", "output": "Te echo de menos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I need help.", "output": "Necesito ayuda.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm here.", "output": "Aquí estoy.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm fine.", "output": "Estoy bien.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm ready.", "output": "Estoy listo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm scared.", "output": "Tengo miedo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm tired.", "output": "Estoy cansado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm hungry.", "output": "Tengo hambre.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let's go.", "output": "Vamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Come on.", "output": "Vamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Follow me.", "output": "Sígueme.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Trust me.", "output": "Confía en mí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Believe me.", "output": "Créeme.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Forget it.", "output": "Olvídalo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Leave me alone.", "output": "Déjame en paz.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Get out.", "output": "Sal de aquí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Shut up.", "output": "Cállate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Back off.", "output": "Aléjate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Move.", "output": "Muévete.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hurry up.", "output": "Date prisa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Be quiet.", "output": "Silencio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't move.", "output": "No te muevas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't worry.", "output": "No te preocupes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't lie to me.", "output": "No me mientas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't touch me.", "output": "No me toques.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You did this.", "output": "Tú hiciste esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You knew about this.", "output": "Sabías esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You lied to me.", "output": "Me mentiste.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is your fault.", "output": "Es tu culpa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You had one job.", "output": "Solo tenías que hacer una cosa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We need to talk.", "output": "Tenemos que hablar.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "There's something I have to tell you.", "output": "Hay algo que debo decirte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I have a bad feeling about this.", "output": "Tengo un mal presentimiento.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is getting out of hand.", "output": "Esto se está yendo de las manos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're running out of time.", "output": "Se nos acaba el tiempo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I can explain.", "output": "Puedo explicarlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's not what it looks like.", "output": "No es lo que parece.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Give me a chance.", "output": "Dame una oportunidad.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I was trying to protect you.", "output": "Intentaba protegerte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I thought you trusted me.", "output": "Creía que confiabas en mí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Things are not always what they seem.", "output": "Las cosas no siempre son lo que parecen.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I had no choice.", "output": "No tuve opción.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You should have told me sooner.", "output": "Deberías haberme dicho antes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I did what I had to do.", "output": "Hice lo que tuve que hacer.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's not fair.", "output": "No es justo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's too late now.", "output": "Ya es demasiado tarde.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Are you with me?", "output": "¿Estás conmigo?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Where were you?", "output": "¿Dónde estabas?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Who did this?", "output": "¿Quién hizo esto?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "How did you find me?", "output": "¿Cómo me encontraste?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Why are you doing this?", "output": "¿Por qué haces esto?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What are you hiding?", "output": "¿Qué estás ocultando?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "When did you know?", "output": "¿Cuándo lo supiste?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "How long have you known?", "output": "¿Cuánto tiempo llevas sabiéndolo?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What are you talking about?", "output": "¿De qué hablas?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Who told you that?", "output": "¿Quién te dijo eso?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Where is she now?", "output": "¿Dónde está ella ahora?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What do you want from me?", "output": "¿Qué quieres de mí?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Why didn't you tell me?", "output": "¿Por qué no me lo dijiste?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "How could you do this?", "output": "¿Cómo pudiste hacer esto?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What were you thinking?", "output": "¿En qué estabas pensando?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "How long has this been going on?", "output": "¿Cuánto tiempo lleva esto pasando?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I know what you did.", "output": "Sé lo que hiciste.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You knew all along.", "output": "Lo sabías desde el principio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I've been waiting for this.", "output": "Estaba esperando esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Something doesn't add up.", "output": "Algo no cuadra.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's hiding something.", "output": "Está ocultando algo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She can't be trusted.", "output": "No se puede confiar en ella.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Everything will be fine.", "output": "Todo va a estar bien.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's going to be okay.", "output": "Todo va a salir bien.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I promise.", "output": "Te lo prometo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You can count on me.", "output": "Puedes contar conmigo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll always be here for you.", "output": "Siempre estaré aquí para ti.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're in this together.", "output": "Estamos juntos en esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're not alone.", "output": "No estás solo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I've got your back.", "output": "Te cubro las espaldas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll take care of it.", "output": "Yo me encargo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Leave it to me.", "output": "Déjamelo a mí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I can handle this.", "output": "Puedo con esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let me help you.", "output": "Déjame ayudarte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm on your side.", "output": "Estoy de tu lado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We'll figure it out.", "output": "Lo resolveremos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It'll all make sense soon.", "output": "Pronto todo tendrá sentido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "There has to be another way.", "output": "Tiene que haber otra manera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What's the plan?", "output": "¿Cuál es el plan?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is insane.", "output": "Esto es una locura.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This changes everything.", "output": "Esto lo cambia todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I didn't sign up for this.", "output": "Para esto no me apunté.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Get it together.", "output": "Espabila.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not on my watch.", "output": "Mientras yo esté aquí, no.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This isn't over.", "output": "Esto no ha terminado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's now or never.", "output": "Es ahora o nunca.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We have to move now.", "output": "Tenemos que movernos ahora.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Stay behind me.", "output": "Quédate detrás de mí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't let them see you.", "output": "No dejes que te vean.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We've been compromised.", "output": "Nos han descubierto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's a trap!", "output": "¡Es una trampa!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Get down!", "output": "¡Al suelo!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't shoot!", "output": "¡No dispares!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Drop the weapon.", "output": "Suelta el arma.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Put your hands up.", "output": "Manos arriba.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Freeze!", "output": "¡Alto!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Call the police!", "output": "¡Llama a la policía!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Call an ambulance.", "output": "Llama a una ambulancia.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Is he breathing?", "output": "¿Está respirando?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She needs a doctor.", "output": "Ella necesita un médico.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I think I need to sit down.", "output": "Creo que necesito sentarme.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He passed out.", "output": "Se desmayó.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's not responding.", "output": "No responde.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're losing him.", "output": "Lo estamos perdiendo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's going to make it.", "output": "Va a lograrlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I did the right thing.", "output": "Hice lo correcto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I made a mistake.", "output": "Cometí un error.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I should have known better.", "output": "Debería haberlo sabido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's not your fault.", "output": "No es tu culpa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You did your best.", "output": "Hiciste lo que pudiste.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "There's nothing more you could have done.", "output": "No podías haber hecho más.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Move on.", "output": "Sigue adelante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let it go.", "output": "Suéltalo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's in the past.", "output": "Eso es el pasado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You can't change what happened.", "output": "No puedes cambiar lo que pasó.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Look at what you've done.", "output": "Mira lo que has hecho.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You should be ashamed.", "output": "Deberías avergonzarte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm proud of you.", "output": "Estoy orgulloso de ti.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm proud of her.", "output": "Estoy orgulloso de ella.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's proud of him.", "output": "Ella está orgullosa de él.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They were proud of their son.", "output": "Estaban orgullosos de su hijo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They were proud of their daughter.", "output": "Estaban orgullosos de su hija.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a nurse.", "output": "Ella es enfermera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a nurse.", "output": "Él es enfermero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a lawyer.", "output": "Ella es abogada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a lawyer.", "output": "Él es abogado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's an engineer.", "output": "Ella es ingeniera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's an engineer.", "output": "Él es ingeniero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a teacher.", "output": "Ella es maestra.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a teacher.", "output": "Él es maestro.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a scientist.", "output": "Ella es científica.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a scientist.", "output": "Él es científico.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's the detective in charge.", "output": "Ella es la detective a cargo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's the detective in charge.", "output": "Él es el detective a cargo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's an excellent student.", "output": "Ella es una excelente estudiante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's an excellent student.", "output": "Él es un excelente estudiante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was hired as a consultant.", "output": "La contrataron como consultora.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was hired as a consultant.", "output": "Lo contrataron como consultor.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The suspect was arrested.", "output": "El sospechoso fue detenido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was arrested.", "output": "Ella fue detenida.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was released from prison.", "output": "Él fue puesto en libertad.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She was released from prison.", "output": "Ella fue puesta en libertad.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's guilty.", "output": "Él es culpable.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's innocent.", "output": "Ella es inocente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm done.", "output": "Terminé.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's over.", "output": "Se acabó.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're done here.", "output": "Aquí hemos terminado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's enough.", "output": "Ya es suficiente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm out of here.", "output": "Me voy de aquí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Good luck.", "output": "Buena suerte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Good job.", "output": "Buen trabajo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Well done.", "output": "Bien hecho.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Impressive.", "output": "Impresionante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Unbelievable.", "output": "Increíble.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Incredible.", "output": "Increíble.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Brilliant.", "output": "Brillante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Pathetic.", "output": "Patético.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Disgusting.", "output": "Asqueroso.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is all your fault.", "output": "Todo esto es culpa tuya.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You ruined everything.", "output": "Lo arruinaste todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "How dare you.", "output": "¿Cómo te atreves?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You have no idea what you've done.", "output": "No tienes idea de lo que has hecho.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is bigger than both of us.", "output": "Esto es más grande que nosotros dos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't play innocent with me.", "output": "No te hagas el inocente conmigo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You played me.", "output": "Me manipulaste.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I trusted you.", "output": "Confiaba en ti.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I thought you were different.", "output": "Creía que eras diferente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're just like the rest of them.", "output": "Eres igual que los demás.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I can't do this anymore.", "output": "Ya no puedo con esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I give up.", "output": "Me rindo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I quit.", "output": "Lo dejo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm done fighting.", "output": "Dejo de pelear.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She never gave up.", "output": "Ella nunca se rindió.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He never gave up.", "output": "Él nunca se rindió.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Never give up.", "output": "Nunca te rindas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Keep going.", "output": "Sigue adelante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Keep trying.", "output": "Sigue intentándolo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't stop now.", "output": "No pares ahora.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You can do it.", "output": "Puedes hacerlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You've got this.", "output": "Tú puedes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Stay strong.", "output": "Sé fuerte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We can still fix this.", "output": "Todavía podemos arreglarlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's not too late.", "output": "No es demasiado tarde.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "There's still hope.", "output": "Todavía hay esperanza.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Nothing is lost yet.", "output": "Todavía no se ha perdido todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm not giving up on you.", "output": "No me voy a rendir contigo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Remember why we started.", "output": "Recuerda por qué empezamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "One more chance.", "output": "Una oportunidad más.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What's on your mind?", "output": "¿En qué estás pensando?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You look like you've seen a ghost.", "output": "Pareces haber visto un fantasma.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Are you listening to me?", "output": "¿Me estás escuchando?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Pay attention.", "output": "Presta atención.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Focus.", "output": "Concéntrate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Think about what you're saying.", "output": "Piensa en lo que dices.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Choose your words carefully.", "output": "Elige bien tus palabras.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Watch your mouth.", "output": "Cuida lo que dices.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Mind your own business.", "output": "Métete en tus asuntos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Stay out of this.", "output": "No te metas en esto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This doesn't concern you.", "output": "Esto no te concierne.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "None of your business.", "output": "No es asunto tuyo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's between me and her.", "output": "Eso es entre ella y yo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll handle this myself.", "output": "Me encargo yo solo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I don't need your help.", "output": "No necesito tu ayuda.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're wasting my time.", "output": "Estás perdiendo mi tiempo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Get to the point.", "output": "Ve al grano.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Long story short.", "output": "En resumen.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "To make a long story short.", "output": "Para resumir.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The bottom line is.", "output": "En definitiva.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "At the end of the day.", "output": "Al fin y al cabo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "When push comes to shove.", "output": "A la hora de la verdad.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let's face it.", "output": "Seamos sinceros.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "To be honest.", "output": "Para ser honesto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "If you ask me.", "output": "En mi opinión.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "For what it's worth.", "output": "Por lo que vale.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Between you and me.", "output": "Entre tú y yo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Off the record.", "output": "En confianza.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "On second thought.", "output": "Pensándolo bien.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "First things first.", "output": "Lo primero es lo primero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Better safe than sorry.", "output": "Más vale prevenir.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Easier said than done.", "output": "Del dicho al hecho hay un buen trecho.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Think fast.", "output": "Piensa rápido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Act natural.", "output": "Actúa con naturalidad.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Play it cool.", "output": "Tranquilo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't panic.", "output": "No te pongas nervioso.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Stay calm.", "output": "Cálmate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Easy now.", "output": "Con calma.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Take it easy.", "output": "Tranquilo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Deep breath.", "output": "Respira hondo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Relax.", "output": "Relájate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Calm down.", "output": "Cálmate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I've seen worse.", "output": "He visto cosas peores.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I've been through worse.", "output": "He pasado por cosas peores.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It could be worse.", "output": "Podría ser peor.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "At least we're alive.", "output": "Al menos estamos vivos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's the spirit.", "output": "Así se hace.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Now we're talking.", "output": "Ahora sí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's what I'm talking about.", "output": "De eso se trata.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Exactly what I needed.", "output": "Justo lo que necesitaba.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is it.", "output": "Es este.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Here we go.", "output": "Allá vamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Here goes nothing.", "output": "Allá vamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Ready or not.", "output": "Listos o no.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "No turning back.", "output": "No hay vuelta atrás.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "There's no going back.", "output": "No hay vuelta atrás.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "All or nothing.", "output": "Todo o nada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Do or die.", "output": "O lo hacemos o lo hacemos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Against all odds.", "output": "Contra todo pronóstico.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Again.", "output": "Otra vez.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Once more.", "output": "Una vez más.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Try again.", "output": "Inténtalo otra vez.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Do it again.", "output": "Hazlo otra vez.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "One more time.", "output": "Una vez más.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Now what?", "output": "¿Y ahora qué?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What next?", "output": "¿Qué sigue?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What now?", "output": "¿Qué hacemos ahora?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What am I supposed to do?", "output": "¿Qué se supone que debo hacer?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What was that?", "output": "¿Qué fue eso?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Did you hear that?", "output": "¿Escuchaste eso?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Did you see that?", "output": "¿Viste eso?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Something's wrong.", "output": "Algo está mal.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "There's someone out there.", "output": "Hay alguien ahí afuera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I have a bad feeling.", "output": "Tengo un mal presentimiento.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Something feels off.", "output": "Algo no está bien.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This place gives me the creeps.", "output": "Este lugar me da escalofríos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I knew it.", "output": "Lo sabía.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I knew this would happen.", "output": "Sabía que esto pasaría.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Of course.", "output": "Por supuesto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Obviously.", "output": "Obviamente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Naturally.", "output": "Naturalmente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Absolutely.", "output": "Absolutamente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Definitely.", "output": "Definitivamente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Exactly.", "output": "Exactamente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Precisely.", "output": "Precisamente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Certainly.", "output": "Claro que sí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Of course not.", "output": "Claro que no.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not at all.", "output": "En absoluto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Never.", "output": "Nunca.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not a chance.", "output": "Ni hablar.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "No way.", "output": "De ninguna manera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Out of the question.", "output": "Ni pensarlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Forget it.", "output": "Olvídalo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not in a million years.", "output": "Ni en un millón de años.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Over my dead body.", "output": "Por encima de mi cadáver.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not if I can help it.", "output": "No si puedo evitarlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Maybe.", "output": "Quizás.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Perhaps.", "output": "Tal vez.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I suppose.", "output": "Supongo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I guess.", "output": "Supongo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Possibly.", "output": "Posiblemente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "More or less.", "output": "Más o menos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Kind of.", "output": "En cierta forma.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Sort of.", "output": "Más o menos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not really.", "output": "No del todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It depends.", "output": "Depende.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hard to say.", "output": "Difícil decirlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Time will tell.", "output": "El tiempo dirá.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We'll see.", "output": "Ya veremos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm working on it.", "output": "Estoy trabajando en ello.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Give me a minute.", "output": "Dame un minuto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Just a second.", "output": "Solo un segundo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hold on.", "output": "Espera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm almost done.", "output": "Ya casi termino.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I need more time.", "output": "Necesito más tiempo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Be patient.", "output": "Ten paciencia.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Good things take time.", "output": "Las cosas buenas toman tiempo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not yet.", "output": "Todavía no.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Almost.", "output": "Casi.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not quite.", "output": "No del todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "So close.", "output": "Tan cerca.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Nearly there.", "output": "Ya casi.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Any minute now.", "output": "En cualquier momento.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We need to leave.", "output": "Tenemos que irnos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Follow my lead.", "output": "Sígueme la corriente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Stick to the plan.", "output": "Síguete al plan.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Change of plans.", "output": "Cambio de planes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We need a new plan.", "output": "Necesitamos un nuevo plan.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This wasn't the plan.", "output": "Esto no estaba en el plan.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Abort the mission.", "output": "Abandona la misión.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Mission accomplished.", "output": "Misión cumplida.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It worked.", "output": "Funcionó.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It didn't work.", "output": "No funcionó.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We failed.", "output": "Fallamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We won.", "output": "Ganamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We lost.", "output": "Perdimos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's over.", "output": "Se acabó.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We made it.", "output": "Lo logramos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Against all expectations.", "output": "Contra todo pronóstico.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I never thought we'd make it.", "output": "Nunca pensé que lo lograríamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We did it.", "output": "Lo hicimos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Can you believe it?", "output": "¿Puedes creerlo?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I can't believe it.", "output": "No puedo creerlo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is real.", "output": "Esto es real.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Is this a dream?", "output": "¿Esto es un sueño?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Pinch me.", "output": "Pellízcame.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is surreal.", "output": "Esto es surrealista.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Straight from the heart.", "output": "Directo desde el corazón.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "From the bottom of my heart.", "output": "De todo corazón.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I mean it.", "output": "Lo digo en serio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm dead serious.", "output": "Lo digo muy en serio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I was joking.", "output": "Era una broma.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Just kidding.", "output": "Es broma.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "No offense.", "output": "Sin ofender.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "No hard feelings.", "output": "Sin rencores.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Water under the bridge.", "output": "Agua pasada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let bygones be bygones.", "output": "Lo pasado, pasado está.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's ancient history.", "output": "Ya es agua pasada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Fresh start.", "output": "Empezar de cero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "New beginnings.", "output": "Nuevos comienzos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Turn the page.", "output": "Pasar página.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Move forward.", "output": "Seguir adelante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't look back.", "output": "No mires atrás.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The future is bright.", "output": "El futuro es prometedor.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Every cloud has a silver lining.", "output": "No hay mal que por bien no venga.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Things happen for a reason.", "output": "Todo pasa por algo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It was meant to be.", "output": "Estaba destinado a ser.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Fate brought us together.", "output": "El destino nos unió.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I believe in you.", "output": "Creo en ti.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I believe in us.", "output": "Creo en nosotros.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're stronger together.", "output": "Somos más fuertes juntos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "United we stand.", "output": "Unidos resistimos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "No man is an island.", "output": "Nadie puede vivir solo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Family comes first.", "output": "La familia es lo primero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Blood is thicker than water.", "output": "La sangre es más espesa que el agua.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We take care of our own.", "output": "Cuidamos a los nuestros.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're family.", "output": "Eres de la familia.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You'll always be welcome here.", "output": "Aquí siempre tendrás las puertas abiertas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Come back anytime.", "output": "Vuelve cuando quieras.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're always in my heart.", "output": "Siempre estás en mi corazón.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll never forget you.", "output": "Nunca te olvidaré.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You changed my life.", "output": "Cambiaste mi vida.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I owe you everything.", "output": "Te lo debo todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Words can't describe how grateful I am.", "output": "Las palabras no alcanzan para describir lo agradecido que estoy.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You mean the world to me.", "output": "Significas el mundo para mí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I wouldn't trade this for anything.", "output": "No cambiaría esto por nada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is the happiest day of my life.", "output": "Este es el día más feliz de mi vida.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She graduated with honors.", "output": "Se graduó con honores.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was promoted.", "output": "Lo ascendieron.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She got accepted to Harvard.", "output": "La aceptaron en Harvard.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He applied to MIT.", "output": "Postuló al MIT.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They met at Oxford.", "output": "Se conocieron en Oxford.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I went to the Super Bowl.", "output": "Fui al Super Bowl.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a big fan of the NBA.", "output": "Es una gran fanática de la NBA.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He played in the NFL.", "output": "Jugó en la NFL.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's a Grammy winner.", "output": "Ese es un ganador del Grammy.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She won an Oscar.", "output": "Ella ganó un Óscar.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He was nominated for a Golden Globe.", "output": "Fue nominado a un Globo de Oro.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's from the Billboard charts.", "output": "Eso es de las listas de Billboard.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I saw it on CNN.", "output": "Lo vi en CNN.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "According to the BBC.", "output": "Según la BBC.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She posted it on Facebook.", "output": "Lo publicó en Facebook.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I read it on Reddit.", "output": "Lo leí en Reddit.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It's trending on Twitter.", "output": "Es tendencia en Twitter.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She uses LinkedIn for networking.", "output": "Usa LinkedIn para hacer contactos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Send it via Bluetooth.", "output": "Mándalo por Bluetooth.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The GPS is broken.", "output": "El GPS está roto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Use Google Maps.", "output": "Usa Google Maps.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll search it on Google.", "output": "Lo buscaré en Google.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She went viral.", "output": "Se volvió viral.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That meme is everywhere.", "output": "Ese meme está en todas partes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He wrote a blog post about it.", "output": "Escribió un post de blog sobre eso.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She runs an online store.", "output": "Tiene una tienda online.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The password is incorrect.", "output": "La contraseña es incorrecta.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Two-factor authentication is required.", "output": "Se requiere autenticación de dos factores.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm working from home.", "output": "Estoy trabajando desde casa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The meeting is on Zoom.", "output": "La reunión es por Zoom.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Share your screen.", "output": "Comparte tu pantalla.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're on mute.", "output": "Estás en silencio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Can you unmute yourself?", "output": "¿Puedes quitarte el silencio?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The connection dropped.", "output": "Se cortó la conexión.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Your camera is off.", "output": "Tienes la cámara apagada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll send you the link.", "output": "Te mando el link.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Check the chat.", "output": "Revisa el chat.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She has a new boyfriend.", "output": "Tiene un novio nuevo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He has a new girlfriend.", "output": "Tiene una novia nueva.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They broke up.", "output": "Cortaron.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's getting married.", "output": "Se va a casar.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He proposed.", "output": "Le propuso matrimonio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They're expecting a baby.", "output": "Están esperando un bebé.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's pregnant.", "output": "Está embarazada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Congratulations on the baby!", "output": "¡Felicidades por el bebé!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm going to be a father.", "output": "Voy a ser padre.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm going to be a mother.", "output": "Voy a ser madre.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's a great dad.", "output": "Es un gran padre.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's a wonderful mom.", "output": "Ella es una madre maravillosa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "My parents are getting divorced.", "output": "Mis padres se van a divorciar.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's my stepsister.", "output": "Es mi hermanastra.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's my stepbrother.", "output": "Es mi hermanastro.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's my grandfather.", "output": "Ese es mi abuelo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's my grandmother.", "output": "Esa es mi abuela.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He passed away last year.", "output": "Falleció el año pasado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She passed away in her sleep.", "output": "Falleció mientras dormía.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "My condolences.", "output": "Mi más sentido pésame.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Rest in peace.", "output": "Que descanse en paz.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She inherited everything.", "output": "Ella heredó todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He changed his will.", "output": "Cambió su testamento.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The funeral is on Friday.", "output": "El funeral es el viernes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What's the occasion?", "output": "¿Cuál es la ocasión?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're celebrating.", "output": "Estamos celebrando.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let's drink to that.", "output": "Brindemos por eso.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Cheers!", "output": "¡Salud!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "To your health!", "output": "¡A tu salud!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Another round?", "output": "¿Otra ronda?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm buying.", "output": "Yo invito.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This one's on me.", "output": "Esta va por mi cuenta.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Split the bill.", "output": "Dividir la cuenta.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Keep the change.", "output": "Quédate con el cambio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Table for two.", "output": "Mesa para dos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The reservation is under my name.", "output": "La reserva está a mi nombre.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll have the steak.", "output": "Voy a pedir el filete.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What do you recommend?", "output": "¿Qué recomienda?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The food here is amazing.", "output": "La comida aquí es increíble.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Can we have the check, please?", "output": "¿Nos trae la cuenta, por favor?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Waiter!", "output": "¡Mesero!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm a vegetarian.", "output": "Soy vegetariano.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "She's allergic to nuts.", "output": "Ella es alérgica a los frutos secos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is delicious.", "output": "Esto está delicioso.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It tastes awful.", "output": "Sabe horrible.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm stuffed.", "output": "Estoy lleno.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm starving.", "output": "Me muero de hambre.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I could eat a horse.", "output": "Me comería un caballo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Where are we going?", "output": "¿A dónde vamos?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Are we there yet?", "output": "¿Ya llegamos?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Take a left here.", "output": "Dobla a la izquierda aquí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're lost.", "output": "Estamos perdidos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Pull over.", "output": "Orilla el coche.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Speed up.", "output": "Acelera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Slow down.", "output": "Reduce la velocidad.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Watch out!", "output": "¡Cuidado!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Look out!", "output": "¡Cuidado!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Get in the car.", "output": "Súbete al coche.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're almost there.", "output": "Ya casi llegamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is the place.", "output": "Este es el lugar.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We've been here before.", "output": "Ya hemos estado aquí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I remember this street.", "output": "Recuerdo esta calle.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He checked in to the hotel.", "output": "Hizo el check-in en el hotel.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Our flight leaves at dawn.", "output": "Nuestro vuelo sale al amanecer.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The flight was cancelled.", "output": "El vuelo fue cancelado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I missed my connection.", "output": "Perdí mi conexión.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "My luggage is missing.", "output": "Mi equipaje está perdido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The border is closed.", "output": "La frontera está cerrada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I need a visa.", "output": "Necesito una visa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "My passport expired.", "output": "Mi pasaporte venció.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "There are demons everywhere.", "output": "Hay demonios por todas partes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "These creatures are dangerous.", "output": "Estas criaturas son peligrosas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hold on tight.", "output": "Agárrate fuerte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're under attack.", "output": "Estamos siendo atacados.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The enemy is closing in.", "output": "El enemigo se acerca.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Evacuate now.", "output": "Evacua ahora.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Secure the perimeter.", "output": "Asegura el perímetro.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "All clear.", "output": "Todo despejado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Stand by.", "output": "En espera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Copy that.", "output": "Copiado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Roger that.", "output": "Entendido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Come in.", "output": "Adelante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Over and out.", "output": "Cambio y fuera.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Check your six.", "output": "Vigila tus espaldas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Hold your position.", "output": "Mantén tu posición.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Move out.", "output": "Muévanse.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Fall back!", "output": "¡Retiraos!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Cover me.", "output": "Cúbreme.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Take cover!", "output": "¡Cúbrete!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They're everywhere.", "output": "Están por todos lados.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "How many are there?", "output": "¿Cuántos hay?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're outnumbered.", "output": "Nos superan en número.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't let anyone through.", "output": "No dejes pasar a nadie.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Protect the civilians.", "output": "Protege a los civiles.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "What's your status?", "output": "¿Cuál es tu situación?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We need backup.", "output": "Necesitamos refuerzos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Send reinforcements.", "output": "Envía refuerzos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm hit.", "output": "Me alcanzaron.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Man down.", "output": "Hombre en tierra.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Medic!", "output": "¡Sanitario!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Stay with me!", "output": "¡Quédate conmigo!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Don't you dare die on me.", "output": "No te atrevas a morirte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's an order.", "output": "Es una orden.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "At ease.", "output": "Descansen.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Fall in.", "output": "Formación.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Yes, sir.", "output": "Sí, señor.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "No, sir.", "output": "No, señor.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "With all due respect.", "output": "Con todo el respeto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Permission to speak freely?", "output": "¿Permiso para hablar con libertad?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're dismissed.", "output": "Puedes retirarte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Report to my office.", "output": "Preséntate en mi oficina.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The meeting starts now.", "output": "La reunión empieza ahora.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Has anyone seen the report?", "output": "¿Alguien ha visto el informe?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The deadline is tomorrow.", "output": "La fecha límite es mañana.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're over budget.", "output": "Nos hemos pasado del presupuesto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The project is behind schedule.", "output": "El proyecto va retrasado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We need to pivot.", "output": "Necesitamos cambiar de estrategia.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Think outside the box.", "output": "Piensa de forma creativa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let's touch base.", "output": "Pongámonos al día.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Circle back on that.", "output": "Volvamos a eso más tarde.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Let's take this offline.", "output": "Hablemos de eso aparte.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This is a win-win.", "output": "Esto beneficia a ambas partes.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We need to be proactive.", "output": "Necesitamos ser proactivos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The synergy is there.", "output": "La sinergia está ahí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Leverage your strengths.", "output": "Aprovecha tus fortalezas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm swamped.", "output": "Estoy agobiado de trabajo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "My plate is full.", "output": "Tengo demasiado trabajo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll get back to you.", "output": "Te respondo luego.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Put it in writing.", "output": "Ponlo por escrito.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I have a meeting at three.", "output": "Tengo una reunión a las tres.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's above my pay grade.", "output": "Eso no me corresponde a mí.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll run it by the boss.", "output": "Se lo consulto al jefe.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You got the job.", "output": "Conseguiste el trabajo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're fired.", "output": "Estás despedido.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I quit.", "output": "Renuncio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I was laid off.", "output": "Me despidieron.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The company went bankrupt.", "output": "La empresa fue a la quiebra.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "We're merging with a competitor.", "output": "Nos estamos fusionando con un competidor.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "They signed the deal.", "output": "Firmaron el trato.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The contract is binding.", "output": "El contrato es vinculante.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Read the fine print.", "output": "Lee la letra pequeña.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Sue me.", "output": "Demándame.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'll take you to court.", "output": "Te llevaré a los tribunales.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Order in the court!", "output": "¡Silencio en la sala!", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The verdict is in.", "output": "Ya hay veredicto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Not guilty.", "output": "No culpable.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The jury has reached a verdict.", "output": "El jurado ha llegado a un veredicto.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You have the right to remain silent.", "output": "Tiene el derecho a permanecer en silencio.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I want a lawyer.", "output": "Quiero un abogado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're under arrest.", "output": "Está arrestado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I have a warrant.", "output": "Tengo una orden judicial.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Do you have ID?", "output": "¿Tiene identificación?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Step out of the vehicle.", "output": "Salga del vehículo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I didn't do it.", "output": "Yo no lo hice.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I was framed.", "output": "Me tendieron una trampa.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I have an alibi.", "output": "Tengo una coartada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The evidence is circumstantial.", "output": "La evidencia es circunstancial.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "There are no witnesses.", "output": "No hay testigos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The crime scene was clean.", "output": "La escena del crimen estaba limpia.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Follow the money.", "output": "Sigue el dinero.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Who had motive?", "output": "¿Quién tenía motivo?", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "This was premeditated.", "output": "Esto fue premeditado.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It was an accident.", "output": "Fue un accidente.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It was self-defense.", "output": "Fue en defensa propia.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I'm telling the truth.", "output": "Estoy diciendo la verdad.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "He's lying.", "output": "Está mintiendo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "That's a lie.", "output": "Eso es una mentira.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Prove it.", "output": "Demuéstralo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Show me the proof.", "output": "Muéstrame la prueba.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You can't prove anything.", "output": "No puedes probar nada.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I have evidence.", "output": "Tengo pruebas.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The truth always comes out.", "output": "La verdad siempre sale a la luz.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Face the truth.", "output": "Enfrenta la verdad.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Accept it.", "output": "Acéptalo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Deny it all you want.", "output": "Niégalo todo lo que quieras.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Admit it.", "output": "Admítelo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Confess.", "output": "Confiésate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You're caught.", "output": "Te atrapamos.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "The game is over.", "output": "Se acabó el juego.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "You lose.", "output": "Perdiste.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Check and mate.", "output": "Jaque mate.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "I win.", "output": "Gané.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Winner takes all.", "output": "El ganador se lleva todo.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "Fair game.", "output": "Todo vale.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "May the best man win.", "output": "Que gane el mejor.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "It was a close call.", "output": "Fue por poco.", "source": "curated"}
+{"instruction": "Translate English subtitle to natural Spanish.", "input": "In the nick of time.", "output": "Justo a tiempo.", "source": "curated"}
