@@ -270,11 +270,23 @@ post_discord() {
     done
     body+="$(printf '\nTime: %s' "$timestamp")"
 
+    # Discord limit: 2000 chars per message. Truncate body if over 1950 chars.
+    if (( ${#body} > 1950 )); then
+        body="${body:0:1950}
+...(truncated)"
+    fi
+
     local payload
     payload="$(printf '{"content": %s}' "$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")"
 
-    curl -fsS -X POST -H "Content-Type: application/json" \
-        -d "$payload" "$webhook_url" > /dev/null 2>&1 || log "Discord post failed"
+    local http_code
+    http_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" \
+        -d "$payload" "$webhook_url" 2>/dev/null)" || { log "Discord post: curl error"; return; }
+    if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
+        log "Discord post OK (${http_code})"
+    else
+        log "Discord post failed (HTTP ${http_code})"
+    fi
 }
 
 # ---------------------------------------------------------------------------
