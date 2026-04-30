@@ -5,7 +5,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
-from translation.config import PROVIDER_DEEPL, PROVIDER_GEMINI, PROVIDER_GOOGLE  # noqa: F401
+from translation.config import PROVIDER_OLLAMA  # noqa: F401
 
 
 def _now_iso():
@@ -40,7 +40,7 @@ def init_db(db_path):
         cursor = conn.execute("PRAGMA table_info(translation_log)")
         columns = {row["name"] for row in cursor.fetchall()}
         if "provider" not in columns:
-            # SQL literal must be a string; PROVIDER_DEEPL is the source of truth
+            # SQL default 'deepl' preserved for backward compat with old DB rows
             conn.execute(
                 "ALTER TABLE translation_log "
                 "ADD COLUMN provider TEXT NOT NULL DEFAULT 'deepl'"

@@ -63,13 +63,8 @@ OLLAMA_LANG_MAP = {
 ALL_SUPPORTED_LANGS = frozenset(OLLAMA_LANG_MAP)
 ALL_SUPPORTED_SOURCE_LANGS = frozenset(OLLAMA_LANG_MAP)
 
-# Kept for backward-compat imports in any scripts that reference these names.
-# All maps are empty — no DeepL/Gemini/Google routing will occur.
-DEEPL_LANG_MAP: dict = {}
-DEEPL_SOURCE_LANG_MAP: dict = {}
-DEEPL_SKIP_UNTIL = None
-GEMINI_LANG_MAP = OLLAMA_LANG_MAP
-GOOGLE_LANG_MAP: dict = {}
+# DeepL/Gemini/Google provider dicts removed (Phase 4b cleanup).
+# Old DB rows still use string literals "deepl"/"gemini"/"google" — those are fine.
 
 
 @dataclass

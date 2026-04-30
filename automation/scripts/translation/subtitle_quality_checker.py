@@ -27,7 +27,7 @@ import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 
 from translation.srt_parser import Cue, parse_srt
-from translation.config import GEMINI_LANG_MAP
+from translation.config import OLLAMA_LANG_MAP as GEMINI_LANG_MAP  # renamed: GEMINI_LANG_MAP was OLLAMA_LANG_MAP
 
 log = logging.getLogger(__name__)
 
