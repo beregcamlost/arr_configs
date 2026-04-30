@@ -3,9 +3,10 @@
 #
 # PURPOSE:
 #   Runs every 15 min (via cron) and checks the health of the mubuntu Emby
-#   automation pipeline across six dimensions: orchestrator freshness, state-DB
+#   automation pipeline across seven dimensions: orchestrator freshness, state-DB
 #   reachability, Ollama endpoint liveness, stale flock files, oversized log
-#   files, and disk-space headroom.  Severity is graded OK / WARN / ALARM.
+#   files, disk-space headroom, and intake webhook liveness.  Severity is graded
+#   OK / WARN / ALARM.
 #   On ALARM (or with --force-discord) a summary is posted to Discord.
 #   On consecutive WARN the summary is also posted (tracked via state file).
 #   Exit 0 = all OK, 1 = any WARN, 2 = any ALARM.
@@ -39,6 +40,7 @@ readonly STALE_LOCK_HOURS=1
 readonly LOG_SIZE_LIMIT_MB=100
 readonly DISK_FREE_PCT_WARN=10
 readonly PIPELINE_FRESHNESS_MIN=15
+readonly INTAKE_WEBHOOK_HEALTH_URL="http://127.0.0.1:${INTAKE_WEBHOOK_PORT:-8765}/health"
 
 # Parse flags
 FORCE_DISCORD=false
@@ -51,6 +53,10 @@ for arg in "$@"; do
 done
 
 log() { printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_PREFIX" "$*" >&2; }
+
+# Metrics helper (fail-soft)
+# shellcheck source=lib_metrics.sh
+source "${SCRIPT_DIR}/lib_metrics.sh" || true
 
 # ---------------------------------------------------------------------------
 # Atomic .env source: copy → source → delete to avoid partial reads
@@ -204,6 +210,7 @@ check_log_sizes() {
 # ---------------------------------------------------------------------------
 # Check 6: Disk space
 # ---------------------------------------------------------------------------
+
 check_disk_space() {
     local -a mounts=("/APPBOX_DATA" "/config")
     for mount in "${mounts[@]}"; do
@@ -220,6 +227,26 @@ check_disk_space() {
             record "OK" "Disk ${mount}: ${pct_free}% free"
         fi
     done
+}
+
+# ---------------------------------------------------------------------------
+# Check 7: Intake webhook liveness
+# ---------------------------------------------------------------------------
+check_intake_webhook() {
+    # Only warn if the PID file exists (i.e., the receiver has been deployed
+    # and is expected to be running).  This avoids false alarms before the
+    # cron entry is enabled.
+    local pid_file="/tmp/intake_webhook.pid"
+    if [[ ! -f "$pid_file" ]]; then
+        # Receiver has never been started — skip silently
+        return
+    fi
+
+    if curl -fsS --max-time 3 "${INTAKE_WEBHOOK_HEALTH_URL}" > /dev/null 2>&1; then
+        record "OK" "Intake webhook (${INTAKE_WEBHOOK_HEALTH_URL}): UP"
+    else
+        record "WARN" "Intake webhook (${INTAKE_WEBHOOK_HEALTH_URL}): DOWN (pid file present but not responding)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -268,14 +295,31 @@ should_post_warn() {
 main() {
     load_env
 
+    local _health_run_id
+    _health_run_id="$(metrics_run_start "health" 2>/dev/null)" || _health_run_id=""
+
     check_orchestrator_freshness
     check_state_dbs
     check_ollama_endpoints
     check_stale_flocks
     check_log_sizes
     check_disk_space
+    check_intake_webhook
 
     log "Overall severity: $OVERALL_SEVERITY"
+
+    # Map severity to exit code for metrics
+    local _health_exit_code
+    case "$OVERALL_SEVERITY" in
+        OK)    _health_exit_code=0 ;;
+        WARN)  _health_exit_code=1 ;;
+        ALARM) _health_exit_code=2 ;;
+        *)     _health_exit_code=3 ;;
+    esac
+    if [[ -n "$_health_run_id" ]]; then
+        metrics_run_end "$_health_run_id" "$_health_exit_code" \
+            0 0 "{\"severity\":\"${OVERALL_SEVERITY}\"}" 2>/dev/null || true
+    fi
 
     if [[ "$NO_DISCORD" == "true" ]]; then
         : # skip Discord unconditionally
