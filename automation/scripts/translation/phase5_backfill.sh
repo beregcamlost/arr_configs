@@ -78,7 +78,7 @@ else
 fi
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_TAG" "$*" | tee -a "$LOG_FILE"; }
+log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_TAG" "$*" >> "$LOG_FILE"; }
 die() { log "FATAL: $*"; exit 1; }
 
 # ── Lock (flock fd 9) ─────────────────────────────────────────────────────────
