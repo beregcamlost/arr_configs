@@ -1,0 +1,465 @@
+# automation/cron/jobs.yml
+# Structured documentation for every mubuntu cron job.
+# This file is the single source of truth for schedule, purpose, and
+# operational metadata.  It does NOT install crons — see README.md for
+# manual install instructions.
+#
+# Last updated: 2026-04-29
+# Crontab reference: /config/cron-backup-20260430-020702/crontab.txt
+
+jobs:
+
+  # ── Unified pipeline orchestrator ─────────────────────────────────────────
+
+  - id: media_pipeline
+    schedule: "*/5 * * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/media_pipeline.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      /bin/bash /config/berenstuff/automation/scripts/media_pipeline.sh'
+    log: /config/berenstuff/automation/logs/media_pipeline.log
+    purpose: >-
+      Unified pipeline orchestrator running every 5 min. Coordinates 7
+      subsystems in priority order: grab_monitor → zombie_reaper →
+      import_cleanup → subtitle_dedupe → subtitle_recovery →
+      subtitle_quality → translation. Uses pipeline_state table for
+      DB-level concurrency control; each subsystem writes its own row.
+    runtime_typical: 30s–4min
+    timeout_hard: 270s (flock prevents overlap; next cron fires at t+5min)
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db
+    lock: /tmp/media_pipeline.lock
+    on_failure: >-
+      pipeline_state row records last_exit_code; next run detects and
+      continues. pipeline_health.sh alerts after 15 min staleness.
+    depends_on: .env, BAZARR_URL, OLLAMA_BASE_URL, EMBY_URL, EMBY_API_KEY
+    safe_to_disable: yes (subsystems have their own fallback crons or tolerate a gap)
+
+  # ── Codec converter ────────────────────────────────────────────────────────
+
+  - id: codec_converter_resume
+    schedule: "*/10 * * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/library_codec_resume_media.lock
+      /config/berenstuff/automation/scripts/transcode/library_codec_manager.sh
+      resume --state-dir /APPBOX_DATA/storage/.transcode-state-media
+      --batch-size 2 --log-level info
+    log: /APPBOX_DATA/storage/.transcode-state-media/cron-resume.log
+    purpose: >-
+      Picks up the next batch of 2 queued transcode jobs from the plan.
+      Runs independently of media_pipeline.sh to avoid contention.
+      Each job is FFmpeg-based H.265 conversion; batch-size=2 limits
+      CPU/IO impact.
+    runtime_typical: 2–30min (depends on file size and codec)
+    timeout_hard: none (flock prevents overlap)
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db
+    lock: /tmp/library_codec_resume_media.lock
+    on_failure: Failed job marked in DB; next run skips or retries.
+    depends_on: library_codec_state.db plan table populated by codec_audit
+    safe_to_disable: yes (transcode queue drains slower but nothing breaks)
+
+  - id: codec_audit
+    schedule: "0 3 * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/library_codec_audit_media.lock
+      /config/berenstuff/automation/scripts/transcode/library_codec_manager.sh
+      audit --state-dir /APPBOX_DATA/storage/.transcode-state-media
+      --path-prefix /APPBOX_DATA/storage/media --log-level info
+    log: /APPBOX_DATA/storage/.transcode-state-media/cron-audit.log
+    purpose: >-
+      Daily full library scan: identifies files not yet H.265-encoded and
+      records them in the codec state DB. Feeds the plan step.
+    runtime_typical: 5–30min (depends on library size)
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db
+    lock: /tmp/library_codec_audit_media.lock
+    on_failure: Audit can be re-run safely; state is idempotent.
+    depends_on: /APPBOX_DATA/storage/media readable, sqlite3 available
+    safe_to_disable: yes (converter keeps running from existing plan; audit gap = new files undetected)
+
+  - id: codec_plan
+    schedule: "45 3 * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/library_codec_plan_media.lock
+      /config/berenstuff/automation/scripts/transcode/library_codec_manager.sh
+      plan --state-dir /APPBOX_DATA/storage/.transcode-state-media
+      --log-level info
+    log: /APPBOX_DATA/storage/.transcode-state-media/cron-plan.log
+    purpose: >-
+      Reads audit results and generates a prioritised transcode queue.
+      Runs 45 min after audit to ensure audit has completed.
+    runtime_typical: 10s–2min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db
+    lock: /tmp/library_codec_plan_media.lock
+    on_failure: Plan can be re-run safely.
+    depends_on: codec_audit must have run first
+    safe_to_disable: yes
+
+  - id: codec_verify_clean
+    schedule: "30 4 * * 0"
+    command: >-
+      /usr/bin/flock -n /tmp/library_codec_verify_clean.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      /bin/bash /config/berenstuff/automation/scripts/transcode/library_codec_manager.sh
+      verify-and-clean --state-dir /APPBOX_DATA/storage/.transcode-state-media
+      --grace-days 3'
+    log: /APPBOX_DATA/storage/.transcode-state-media/cron-verify-clean.log
+    purpose: >-
+      Weekly (Sunday 04:30) verification of completed transcode jobs and
+      removal of source backups older than 3 days grace period.
+    runtime_typical: 1–10min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db
+    lock: /tmp/library_codec_verify_clean.lock
+    on_failure: Backups not cleaned; re-run manually.
+    depends_on: .env, converted files on disk
+    safe_to_disable: yes (backups accumulate but nothing breaks)
+
+  # ── Subtitle jobs ──────────────────────────────────────────────────────────
+
+  - id: subtitle_auto_maintain
+    schedule: "0 1 * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/subtitle_auto_maintain.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      /bin/bash /config/berenstuff/automation/scripts/subtitles/subtitle_quality_manager.sh
+      auto-maintain --keep-profile-langs
+      --path-prefix /APPBOX_DATA/storage/media'
+    log: /config/berenstuff/automation/logs/subtitle_quality_manager.log
+    purpose: >-
+      Daily full library subtitle quality pass: detects and replaces
+      low-quality or missing subtitles using Bazarr and profile rules.
+      Runs at 01:00 to avoid peak usage hours.
+    runtime_typical: 5–60min (library-size dependent)
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db
+    lock: /tmp/subtitle_auto_maintain.lock
+    on_failure: State DB records failures; next run retries missed files.
+    depends_on: .env, BAZARR_URL, BAZARR_API_KEY, subtitle_quality_state.db
+    safe_to_disable: yes (pipeline's SQM step covers recent imports; daily scan is catch-all)
+
+  - id: subtitle_library_dedupe
+    schedule: "0 4 * * 0"
+    command: >-
+      /usr/bin/flock -n /tmp/library_subtitle_dedupe.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      /bin/bash /config/berenstuff/automation/scripts/subtitles/library_subtitle_dedupe.sh
+      --path-prefix /APPBOX_DATA/storage/media
+      --state-dir /APPBOX_DATA/storage/.subtitle-dedupe-state
+      --bazarr-db /opt/bazarr/data/db/bazarr.db
+      --bazarr-url http://127.0.0.1:6767/bazarr
+      --log /config/berenstuff/automation/logs/library_subtitle_dedupe.log'
+    log: /config/berenstuff/automation/logs/library_subtitle_dedupe.log
+    purpose: >-
+      Weekly (Sunday 04:00) full library subtitle deduplication.
+      Removes duplicate subtitle tracks and updates Bazarr DB accordingly.
+    runtime_typical: 10–60min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.subtitle-dedupe-state/subtitle_dedupe.db
+    lock: /tmp/library_subtitle_dedupe.lock
+    on_failure: State DB tracks progress; partial run is safe to retry.
+    depends_on: .env, BAZARR_URL, bazarr.db, subtitle_dedupe.db
+    safe_to_disable: yes
+
+  # ── Streaming checker jobs ─────────────────────────────────────────────────
+
+  - id: streaming_scan
+    schedule: "0 5 * * 0"
+    command: >-
+      /usr/bin/flock -n /tmp/streaming_checker.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      PYTHONPATH=/config/berenstuff/automation/scripts
+      python3 /config/berenstuff/automation/scripts/streaming/streaming_checker.py scan'
+    log: /config/berenstuff/automation/logs/streaming_checker.log
+    purpose: >-
+      Weekly (Sunday 05:00) full library streaming availability scan.
+      Identifies episodes/movies present locally but not on streaming
+      platforms.
+    runtime_typical: 5–30min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db
+    lock: /tmp/streaming_checker.lock
+    on_failure: State DB records scan position; re-run is safe.
+    depends_on: .env, streaming_state.db
+    safe_to_disable: yes
+
+  - id: streaming_stale_flag
+    schedule: "30 5 * * 0"
+    command: >-
+      /usr/bin/flock -n /tmp/streaming_checker.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      PYTHONPATH=/config/berenstuff/automation/scripts
+      python3 /config/berenstuff/automation/scripts/streaming/streaming_checker.py
+      stale-flag --no-play-days 90'
+    log: /config/berenstuff/automation/logs/streaming_stale.log
+    purpose: >-
+      Weekly (Sunday 05:30) flags items not played in 90+ days as stale
+      candidates for deletion.
+    runtime_typical: 1–5min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db
+    lock: /tmp/streaming_checker.lock
+    on_failure: Flags are informational; re-run is safe.
+    depends_on: .env, streaming_state.db, streaming_scan must have run first
+    safe_to_disable: yes
+
+  - id: streaming_check_seasons_confirm_delete
+    schedule: "0 6 * * 0"
+    command: >-
+      /usr/bin/flock -n /tmp/streaming_checker.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      PYTHONPATH=/config/berenstuff/automation/scripts
+      python3 /config/berenstuff/automation/scripts/streaming/streaming_checker.py
+      check-seasons &&
+      python3 /config/berenstuff/automation/scripts/streaming/streaming_checker.py
+      confirm-delete --yes'
+    log: /config/berenstuff/automation/logs/streaming_checker.log
+    purpose: >-
+      Weekly (Sunday 06:00) checks season completeness then confirms
+      pending deletions. confirm-delete --yes is destructive — removes
+      locally stale files that have been flagged and grace-period expired.
+    runtime_typical: 2–15min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db
+    lock: /tmp/streaming_checker.lock
+    on_failure: Deletions not applied; files remain on disk. Re-run manually.
+    depends_on: .env, streaming_stale_flag must have run first
+    safe_to_disable: yes (files accumulate but nothing breaks)
+
+  - id: streaming_stale_delete
+    schedule: "30 6 * * 0"
+    command: >-
+      /usr/bin/flock -n /tmp/streaming_checker.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      PYTHONPATH=/config/berenstuff/automation/scripts
+      python3 /config/berenstuff/automation/scripts/streaming/streaming_checker.py
+      stale-delete --grace-days 15 --yes'
+    log: /config/berenstuff/automation/logs/streaming_stale.log
+    purpose: >-
+      Weekly (Sunday 06:30) deletes stale-flagged items after 15-day
+      grace period. Destructive operation — removes files from disk.
+    runtime_typical: 1–10min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db
+    lock: /tmp/streaming_checker.lock
+    on_failure: Files not deleted; accumulate on disk.
+    depends_on: .env, streaming_stale_flag, 15-day grace elapsed
+    safe_to_disable: yes
+
+  - id: streaming_stale_cleanup_monthly
+    schedule: "0 7 1 * *"
+    command: >-
+      /usr/bin/flock -n /tmp/streaming_checker.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      PYTHONPATH=/config/berenstuff/automation/scripts
+      python3 /config/berenstuff/automation/scripts/streaming/streaming_checker.py
+      stale-cleanup --yes --no-play-days 365 --min-size-gb 3.0 --grace-days 180'
+    log: /config/berenstuff/automation/logs/streaming_checker.log
+    purpose: >-
+      Monthly (1st of month 07:00) aggressive cleanup: removes items not
+      played in 365 days, >=3GB, after 180-day grace. Recovers large
+      blocks of storage.
+    runtime_typical: 1–15min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db
+    lock: /tmp/streaming_checker.lock
+    on_failure: Files not deleted; re-run manually.
+    depends_on: .env, streaming_state.db
+    safe_to_disable: yes
+
+  - id: streaming_verify_disputed
+    schedule: "0 4 * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/verify_disputed.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      PYTHONPATH=/config/berenstuff/automation/scripts
+      python3 -m streaming.streaming_checker verify-disputed'
+    log: /config/berenstuff/automation/logs/streaming_verify_disputed.log
+    purpose: >-
+      Daily at 04:00 re-checks items marked disputed (edge cases from
+      previous scan runs) to resolve their status.
+    runtime_typical: 1–5min
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db
+    lock: /tmp/verify_disputed.lock
+    on_failure: Disputed items remain unresolved; re-run manually.
+    depends_on: .env, streaming_state.db
+    safe_to_disable: yes
+
+  # ── Emby jobs ──────────────────────────────────────────────────────────────
+
+  - id: emby_last_played_report
+    schedule: "35 3 * * 2"
+    command: >-
+      /usr/bin/flock -n /tmp/emby_last_played_report.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      /bin/bash /config/berenstuff/automation/scripts/emby_last_played_report.sh
+      --path-prefix /APPBOX_DATA/storage/media
+      --output-csv /config/berenstuff/automation/logs/emby_last_played_report.csv'
+    log: /config/berenstuff/automation/logs/emby_last_played_report.log
+    purpose: >-
+      Weekly (Tuesday 03:35) generates a CSV report of last-played
+      timestamps for all media items using Emby API. Used for stale
+      detection and manual review.
+    runtime_typical: 1–5min
+    timeout_hard: none
+    state_db: none
+    lock: /tmp/emby_last_played_report.lock
+    on_failure: Report not generated; previous CSV still valid.
+    depends_on: .env, EMBY_URL, EMBY_API_KEY
+    safe_to_disable: yes
+
+  - id: emby_weekly_restart
+    schedule: "3 5 * * 2"
+    command: >-
+      /usr/bin/flock -n /tmp/emby_zombie_reaper.lock
+      /bin/bash -c 'source /config/berenstuff/.env && [inline restart-with-retry loop]'
+    log: /config/berenstuff/automation/logs/emby_zombie_reaper.log
+    purpose: >-
+      Weekly (Tuesday 05:03) restarts Emby server to clear memory leaks.
+      Retries up to 30 times (waiting 5 min each) if active playback
+      sessions are detected. Aborts restart if sessions persist for 2.5h.
+    runtime_typical: 30s (no sessions) – 2.5h (active sessions)
+    timeout_hard: 150min (30 retries × 5min)
+    state_db: none
+    lock: /tmp/emby_zombie_reaper.lock
+    on_failure: Emby not restarted; continues running without weekly clear.
+    depends_on: .env, EMBY_URL, EMBY_API_KEY, jq, curl
+    safe_to_disable: yes (Emby runs fine without weekly restart short-term)
+
+  # ── Translation worker ─────────────────────────────────────────────────────
+
+  - id: debian_worker
+    schedule: "*/5 * * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/debian_worker.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      /bin/bash /config/berenstuff/automation/scripts/translation/debian_worker.sh'
+    log: /config/berenstuff/automation/logs/debian_worker.log
+    purpose: >-
+      Every 5 min dispatches subtitle translation jobs to the Debian
+      CPU Ollama instance (172.20.77.2:11434). Complements the WSL GPU
+      worker. Uses per-file flock in /tmp/sub-translate-locks/ to avoid
+      double-processing. Works from the translation_state.db queue.
+    runtime_typical: 0–5min (idle if no queue entries)
+    timeout_hard: 270s (flock prevents overlap)
+    state_db: /APPBOX_DATA/storage/.translation-state/translation_state.db
+    lock: /tmp/debian_worker.lock
+    on_failure: Translation job left in queue; next run retries.
+    depends_on: .env, DEBIAN_OLLAMA_URL, translation_state.db
+    safe_to_disable: yes (WSL GPU worker continues; Debian CPU throughput lost)
+
+  # ── Bazarr snapshot ────────────────────────────────────────────────────────
+
+  - id: bazarr_snapshot
+    schedule: "*/5 * * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/bazarr_snapshot.lock
+      /bin/bash /config/berenstuff/automation/scripts/bazarr_snapshot.sh
+    log: /config/berenstuff/automation/logs/bazarr_snapshot.log
+    purpose: >-
+      Every 5 min takes a hot SQLite backup of the live Bazarr DB to
+      /APPBOX_DATA/storage/.bazarr-snapshot/bazarr.db. Ensures
+      pipeline scripts read a consistent read-only copy rather than
+      the live Bazarr DB directly.
+    runtime_typical: 1–5s
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.bazarr-snapshot/bazarr.db (this job writes it)
+    lock: /tmp/bazarr_snapshot.lock
+    on_failure: Snapshot stale; pipeline scripts fall back to live bazarr.db.
+    depends_on: /opt/bazarr/data/db/bazarr.db, sqlite3
+    safe_to_disable: yes (scripts fall back to live DB path)
+
+  # ── Maintenance jobs ───────────────────────────────────────────────────────
+
+  - id: sqlite_backup
+    schedule: "0 2 */3 * *"
+    command: >-
+      /usr/bin/flock -n /tmp/sqlite_backup.lock
+      /bin/bash /config/berenstuff/automation/scripts/backup/sqlite_backup.sh
+    log: /config/berenstuff/automation/logs/sqlite_backup.log
+    purpose: >-
+      Every 3 days at 02:00 backs up all pipeline state DBs using
+      SQLite online backup API. Rotates old backups to keep storage
+      bounded. May also push backups to git.
+    runtime_typical: 10–60s (depends on DB sizes)
+    timeout_hard: none
+    state_db: none (operates on all state DBs as source)
+    lock: /tmp/sqlite_backup.lock
+    on_failure: Backup not taken; previous backup still valid.
+    depends_on: sqlite3, git (for push)
+    safe_to_disable: yes (loses backup cadence; no impact on pipeline)
+
+  - id: engram_update
+    schedule: "0 3 * * 0"
+    command: /config/.local/bin/engram-update.sh
+    log: /config/berenstuff/automation/logs/engram-update.log
+    purpose: >-
+      Weekly (Sunday 03:00) updates the Engram memory system binary/data.
+      Ensures AI memory persistence tooling stays current.
+    runtime_typical: 10s–2min
+    timeout_hard: none
+    state_db: none
+    lock: none
+    on_failure: Engram not updated; previous version continues working.
+    depends_on: /config/.local/bin/engram-update.sh, internet access
+    safe_to_disable: yes
+
+  - id: logrotate_run
+    schedule: "15 3 * * *"
+    command: /bin/bash /config/berenstuff/automation/scripts/logrotate_run.sh
+    log: /config/berenstuff/automation/logs/logrotate.log
+    purpose: >-
+      Daily at 03:15 runs user-mode logrotate on automation/logs/*.log.
+      Uses per-user state file — no /etc/ or sudo required. Rotates
+      logs > configured size threshold and prunes old rotated files.
+    runtime_typical: 1–5s
+    timeout_hard: none
+    state_db: none
+    lock: none
+    on_failure: Logs not rotated; grow unboundedly until manual intervention.
+    depends_on: logrotate binary, /config/berenstuff/automation/configs/logrotate.conf
+    safe_to_disable: yes (short-term; logs will grow without rotation)
+
+  # ── New jobs added in Phase 5 ──────────────────────────────────────────────
+
+  - id: pipeline_health
+    schedule: "*/15 * * * *"
+    command: >-
+      /bin/bash /config/berenstuff/automation/scripts/pipeline_health.sh
+    log: /config/berenstuff/automation/logs/pipeline_health.log
+    purpose: >-
+      Every 15 min checks: orchestrator freshness (pipeline_state DB),
+      all state DB reachability (PRAGMA quick_check), Ollama endpoint
+      liveness (WSL GPU + Debian CPU), stale flock files, oversized log
+      files, and disk space headroom. Posts Discord alert on ALARM or
+      on consecutive WARN. Exit 0=OK, 1=WARN, 2=ALARM.
+    runtime_typical: 5–15s
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db (read-only)
+    lock: none
+    on_failure: Health check fails silently; check pipeline_health.log manually.
+    depends_on: .env, DISCORD_WEBHOOK_URL, OLLAMA_BASE_URL, DEBIAN_OLLAMA_URL, sqlite3, curl
+    safe_to_disable: yes (loses alerting; pipeline continues)
+
+  # ── Disabled jobs (reference only) ────────────────────────────────────────
+
+  - id: trending_auto_add
+    schedule: "0 8 * * 0"
+    command: >-
+      /usr/bin/flock -n /tmp/trending_add.lock
+      /bin/bash -c 'source /config/berenstuff/.env &&
+      PYTHONPATH=/config/berenstuff/automation/scripts
+      python3 -m streaming.trending_add sync'
+    log: /config/berenstuff/automation/logs/trending_add.log
+    purpose: >-
+      DISABLED 2026-03-08. Would auto-add trending content to Radarr/Sonarr.
+      Disabled to avoid uncontrolled disk growth.
+    runtime_typical: unknown
+    timeout_hard: none
+    state_db: none
+    lock: /tmp/trending_add.lock
+    on_failure: n/a (disabled)
+    depends_on: .env
+    safe_to_disable: yes (already disabled)
+    enabled: false

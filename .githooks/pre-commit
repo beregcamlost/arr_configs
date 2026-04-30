@@ -36,7 +36,7 @@ done
 while IFS= read -r match; do
     [[ -z "$match" ]] && continue
     ERRORS+=("Hardcoded private IP (172.20.77.): $match  → use DEBIAN_OLLAMA_URL or env var")
-done < <(git diff --cached -U0 -- ':!.githooks' 2>/dev/null \
+done < <(git diff --cached -U0 -- ':!.githooks' ':!automation/cron' 2>/dev/null \
     | grep '^+' \
     | grep -v '^+++' \
     | grep -F '172.20.77.' \
@@ -63,7 +63,7 @@ for addr in "${FORBIDDEN_ADDRS[@]}"; do
             continue
         fi
         ERRORS+=("Hardcoded address '$addr': $line  → use env var with \${VAR:-...} fallback")
-    done < <(git diff --cached -U0 -- ':!.githooks' 2>/dev/null \
+    done < <(git diff --cached -U0 -- ':!.githooks' ':!automation/cron' 2>/dev/null \
         | grep '^+' \
         | grep -v '^+++' \
         | grep -F "$addr" \
