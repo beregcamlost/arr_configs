@@ -256,7 +256,7 @@ cleanup() {
     pipeline_mark_done "$ACTIVE_SUBSYSTEM" "130" "$now_ts"
     log "step=${ACTIVE_SUBSYSTEM} status=interrupted signal=SIGTERM/SIGINT"
   fi
-  lane_mark_done "130"
+  lane_mark_done "$exit_code"
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
