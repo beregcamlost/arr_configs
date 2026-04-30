@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — Repo discipline enforcement
+#
+# Blocks commits that contain:
+#   1. Backup/swap files: .bak, .bak.*, .orig, .swp, .swo
+#   2. Hardcoded debian private IP: 172.20.77.
+#   3. Hardcoded localhost service addresses (Bazarr, Arr, Ollama) NOT inside
+#      fallback defaults (${VAR:-...} or os.environ.get("VAR", "..."))
+#   4. Files under automation/logs/
+#   5. Files matching *.log, *.csv, *.sqlite, *.db
+#   6. Private key material (BEGIN *PRIVATE KEY)
+#   7. The .env file itself
+#
+# Override (emergency only — not for routine use): git commit --no-verify
+#
+set -euo pipefail
+
+ERRORS=()
+
+# Staged file list
+mapfile -t STAGED_FILES < <(git diff --cached --name-only 2>/dev/null)
+
+# ---------------------------------------------------------------------------
+# Check 1: Backup / swap / orig files
+# ---------------------------------------------------------------------------
+for f in "${STAGED_FILES[@]}"; do
+    if [[ "$f" =~ \.(bak|bak\..+|orig|swp|swo)$ ]]; then
+        ERRORS+=("Backup/swap file staged: $f  → remove with: git restore --staged '$f'")
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 2: Hardcoded debian private IP
+# (Exclude .githooks/ — the hook itself contains the IP as a grep pattern)
+# ---------------------------------------------------------------------------
+while IFS= read -r match; do
+    [[ -z "$match" ]] && continue
+    ERRORS+=("Hardcoded private IP (172.20.77.): $match  → use DEBIAN_OLLAMA_URL or env var")
+done < <(git diff --cached -U0 -- ':!.githooks' 2>/dev/null \
+    | grep '^+' \
+    | grep -v '^+++' \
+    | grep -F '172.20.77.' \
+    | sed 's/^+//' \
+    | head -10 || true)
+
+# ---------------------------------------------------------------------------
+# Check 3: Hardcoded localhost service URLs (unless in fallback defaults)
+# ---------------------------------------------------------------------------
+# Patterns that are forbidden as raw strings but OK inside ${VAR:-...} or
+# os.environ.get("VAR", "...")
+readonly -a FORBIDDEN_ADDRS=(
+    "127.0.0.1:6767"
+    "127.0.0.1:7878"
+    "127.0.0.1:8989"
+    "localhost:11434"
+)
+
+for addr in "${FORBIDDEN_ADDRS[@]}"; do
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        # Allow if address appears only inside a shell default or Python default
+        if echo "$line" | grep -qE '(\$\{[A-Za-z_]+:-[^}]*'"$addr"'[^}]*\}|os\.environ\.get\([^)]*,\s*['"'"'"][^'"'"'"]*'"$addr"')'; then
+            continue
+        fi
+        ERRORS+=("Hardcoded address '$addr': $line  → use env var with \${VAR:-...} fallback")
+    done < <(git diff --cached -U0 -- ':!.githooks' 2>/dev/null \
+        | grep '^+' \
+        | grep -v '^+++' \
+        | grep -F "$addr" \
+        | sed 's/^+//' \
+        | head -5 || true)
+done
+
+# ---------------------------------------------------------------------------
+# Check 4: Files under automation/logs/
+# ---------------------------------------------------------------------------
+for f in "${STAGED_FILES[@]}"; do
+    if [[ "$f" == automation/logs/* ]]; then
+        ERRORS+=("Log directory file staged: $f  → remove with: git restore --staged '$f'")
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 5: Binary / data file extensions
+# ---------------------------------------------------------------------------
+for f in "${STAGED_FILES[@]}"; do
+    if [[ "$f" =~ \.(log|csv|sqlite|db)$ ]]; then
+        ERRORS+=("Data/log file staged: $f  → remove with: git restore --staged '$f'")
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Check 6: Private key material
+# ---------------------------------------------------------------------------
+while IFS= read -r match; do
+    [[ -z "$match" ]] && continue
+    ERRORS+=("Private key material detected in diff  → NEVER commit key material")
+done < <(git diff --cached -U0 2>/dev/null \
+    | grep '^+' \
+    | grep -v '^+++' \
+    | grep -E 'BEGIN (PRIVATE KEY|OPENSSH PRIVATE KEY|RSA PRIVATE KEY)' \
+    | head -3 || true)
+
+# ---------------------------------------------------------------------------
+# Check 7: .env file
+# ---------------------------------------------------------------------------
+for f in "${STAGED_FILES[@]}"; do
+    if [[ "$f" == ".env" || "$f" =~ (^|/)\.env$ ]]; then
+        ERRORS+=(".env staged: $f  → NEVER commit .env; add it to .gitignore")
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+if (( ${#ERRORS[@]} > 0 )); then
+    printf '\n\033[1;31m[pre-commit] Commit BLOCKED — %d issue(s) found:\033[0m\n\n' "${#ERRORS[@]}" >&2
+    for err in "${ERRORS[@]}"; do
+        printf '  \033[33m✖\033[0m %s\n' "$err" >&2
+    done
+    printf '\nTo override (emergency only): git commit --no-verify\n\n' >&2
+    exit 1
+fi
+
+exit 0
