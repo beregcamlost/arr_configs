@@ -3,6 +3,7 @@
 #
 # USAGE:
 #   bash phase5_backfill.sh [--dry-run] [--sleep SECONDS] [--max-files N]
+#                           [--ollama-url URL] [--lock LOCKPATH] [--worker-id NAME]
 #
 # STATE FILES:
 #   /APPBOX_DATA/storage/.translation-state/phase5_remaining.txt
@@ -17,7 +18,12 @@
 #
 # RESTART SAFETY:
 #   On restart, already-done paths (from phase5_done.txt) are skipped.
-#   flock ensures only one instance runs at a time.
+#   flock ensures only one instance per LOCK_FILE runs at a time.
+#
+# PARALLEL WORKERS:
+#   Use --lock and --ollama-url to run two concurrent workers against different
+#   Ollama endpoints (e.g. WSL GPU on :11435, debian CPU via DEBIAN_OLLAMA_URL).
+#   Per-file flock at /tmp/sub-translate-locks/<sha1>.lock prevents file collisions.
 #
 # RATE LIMITING:
 #   SLEEP_BETWEEN_FILES (default 30s) between each translated file.
@@ -31,8 +37,8 @@ readonly REMAINING_FILE="${STATE_DIR}/phase5_remaining.txt"
 readonly DONE_FILE="${STATE_DIR}/phase5_done.txt"
 readonly FAILED_FILE="${STATE_DIR}/phase5_failed.txt"
 readonly STATUS_FILE="${STATE_DIR}/phase5_status.txt"
-readonly LOCK_FILE="/tmp/phase5_backfill.lock"
-readonly LOG_FILE="/config/berenstuff/automation/logs/phase5_backfill.log"
+readonly DEFAULT_LOCK_FILE="/tmp/phase5_backfill.lock"
+readonly LOG_DIR="/config/berenstuff/automation/logs"
 readonly PYTHONPATH_DIR="/config/berenstuff/automation/scripts"
 readonly WORK_DIR="/config/berenstuff"
 readonly ENV_FILE="/config/berenstuff/.env"
@@ -41,6 +47,9 @@ SLEEP_BETWEEN_FILES="${SLEEP_BETWEEN_FILES:-30}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-10}"
 MAX_FILES="${MAX_FILES:-}"
 DRY_RUN=0
+OLLAMA_URL_OVERRIDE=""
+LOCK_FILE_OVERRIDE=""
+WORKER_ID=""
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -48,44 +57,45 @@ while [[ $# -gt 0 ]]; do
         --dry-run)    DRY_RUN=1 ;;
         --sleep)      SLEEP_BETWEEN_FILES="${2:?--sleep requires a value}"; shift ;;
         --max-files)  MAX_FILES="${2:?--max-files requires a value}"; shift ;;
+        --ollama-url) OLLAMA_URL_OVERRIDE="${2:?--ollama-url requires a value}"; shift ;;
+        --lock)       LOCK_FILE_OVERRIDE="${2:?--lock requires a value}"; shift ;;
+        --worker-id)  WORKER_ID="${2:?--worker-id requires a value}"; shift ;;
         *)            echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
     shift
 done
 
+# Resolve effective lock file path
+LOCK_FILE="${LOCK_FILE_OVERRIDE:-$DEFAULT_LOCK_FILE}"
+
+# Resolve log file: per-worker if --worker-id given, else default
+if [[ -n "$WORKER_ID" ]]; then
+    readonly LOG_TAG="phase5:${WORKER_ID}"
+    readonly LOG_FILE="${LOG_DIR}/phase5_backfill_${WORKER_ID,,}.log"
+else
+    readonly LOG_TAG="phase5"
+    readonly LOG_FILE="${LOG_DIR}/phase5_backfill.log"
+fi
+
 # ── Logging ───────────────────────────────────────────────────────────────────
-log() { printf '%s [phase5] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
+log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_TAG" "$*" | tee -a "$LOG_FILE"; }
 die() { log "FATAL: $*"; exit 1; }
 
 # ── Lock (flock fd 9) ─────────────────────────────────────────────────────────
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-    echo "Another phase5_backfill instance is already running" >&2
+    echo "Another phase5_backfill instance is already holding lock $LOCK_FILE" >&2
     exit 1
 fi
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 [[ -f "$ENV_FILE" ]] || die "Missing env file: $ENV_FILE"
-# shellcheck source=/dev/null
 source "$ENV_FILE"
 
-# ── Metrics (fail-soft) ───────────────────────────────────────────────────────
-readonly SCRIPTS_DIR="/config/berenstuff/automation/scripts"
-# shellcheck source=../lib_metrics.sh
-source "${SCRIPTS_DIR}/lib_metrics.sh" || true
-
-METRICS_RUN_ID=""
-METRICS_RUN_ID="$(metrics_run_start "phase5_backfill" 2>/dev/null)" || METRICS_RUN_ID=""
-
-# Trap to record end even on SIGINT/SIGTERM or early exit
-_metrics_cleanup() {
-    local ec=$?
-    if [[ -n "$METRICS_RUN_ID" ]]; then
-        metrics_run_end "$METRICS_RUN_ID" "$ec" \
-            "${run_count:-0}" "${fail_count:-0} " 2>/dev/null || true
-    fi
-}
-trap _metrics_cleanup EXIT
+# --ollama-url overrides the env var for this invocation
+if [[ -n "$OLLAMA_URL_OVERRIDE" ]]; then
+    export OLLAMA_BASE_URL="$OLLAMA_URL_OVERRIDE"
+fi
 
 [[ -f "$REMAINING_FILE" ]] || die "Work list not found: $REMAINING_FILE
   Generate it first:
@@ -93,7 +103,7 @@ trap _metrics_cleanup EXIT
 
 OLLAMA_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11435}"
 if ! curl -fsS --max-time 5 "${OLLAMA_URL}/api/tags" > /dev/null 2>&1; then
-    die "Ollama unreachable at ${OLLAMA_URL} — is the WSL tunnel live?"
+    die "Ollama unreachable at ${OLLAMA_URL} — is the tunnel/service live?"
 fi
 
 # ── Load state ────────────────────────────────────────────────────────────────
@@ -114,7 +124,7 @@ done_count="${#done_set[@]}"
 run_count=0
 fail_count=0
 
-log "=== Phase 5 Backfill START === worklist=$total already_done=$done_count dry_run=$DRY_RUN"
+log "=== Phase 5 Backfill START === worklist=$total already_done=$done_count dry_run=$DRY_RUN ollama=${OLLAMA_URL} lock=${LOCK_FILE}"
 
 for media_path in "${worklist[@]}"; do
     [[ -z "$media_path" ]] && continue
