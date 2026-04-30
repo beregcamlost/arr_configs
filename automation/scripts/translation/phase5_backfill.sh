@@ -4,6 +4,7 @@
 # USAGE:
 #   bash phase5_backfill.sh [--dry-run] [--sleep SECONDS] [--max-files N]
 #                           [--ollama-url URL] [--lock LOCKPATH] [--worker-id NAME]
+#                           [--max-workers N]
 #
 # STATE FILES:
 #   /APPBOX_DATA/storage/.translation-state/phase5_remaining.txt
@@ -50,6 +51,7 @@ DRY_RUN=0
 OLLAMA_URL_OVERRIDE=""
 LOCK_FILE_OVERRIDE=""
 WORKER_ID=""
+MAX_WORKERS_OVERRIDE=""
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -60,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --ollama-url) OLLAMA_URL_OVERRIDE="${2:?--ollama-url requires a value}"; shift ;;
         --lock)       LOCK_FILE_OVERRIDE="${2:?--lock requires a value}"; shift ;;
         --worker-id)  WORKER_ID="${2:?--worker-id requires a value}"; shift ;;
+        --max-workers) MAX_WORKERS_OVERRIDE="${2:?--max-workers requires a value}"; shift ;;
         *)            echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
     shift
@@ -96,6 +99,9 @@ source "$ENV_FILE"
 if [[ -n "$OLLAMA_URL_OVERRIDE" ]]; then
     export OLLAMA_BASE_URL="$OLLAMA_URL_OVERRIDE"
 fi
+
+# --max-workers overrides OLLAMA_MAX_WORKERS from .env for this invocation
+[[ -n "${MAX_WORKERS_OVERRIDE:-}" ]] && export OLLAMA_MAX_WORKERS="$MAX_WORKERS_OVERRIDE"
 
 [[ -f "$REMAINING_FILE" ]] || die "Work list not found: $REMAINING_FILE
   Generate it first:
