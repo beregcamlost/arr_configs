@@ -260,7 +260,7 @@ run_subtitle_dedupe() {
     /bin/bash "${CANONICAL_DIR}/subtitles/library_subtitle_dedupe.sh" \
       --path-prefix  "$MEDIA_PATH_PREFIX" \
       --state-dir    "/APPBOX_DATA/storage/.subtitle-dedupe-state" \
-      --bazarr-db    "/opt/bazarr/data/db/bazarr.db" \
+      --bazarr-db    "${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}" \
       --bazarr-url   "${BAZARR_URL:-http://127.0.0.1:6767/bazarr}" \
       --since        10 \
       --log          "/config/berenstuff/automation/logs/library_subtitle_dedupe.log"
@@ -270,7 +270,7 @@ run_subtitle_recovery() {
   run_step "subtitle_recovery" 0 \
     /bin/bash "${CANONICAL_DIR}/subtitles/bazarr_subtitle_recovery.sh" \
       --bazarr-url   "${BAZARR_URL:-http://127.0.0.1:6767/bazarr}" \
-      --bazarr-db    "/opt/bazarr/data/db/bazarr.db" \
+      --bazarr-db    "${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}" \
       --radarr-url   "${RADARR_URL:-http://127.0.0.1:7878/radarr}" \
       --sonarr-url   "${SONARR_URL:-http://127.0.0.1:8989/sonarr}" \
       --state-dir    "/APPBOX_DATA/storage/.subtitle-recovery-state" \

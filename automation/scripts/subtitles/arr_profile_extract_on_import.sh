@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DB="/opt/bazarr/data/db/bazarr.db"
+DB="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
 LOG="/config/berenstuff/automation/logs/arr_profile_extract_on_import.log"
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 

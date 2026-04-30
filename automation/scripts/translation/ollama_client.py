@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 DEFAULT_BATCH_SIZE = 400
 DEFAULT_MODEL = "phi4-mini-subs"
 DEFAULT_TIMEOUT = 600
-DEFAULT_MAX_WORKERS = 2
+DEFAULT_MAX_WORKERS = int(os.environ.get("OLLAMA_MAX_WORKERS", "2"))
 
 
 class OllamaUnavailable(Exception):

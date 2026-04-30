@@ -6,9 +6,9 @@ set -euo pipefail
 
 readonly LOG_PREFIX="[force-search]"
 readonly LOG_FILE="/config/berenstuff/automation/logs/overnight_force_search.log"
-readonly BAZARR_URL="http://127.0.0.1:6767/bazarr"
-readonly BAZARR_API_KEY="209ddfabdea879b2bbff75b5dce0eccd"
-readonly BAZARR_DB="/opt/bazarr/data/db/bazarr.db"
+readonly BAZARR_URL="${BAZARR_URL:-http://127.0.0.1:6767/bazarr}"
+readonly BAZARR_API_KEY="${BAZARR_API_KEY:?BAZARR_API_KEY must be set in .env}"
+readonly BAZARR_DB="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
 readonly STAGGER_SECS=2
 
 log() { printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_PREFIX" "$*" | tee -a "$LOG_FILE"; }
