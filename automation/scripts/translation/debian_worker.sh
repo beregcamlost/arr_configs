@@ -11,8 +11,8 @@ set -euo pipefail
 readonly LOG_PREFIX="[debian-worker]"
 readonly LOG_FILE="/config/berenstuff/automation/logs/debian_worker.log"
 readonly ENV_FILE="/config/berenstuff/.env"
-readonly BAZARR_DB="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
-readonly DEBIAN_OLLAMA_URL="${DEBIAN_OLLAMA_URL:-http://172.20.77.2:11434}"
+# BAZARR_DB sourced from .env; declared readonly in main() after source to avoid conflict
+# DEBIAN_OLLAMA_URL sourced from .env; declared readonly in main() after source
 readonly LOCK_DIR="/tmp/sub-translate-locks"
 readonly PYTHONPATH_DIR="/config/berenstuff/automation/scripts"
 readonly LIMIT="${DEBIAN_WORKER_LIMIT:-5}"
@@ -21,7 +21,7 @@ readonly LIMIT="${DEBIAN_WORKER_LIMIT:-5}"
 # Logging
 # ---------------------------------------------------------------------------
 log() {
-  printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_PREFIX" "$*" | tee -a "$LOG_FILE" >&2
+  printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_PREFIX" "$*" >> "$LOG_FILE"
 }
 die() { log "ERROR: $*"; exit 1; }
 
@@ -161,9 +161,10 @@ sys.exit(0 if eng else 1)
       log "  $line"
     done || exit_code=$?
 
-  # Release the lock explicitly (also released on fd close at function exit)
+  # Release and remove the lock file (avoids stale-lock WARN in health monitor)
   flock -u 9
   exec 9>&-
+  rm -f "$lock_path"
 
   # Check output
   local es_srt="${dir}/${stem}.es.srt"
@@ -200,6 +201,10 @@ main() {
   # Source environment
   # shellcheck source=/dev/null
   [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+
+  # Resolve vars after sourcing .env (avoids readonly conflict when .env exports them)
+  readonly BAZARR_DB="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
+  readonly DEBIAN_OLLAMA_URL="${DEBIAN_OLLAMA_URL:?DEBIAN_OLLAMA_URL must be set in .env}"
 
   # Override Ollama URL to point at debian (never written to .env)
   export OLLAMA_BASE_URL="$DEBIAN_OLLAMA_URL"
