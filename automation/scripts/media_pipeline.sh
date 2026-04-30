@@ -1,29 +1,37 @@
 #!/usr/bin/env bash
 # media_pipeline.sh — Unified media pipeline orchestrator
 #
-# Replaces 10 high-frequency cron jobs with a single coordinated 5-minute run.
+# Replaces 10 high-frequency cron jobs with a single coordinated run.
 # Priority order: quick jobs → subtitle pipeline → translation
 # Codec conversion runs independently via its own cron (library_codec_manager.sh).
 #
-# Cron entry (single line):
-#   */5 * * * * /usr/bin/flock -n /tmp/media_pipeline.lock /bin/bash -c 'source /config/berenstuff/.env && /bin/bash /config/berenstuff/scripts/media_pipeline.sh' >> /config/berenstuff/automation/logs/media_pipeline.log 2>&1
+# Cron entries (two lanes — crons are currently STOPPED, kept for reference):
+#   */5  * * * * /usr/bin/flock -n /tmp/media_pipeline_fast.lock /bin/bash /config/berenstuff/automation/scripts/media_pipeline.sh --lane fast >> /config/berenstuff/automation/logs/media_pipeline.log 2>&1
+#   */30 * * * * /usr/bin/flock -n /tmp/media_pipeline_slow.lock /bin/bash /config/berenstuff/automation/scripts/media_pipeline.sh --lane slow >> /config/berenstuff/automation/logs/media_pipeline.log 2>&1
 #
-# Usage: media_pipeline.sh [--dry-run]
+# Usage: media_pipeline.sh [--lane fast|slow|all] [--dry-run]
+#   --lane fast   Steps 1-3 only: grab-monitor, zombie_reaper, import_cleanup  (every 5 min)
+#   --lane slow   Steps 4-7 only: dedupe, recovery, sqm, translation           (every 30 min)
+#   --lane all    All 7 steps (default; useful for manual full runs)
 #
 # DB coordination: pipeline_state table in codec state DB
-# Lock:           /tmp/media_pipeline.lock  (held by crontab flock wrapper)
+# Lane locks:     /tmp/media_pipeline_fast.lock  (fast lane flock)
+#                 /tmp/media_pipeline_slow.lock  (slow lane flock)
+# Concurrency:    fast and slow lanes use separate subsystem rows — they do NOT
+#                 block each other.  Two concurrent slow-lane runs are prevented
+#                 by the flock on /tmp/media_pipeline_slow.lock (held by cron).
 
 set -uo pipefail
 # NOTE: -e intentionally omitted — each step handles its own exit code so a
 # single failure does not abort the full pipeline run.
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LOG="/config/berenstuff/automation/logs/media_pipeline.log"
 readonly ENV_FILE="/config/berenstuff/.env"
 
 readonly CANONICAL_DIR="/config/berenstuff/automation/scripts"
 # SCRIPTS_DIR removed: automation/scripts/ is the single source of truth (Phase 4b)
-
 
 readonly CODEC_STATE_DB="/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db"
 readonly MEDIA_PATH_PREFIX="/APPBOX_DATA/storage/media"
@@ -37,12 +45,45 @@ readonly TIMEOUT_TRANSLATION="${TIMEOUT_TRANSLATION:-600}"
 PIPELINE_START_TS=""
 ACTIVE_SUBSYSTEM=""
 DRY_RUN=0
+LANE="all"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
-for _arg in "$@"; do
-  [[ "$_arg" == "--dry-run" ]] && DRY_RUN=1
+_usage() {
+  printf 'Usage: %s [--lane fast|slow|all] [--dry-run]\n' "$(basename "$0")" >&2
+  printf '  --lane fast   Steps 1-3: grab-monitor, zombie_reaper, import_cleanup\n' >&2
+  printf '  --lane slow   Steps 4-7: dedupe, recovery, sqm, translation\n' >&2
+  printf '  --lane all    All 7 steps (default; for manual full runs)\n' >&2
+  printf '  --dry-run     Log what would run without executing\n' >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lane)
+      shift
+      [[ $# -eq 0 ]] && { printf 'ERROR: --lane requires an argument\n' >&2; _usage; exit 1; }
+      LANE="$1"
+      ;;
+    --dry-run) DRY_RUN=1 ;;
+    --help|-h) _usage; exit 0 ;;
+    *)
+      printf 'ERROR: Unknown argument: %s\n' "$1" >&2
+      _usage
+      exit 1
+      ;;
+  esac
+  shift
 done
-readonly DRY_RUN
+
+case "$LANE" in
+  fast|slow|all) ;;
+  *)
+    printf 'ERROR: Invalid lane "%s" — must be fast, slow, or all\n' "$LANE" >&2
+    _usage
+    exit 1
+    ;;
+esac
+
+readonly DRY_RUN LANE
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log() {
@@ -60,9 +101,10 @@ log_step() {
   fi
 }
 
-# ── Environment ───────────────────────────────────────────────────────────────
-# shellcheck source=/dev/null
-[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+# ── Environment (atomic load) ─────────────────────────────────────────────────
+# shellcheck source=lib_env.sh
+source "${SCRIPT_DIR}/lib_env.sh"
+[[ -f "$ENV_FILE" ]] && load_env "$ENV_FILE"
 
 # ── Load guard (from lib_subtitle_common.sh) ──────────────────────────────────
 load_guard() {
@@ -183,15 +225,38 @@ pipeline_recover_stale() {
   done <<< "$rows"
 }
 
+# ── Lane-level concurrency guard ──────────────────────────────────────────────
+# Each lane has a sentinel row in pipeline_state so that a manual `--lane all`
+# invocation can detect and skip a lane that is still running concurrently.
+# The cron-level flock (separate lock files per lane) is the primary guard;
+# this DB sentinel is a belt-and-suspenders check for manual runs.
+LANE_SUBSYSTEM=""
+lane_mark_running() {
+  [[ -z "$LANE_SUBSYSTEM" ]] && return 0
+  pipeline_mark_running "$LANE_SUBSYSTEM"
+}
+lane_mark_done() {
+  local exit_code="${1:-0}"
+  [[ -z "$LANE_SUBSYSTEM" ]] && return 0
+  pipeline_mark_done "$LANE_SUBSYSTEM" "$exit_code" "${PIPELINE_START_TS:-$(date '+%s')}"
+}
+lane_is_running() {
+  [[ -z "$LANE_SUBSYSTEM" ]] && return 1
+  pipeline_is_running "$LANE_SUBSYSTEM"
+}
+
 # ── Signal handling ───────────────────────────────────────────────────────────
 cleanup() {
-  local exit_code=$?
+  # Capture exit code BEFORE any 'local' declaration — 'local' resets $? to 0.
+  _CLEANUP_EXIT=$?
+  local exit_code="$_CLEANUP_EXIT"
   if [[ -n "$ACTIVE_SUBSYSTEM" ]]; then
     local now_ts
     now_ts="$(date '+%s')"
     pipeline_mark_done "$ACTIVE_SUBSYSTEM" "130" "$now_ts"
     log "step=${ACTIVE_SUBSYSTEM} status=interrupted signal=SIGTERM/SIGINT"
   fi
+  lane_mark_done "130"
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
@@ -296,14 +361,58 @@ run_translation() {
     /bin/bash -c "cd /config/berenstuff && PYTHONPATH=${CANONICAL_DIR} python3 ${CANONICAL_DIR}/translation/translator.py translate --since ${_since} --max-files ${_max_files} --bazarr-db ${_bazarr_db} </dev/null"
 }
 
+# ── Lane runners ──────────────────────────────────────────────────────────────
+
+run_fast_lane() {
+  LANE_SUBSYSTEM="fast_lane"
+  if lane_is_running; then
+    log "lane=fast status=skipped reason=already_running"
+    return 0
+  fi
+  lane_mark_running
+  log "=== fast lane start (steps 1-3) ==="
+
+  run_grab_monitor
+  run_zombie_reaper
+  run_import_cleanup
+
+  lane_mark_done 0
+  log "=== fast lane done ==="
+}
+
+run_slow_lane() {
+  LANE_SUBSYSTEM="slow_lane"
+  if lane_is_running; then
+    log "lane=slow status=skipped reason=already_running"
+    return 0
+  fi
+  lane_mark_running
+  log "=== slow lane start (steps 4-7) ==="
+
+  log "=== load gate check ==="
+  if ! load_guard "slow_lane"; then
+    lane_mark_done 0
+    log "=== slow lane done (load_guard skipped heavy work) ==="
+    return 0
+  fi
+  log "=== heavy work continuing ==="
+
+  run_subtitle_dedupe
+  run_subtitle_recovery
+  run_subtitle_quality
+  run_translation
+
+  lane_mark_done 0
+  log "=== slow lane done ==="
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
   PIPELINE_START_TS="$(date '+%s')"
-  log "=== pipeline start ==="
+  log "=== pipeline start lane=${LANE} ==="
 
-  # Source env if not already sourced by cron wrapper
-  # shellcheck source=/dev/null
-  [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+  # Reload env atomically (belt-and-suspenders: also sourced at top level above)
+  [[ -f "$ENV_FILE" ]] && load_env "$ENV_FILE"
 
   # Initialise DB table
   pipeline_ensure_table
@@ -311,33 +420,48 @@ main() {
   # Recover any stale entries from a previous unclean exit
   pipeline_recover_stale
 
-  # ── Phase 1: Quick jobs — always run regardless of load ───────────────────
-  # These are lightweight HTTP calls; important for responsiveness/cleanup.
-  run_grab_monitor
-  run_zombie_reaper
-  run_import_cleanup
+  case "$LANE" in
+    fast)
+      run_fast_lane
+      ;;
+    slow)
+      run_slow_lane
+      ;;
+    all)
+      # ── Phase 1: Quick jobs ───────────────────────────────────────────────
+      LANE_SUBSYSTEM="fast_lane"
+      lane_mark_running
+      run_grab_monitor
+      run_zombie_reaper
+      run_import_cleanup
+      lane_mark_done 0
 
-  # ── Load gate — heavy work only when load is acceptable ───────────────────
-  log "=== load gate check ==="
-  if ! load_guard "media_pipeline"; then
-    local total_duration
-    total_duration=$(( $(date '+%s') - PIPELINE_START_TS ))
-    log "=== pipeline done (quick_only) total_duration=${total_duration}s ==="
-    exit 0
-  fi
-  log "=== heavy work continuing ==="
+      # ── Load gate ─────────────────────────────────────────────────────────
+      log "=== load gate check ==="
+      if ! load_guard "media_pipeline"; then
+        local total_duration
+        total_duration=$(( $(date '+%s') - PIPELINE_START_TS ))
+        log "=== pipeline done (quick_only) total_duration=${total_duration}s ==="
+        exit 0
+      fi
+      log "=== heavy work continuing ==="
 
-  # ── Phase 2: Subtitle pipeline (coordinated, file-aware) ─────────────────
-  run_subtitle_dedupe
-  run_subtitle_recovery
-  run_subtitle_quality
+      # ── Phase 2: Subtitle pipeline ────────────────────────────────────────
+      LANE_SUBSYSTEM="slow_lane"
+      lane_mark_running
+      run_subtitle_dedupe
+      run_subtitle_recovery
+      run_subtitle_quality
 
-  # ── Phase 3: Translation ──────────────────────────────────────────────────
-  run_translation
+      # ── Phase 3: Translation ──────────────────────────────────────────────
+      run_translation
+      lane_mark_done 0
+      ;;
+  esac
 
   local total_duration
   total_duration=$(( $(date '+%s') - PIPELINE_START_TS ))
-  log "=== pipeline done total_duration=${total_duration}s ==="
+  log "=== pipeline done lane=${LANE} total_duration=${total_duration}s ==="
 }
 
 main "$@"
