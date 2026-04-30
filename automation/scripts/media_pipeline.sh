@@ -21,8 +21,8 @@ set -uo pipefail
 readonly LOG="/config/berenstuff/automation/logs/media_pipeline.log"
 readonly ENV_FILE="/config/berenstuff/.env"
 
-readonly SCRIPTS_DIR="/config/berenstuff/scripts"
 readonly CANONICAL_DIR="/config/berenstuff/automation/scripts"
+# SCRIPTS_DIR removed: automation/scripts/ is the single source of truth (Phase 4b)
 
 
 readonly CODEC_STATE_DB="/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db"
@@ -31,7 +31,7 @@ readonly SQLITE_TIMEOUT_MS=15000   # used as .timeout dot-command (no output lea
 
 # ── Timeouts (seconds) ────────────────────────────────────────────────────────
 readonly TIMEOUT_QUICK=60
-readonly TIMEOUT_TRANSLATION=300
+readonly TIMEOUT_TRANSLATION="${TIMEOUT_TRANSLATION:-600}"
 
 # ── State ─────────────────────────────────────────────────────────────────────
 PIPELINE_START_TS=""
@@ -242,22 +242,22 @@ run_step() {
 
 run_grab_monitor() {
   run_step "grab_monitor" "$TIMEOUT_QUICK" \
-    /bin/bash "${SCRIPTS_DIR}/grab-monitor.sh"
+    /bin/bash "${CANONICAL_DIR}/grab-monitor.sh"
 }
 
 run_zombie_reaper() {
   run_step "zombie_reaper" "$TIMEOUT_QUICK" \
-    /bin/bash "${SCRIPTS_DIR}/emby_zombie_reaper.sh"
+    /bin/bash "${CANONICAL_DIR}/emby_zombie_reaper.sh"
 }
 
 run_import_cleanup() {
   run_step "import_cleanup" "$TIMEOUT_QUICK" \
-    /bin/bash "${SCRIPTS_DIR}/arr_cleanup_importblocked.sh"
+    /bin/bash "${CANONICAL_DIR}/arr_cleanup_importblocked.sh"
 }
 
 run_subtitle_dedupe() {
   run_step "subtitle_dedupe" 0 \
-    /bin/bash "${SCRIPTS_DIR}/library_subtitle_dedupe.sh" \
+    /bin/bash "${CANONICAL_DIR}/subtitles/library_subtitle_dedupe.sh" \
       --path-prefix  "$MEDIA_PATH_PREFIX" \
       --state-dir    "/APPBOX_DATA/storage/.subtitle-dedupe-state" \
       --bazarr-db    "/opt/bazarr/data/db/bazarr.db" \
@@ -268,7 +268,7 @@ run_subtitle_dedupe() {
 
 run_subtitle_recovery() {
   run_step "subtitle_recovery" 0 \
-    /bin/bash "${SCRIPTS_DIR}/bazarr_subtitle_recovery.sh" \
+    /bin/bash "${CANONICAL_DIR}/subtitles/bazarr_subtitle_recovery.sh" \
       --bazarr-url   "${BAZARR_URL:-http://127.0.0.1:6767/bazarr}" \
       --bazarr-db    "/opt/bazarr/data/db/bazarr.db" \
       --radarr-url   "${RADARR_URL:-http://127.0.0.1:7878/radarr}" \
@@ -281,7 +281,7 @@ run_subtitle_recovery() {
 run_subtitle_quality() {
   # timeout=0 → no timeout; pipeline flock prevents re-entry
   run_step "subtitle_quality" 0 \
-    /bin/bash "${SCRIPTS_DIR}/subtitle_quality_manager.sh" \
+    /bin/bash "${CANONICAL_DIR}/subtitles/subtitle_quality_manager.sh" \
       auto-maintain \
       --since            15 \
       --keep-profile-langs \
@@ -289,8 +289,11 @@ run_subtitle_quality() {
 }
 
 run_translation() {
-  run_step "translation" "$TIMEOUT_TRANSLATION" \
-    /bin/bash -c "cd /config/berenstuff && PYTHONPATH=${CANONICAL_DIR} python3 ${CANONICAL_DIR}/translation/translator.py translate --since 60 </dev/null"
+  local _since="${TRANSLATOR_SINCE_MINUTES:-10}"
+  local _max_files="${TRANSLATOR_MAX_FILES_PER_RUN:-3}"
+  local _bazarr_db="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
+  run_step "translation" "${TIMEOUT_TRANSLATION}" \
+    /bin/bash -c "cd /config/berenstuff && PYTHONPATH=${CANONICAL_DIR} python3 ${CANONICAL_DIR}/translation/translator.py translate --since ${_since} --max-files ${_max_files} --bazarr-db ${_bazarr_db} </dev/null"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
