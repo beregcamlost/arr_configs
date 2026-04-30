@@ -1,6 +1,7 @@
 """Ollama client for local subtitle translation."""
 
 import json
+import os
 import logging
 import re
 import urllib.request
