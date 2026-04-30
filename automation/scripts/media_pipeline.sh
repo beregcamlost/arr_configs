@@ -40,7 +40,7 @@ readonly SQLITE_TIMEOUT_MS=15000   # used as .timeout dot-command (no output lea
 
 # ── Timeouts (seconds) ────────────────────────────────────────────────────────
 readonly TIMEOUT_QUICK=60
-readonly TIMEOUT_TRANSLATION="${TIMEOUT_TRANSLATION:-600}"
+# TIMEOUT_TRANSLATION sourced from .env; declared readonly after load_env to avoid conflict
 
 # ── State ─────────────────────────────────────────────────────────────────────
 PIPELINE_START_TS=""
@@ -106,6 +106,9 @@ log_step() {
 # shellcheck source=lib_env.sh
 source "${SCRIPT_DIR}/lib_env.sh"
 [[ -f "$ENV_FILE" ]] && load_env "$ENV_FILE"
+
+# Resolve TIMEOUT_TRANSLATION after loading .env (avoids readonly conflict when .env exports it)
+readonly TIMEOUT_TRANSLATION="${TIMEOUT_TRANSLATION:-600}"
 
 # ── Metrics (fail-soft: sourced after env so DB path is defined) ───────────────
 # shellcheck source=lib_metrics.sh
