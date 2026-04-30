@@ -60,7 +60,7 @@ def init_db(db_path):
 
 
 def record_translation(db_path, media_path, source_lang, target_lang,
-                        chars_used, status, provider=PROVIDER_DEEPL, key_index=None):
+                        chars_used, status, provider=PROVIDER_OLLAMA, key_index=None):
     """Record a translation attempt."""
     with contextlib.closing(_connect(db_path)) as conn:
         conn.execute(

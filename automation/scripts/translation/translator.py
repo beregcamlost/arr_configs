@@ -35,6 +35,12 @@ logging.basicConfig(
 # Session-level flag: once Ollama is down, skip it for the rest of the run.
 _ollama_unavailable = False
 
+try:
+    from translation.ollama_client import OllamaUnavailable as _OllamaUnavailable
+except ImportError:  # pragma: no cover — only fails if ollama_client missing
+    class _OllamaUnavailable(Exception):  # type: ignore[no-redef]
+        pass
+
 MARKER_EXTENSIONS = {
     PROVIDER_OLLAMA: ".ollama",
     "ollama+gemini": ".ollama",  # backward-compat: old marker name still .ollama
@@ -138,7 +144,7 @@ def translate_file(cfg: Config, media_path: str, chars_remaining=None):
         source_srt = find_best_source_srt(directory, stem, base_lang)
         if not source_srt:
             log.info("No source SRT for %s -> %s", basename, base_lang)
-            record_translation(db_path, media_path, "?", base_lang, 0, "no_source")
+            record_translation(db_path, media_path, "?", base_lang, 0, "no_source", PROVIDER_OLLAMA)
             continue
 
         source_basename = os.path.basename(source_srt)
@@ -179,10 +185,20 @@ def translate_file(cfg: Config, media_path: str, chars_remaining=None):
                 chars_remaining -= chars_used
             log.info("Wrote %s (%d chars, %s)", output_path, chars_used, provider)
 
+        except _OllamaUnavailable as e:
+            global _ollama_unavailable
+            _ollama_unavailable = True
+            error_msg = str(e)
+            record_translation(db_path, media_path, source_lang_code,
+                               base_lang, 0, f"error: {error_msg[:100]}", PROVIDER_OLLAMA)
+            failed.append({"file": basename, "target": base_lang,
+                           "error": error_msg[:100]})
+            log.error("Ollama unavailable, aborting remaining files in this run: %s", e)
+            break
         except Exception as e:
             error_msg = str(e)
             record_translation(db_path, media_path, source_lang_code,
-                               base_lang, 0, f"error: {error_msg[:100]}")
+                               base_lang, 0, f"error: {error_msg[:100]}", PROVIDER_OLLAMA)
             failed.append({"file": basename, "target": base_lang,
                            "error": error_msg[:100]})
             log.error("Translation failed %s -> %s: %s", basename, base_lang, e)
@@ -261,7 +277,9 @@ def cli():
               help="Maximum characters to translate in this run")
 @click.option("--state-dir", type=str, default=None)
 @click.option("--bazarr-db", type=str, default=None)
-def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db):
+@click.option("--max-files", type=int, default=None,
+              help="Max files to process in this run (applied after scan)")
+def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db, max_files):
     """Translate missing subtitles via Ollama."""
     global _ollama_unavailable
     _ollama_unavailable = False
@@ -299,6 +317,8 @@ def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db):
                 msg += f" in last {since} minutes"
             click.echo(msg)
             return
+        if max_files is not None:
+            results = results[:max_files]
         click.echo(f"Found {len(results)} file(s) with missing subtitles")
         for item in results:
             if chars_remaining is not None and chars_remaining <= 0:
