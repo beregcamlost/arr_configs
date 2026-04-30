@@ -16,6 +16,8 @@
 #
 # The sourcing script may set DB before sourcing to override the default Bazarr DB path.
 
+set -euo pipefail
+
 : "${DB:=/opt/bazarr/data/db/bazarr.db}"
 
 SQLITE_TIMEOUT_MS=30000

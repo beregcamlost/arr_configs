@@ -18,6 +18,8 @@
 #   - arr_rescan_for_media / bazarr_rescan_for_media also read:
 #       BAZARR_DB (global, set by codec manager) or fall back to default path
 
+set -euo pipefail
+
 [[ -n "${_LIB_ARR_NOTIFY_LOADED:-}" ]] && return 0
 _LIB_ARR_NOTIFY_LOADED=1
 

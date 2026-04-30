@@ -12,6 +12,8 @@
 # Caches the session ID in TRANSMISSION_SESSION_ID (must be declared as a
 # non-readonly variable in the sourcing script before sourcing this library).
 
+set -euo pipefail
+
 [[ -n "${_LIB_TRANSMISSION_LOADED:-}" ]] && return 0
 _LIB_TRANSMISSION_LOADED=1
 
