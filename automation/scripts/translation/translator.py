@@ -35,6 +35,17 @@ logging.basicConfig(
 # Session-level flag: once Ollama is down, skip it for the rest of the run.
 _ollama_unavailable = False
 
+# Metrics helper (fail-soft: if lib_metrics is missing or DB unavailable,
+# record_run_start returns -1 and record_run_end is a no-op)
+try:
+    from translation.lib_metrics import record_run_start as _metrics_start
+    from translation.lib_metrics import record_run_end as _metrics_end
+except ImportError:
+    def _metrics_start(subsystem: str) -> int:  # type: ignore[misc]
+        return -1
+    def _metrics_end(run_id: int, exit_code: int, **kwargs) -> None:  # type: ignore[misc]
+        pass
+
 try:
     from translation.ollama_client import OllamaUnavailable as _OllamaUnavailable
 except ImportError:  # pragma: no cover — only fails if ollama_client missing
@@ -284,6 +295,8 @@ def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db, max_f
     global _ollama_unavailable
     _ollama_unavailable = False
 
+    _metrics_run_id = _metrics_start("translator")
+
     cfg = load_config(bazarr_db=bazarr_db, state_dir=state_dir)
     db = _db_path(cfg.state_dir)
     init_db(db)
@@ -348,6 +361,14 @@ def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db, max_f
         f"Done: {len(all_translated)} translated, {len(all_failed)} failed, "
         f"{total_chars:,} chars used ({monthly_chars:,} this month"
         f"{' — ' + provider_str if provider_str else ''})"
+    )
+
+    _metrics_end(
+        _metrics_run_id,
+        exit_code=0,
+        files_processed=len(all_translated),
+        files_failed=len(all_failed),
+        metadata={"provider": "ollama", "total_chars": total_chars},
     )
 
     if all_translated or all_failed:

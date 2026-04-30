@@ -463,3 +463,52 @@ jobs:
     depends_on: .env
     safe_to_disable: yes (already disabled)
     enabled: false
+
+  # ── Metrics jobs (Phase 6 L) — TODO: enable when Phase 6 L is reviewed ────
+  # These entries are staged but NOT installed in crontab.
+  # To enable: add the cron lines below to the active crontab manually.
+
+  - id: metrics_daily_aggregate
+    # TODO: enable when Phase 6 L is reviewed
+    # Cron line:
+    #   0 1 * * * /bin/bash /config/berenstuff/automation/scripts/metrics_daily_aggregate.sh >> /config/berenstuff/automation/logs/metrics_aggregate.log 2>&1
+    schedule: "0 1 * * *"
+    command: >-
+      /bin/bash /config/berenstuff/automation/scripts/metrics_daily_aggregate.sh
+    log: /config/berenstuff/automation/logs/metrics_aggregate.log
+    purpose: >-
+      Daily at 01:00 — reads yesterday's subsystem_runs rows from the metrics DB
+      and computes per-subsystem aggregates (run counts, success/fail, files
+      processed, avg duration), inserting them into daily_aggregates.
+      Safe to re-run (INSERT OR REPLACE). Feeds the weekly Discord digest.
+    runtime_typical: 1–5s
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db
+    lock: none
+    on_failure: Yesterday's data not aggregated; re-run manually.
+    depends_on: metrics DB populated by pipeline subsystems
+    safe_to_disable: yes (weekly digest will show gaps)
+    enabled: false  # staged only — enable after Phase 6 L review
+
+  - id: metrics_weekly_digest
+    # TODO: enable when Phase 6 L is reviewed
+    # Cron line:
+    #   0 9 * * 0 /bin/bash /config/berenstuff/automation/scripts/metrics_weekly_digest.sh >> /config/berenstuff/automation/logs/metrics_weekly.log 2>&1
+    schedule: "0 9 * * 0"
+    command: >-
+      /bin/bash /config/berenstuff/automation/scripts/metrics_weekly_digest.sh
+    log: /config/berenstuff/automation/logs/metrics_weekly.log
+    purpose: >-
+      Weekly (Sunday 09:00) — reads last 7 days of daily_aggregates and posts
+      a markdown digest to Discord via DISCORD_WEBHOOK_URL. Table includes
+      per-subsystem runs, success rate, files processed, and avg duration.
+      Auto-generates highlights (top performers) and issues (failures, low
+      success rate).
+    runtime_typical: 2–10s
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db (read-only)
+    lock: none
+    on_failure: Digest not posted; pipeline continues normally.
+    depends_on: .env, DISCORD_WEBHOOK_URL, daily_aggregates populated
+    safe_to_disable: yes
+    enabled: false  # staged only — enable after Phase 6 L review

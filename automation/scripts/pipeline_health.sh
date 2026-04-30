@@ -18,7 +18,8 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly LOG_PREFIX="[pipeline_health]"
 readonly STATE_FILE="/tmp/pipeline_health.state"
 readonly ENV_FILE="/config/berenstuff/.env"

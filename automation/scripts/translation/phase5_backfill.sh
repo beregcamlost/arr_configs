@@ -66,7 +66,26 @@ fi
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 [[ -f "$ENV_FILE" ]] || die "Missing env file: $ENV_FILE"
+# shellcheck source=/dev/null
 source "$ENV_FILE"
+
+# ── Metrics (fail-soft) ───────────────────────────────────────────────────────
+readonly SCRIPTS_DIR="/config/berenstuff/automation/scripts"
+# shellcheck source=../lib_metrics.sh
+source "${SCRIPTS_DIR}/lib_metrics.sh" || true
+
+METRICS_RUN_ID=""
+METRICS_RUN_ID="$(metrics_run_start "phase5_backfill" 2>/dev/null)" || METRICS_RUN_ID=""
+
+# Trap to record end even on SIGINT/SIGTERM or early exit
+_metrics_cleanup() {
+    local ec=$?
+    if [[ -n "$METRICS_RUN_ID" ]]; then
+        metrics_run_end "$METRICS_RUN_ID" "$ec" \
+            "${run_count:-0}" "${fail_count:-0} " 2>/dev/null || true
+    fi
+}
+trap _metrics_cleanup EXIT
 
 [[ -f "$REMAINING_FILE" ]] || die "Work list not found: $REMAINING_FILE
   Generate it first:

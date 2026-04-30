@@ -26,7 +26,8 @@ set -uo pipefail
 # single failure does not abort the full pipeline run.
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly LOG="/config/berenstuff/automation/logs/media_pipeline.log"
 readonly ENV_FILE="/config/berenstuff/.env"
 
@@ -105,6 +106,10 @@ log_step() {
 # shellcheck source=lib_env.sh
 source "${SCRIPT_DIR}/lib_env.sh"
 [[ -f "$ENV_FILE" ]] && load_env "$ENV_FILE"
+
+# ── Metrics (fail-soft: sourced after env so DB path is defined) ───────────────
+# shellcheck source=lib_metrics.sh
+source "${SCRIPT_DIR}/lib_metrics.sh" || true
 
 # ── Load guard (from lib_subtitle_common.sh) ──────────────────────────────────
 load_guard() {
@@ -372,11 +377,15 @@ run_fast_lane() {
   lane_mark_running
   log "=== fast lane start (steps 1-3) ==="
 
+  local _fast_run_id
+  _fast_run_id="$(metrics_run_start "fast_lane" 2>/dev/null)" || _fast_run_id=""
+
   run_grab_monitor
   run_zombie_reaper
   run_import_cleanup
 
   lane_mark_done 0
+  [[ -n "$_fast_run_id" ]] && metrics_run_end "$_fast_run_id" 0 2>/dev/null || true
   log "=== fast lane done ==="
 }
 
@@ -389,9 +398,13 @@ run_slow_lane() {
   lane_mark_running
   log "=== slow lane start (steps 4-7) ==="
 
+  local _slow_run_id
+  _slow_run_id="$(metrics_run_start "slow_lane" 2>/dev/null)" || _slow_run_id=""
+
   log "=== load gate check ==="
   if ! load_guard "slow_lane"; then
     lane_mark_done 0
+    [[ -n "$_slow_run_id" ]] && metrics_run_end "$_slow_run_id" 0 2>/dev/null || true
     log "=== slow lane done (load_guard skipped heavy work) ==="
     return 0
   fi
@@ -403,6 +416,7 @@ run_slow_lane() {
   run_translation
 
   lane_mark_done 0
+  [[ -n "$_slow_run_id" ]] && metrics_run_end "$_slow_run_id" 0 2>/dev/null || true
   log "=== slow lane done ==="
 }
 
