@@ -2009,6 +2009,7 @@ LEFT JOIN conversion_runs cr ON cr.id=rmax.max_id
 WHERE cp.eligible=1
   AND mf.deleted_at IS NULL
   AND COALESCE(cr.status,'') NOT IN ('swapped','running','attempt_limit_reached')
+  AND (cp.claimed_by IS NULL OR cp.claimed_by = 'mubuntu')
 ORDER BY cp.priority, cp.media_id${limit_clause};
 ")
 

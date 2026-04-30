@@ -1,6 +1,7 @@
 """Local Ollama proofreader for Spanish subtitle corrections."""
 
 import json
+import os
 import logging
 import re
 import urllib.request
@@ -10,7 +11,7 @@ from typing import List
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "phi4-mini-proofread"
+DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "subtitler:v2")
 
 # Strip leading label prefixes the model might echo back
 _LABEL_RE = re.compile(r'^(?:corrected|spanish|traducción)[:\s]+', re.IGNORECASE)

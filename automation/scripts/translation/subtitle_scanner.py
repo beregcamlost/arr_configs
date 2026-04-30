@@ -61,6 +61,113 @@ def _is_dialogue_srt(path: str) -> bool:
     return not (tag_ratio > 0.5 and avg_clean < 20)
 
 
+
+
+# Added 2026-04-27: embedded-source fallback for find_best_source_srt.
+import subprocess as _subprocess
+_TEXT_SUB_CODECS = {
+    "subrip", "srt", "S_TEXT/UTF8", "SubRip/SRT",
+    "mov_text", "Timed Text",
+    "webvtt", "WebVTT",
+    # ASS/SSA support (SubStationAlpha embedded tracks)
+    "SubStationAlpha", "S_TEXT/ASS", "ass", "ssa", "S_TEXT/SSA",
+}
+
+
+def _find_video_for_stem(directory: str, stem: str) -> Optional[str]:
+    """Return path to <stem>.{mkv,mp4,m4v,avi} if found in directory."""
+    for ext in (".mkv", ".mp4", ".m4v", ".avi"):
+        candidate = os.path.join(directory, f"{stem}{ext}")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _probe_embedded_text_subs(video_path: str):
+    """Yield (track_id, ffmpeg_sub_index, lang_code) for text-codec subs."""
+    try:
+        out = _subprocess.check_output(
+            ["mkvmerge", "-i", "-F", "json", video_path],
+            stderr=_subprocess.DEVNULL, timeout=20,
+        )
+        info = json.loads(out)
+    except Exception as e:
+        log.debug("embedded probe failed for %s: %s", video_path, e)
+        return
+    sub_idx = 0
+    for t in info.get("tracks", []):
+        if t.get("type") != "subtitles":
+            continue
+        codec = t.get("codec", "")
+        if codec not in _TEXT_SUB_CODECS:
+            sub_idx += 1
+            continue
+        props = t.get("properties", {}) or {}
+        lang = (props.get("language") or "und").lower()
+        # Normalize 3-letter to 2-letter
+        if lang == "eng": lang = "en"
+        elif lang == "spa": lang = "es"
+        elif lang == "fre" or lang == "fra": lang = "fr"
+        elif lang == "ger" or lang == "deu": lang = "de"
+        elif lang == "ita": lang = "it"
+        elif lang == "por": lang = "pt"
+        elif lang == "jpn": lang = "ja"
+        elif lang == "rus": lang = "ru"
+        yield t["id"], sub_idx, lang
+        sub_idx += 1
+
+
+def _extract_embedded_source_srt(directory: str, stem: str, target_lang: str) -> Optional[str]:
+    """If no external <stem>.<lang>.srt exists for non-target lang, demux from embedded.
+
+    Returns the path of the extracted sidecar, or None if no usable embedded source.
+    """
+    video = _find_video_for_stem(directory, stem)
+    if not video:
+        return None
+    candidates = list(_probe_embedded_text_subs(video))
+    # Filter out target lang
+    candidates = [(tid, sidx, lang) for tid, sidx, lang in candidates
+                  if lang != target_lang.lower() and lang != "und"]
+    if not candidates:
+        return None
+    # Prefer English first
+    candidates.sort(key=lambda x: (0 if x[2] == "en" else 1, x[2]))
+    track_id, sub_idx, lang = candidates[0]
+    out_path = os.path.join(directory, f"{stem}.{lang}.srt")
+    if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+        # External sidecar already exists despite earlier search — return it
+        return out_path
+    # Try ffmpeg first (faster, can limit duration), fall back to mkvextract
+    try:
+        _subprocess.check_call(
+            ["ffmpeg", "-y", "-v", "error", "-i", video,
+             "-map", f"0:s:{sub_idx}", "-c:s", "text", out_path],
+            stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL, timeout=180,
+        )
+    except Exception:
+        try:
+            _subprocess.check_call(
+                ["mkvextract", "tracks", video, f"{track_id}:{out_path}"],
+                stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL, timeout=240,
+            )
+        except Exception as e:
+            log.warning("embedded extract failed for %s: %s", video, e)
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return None
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        return None
+    log.info("Extracted embedded %s sub for %s as source for translation", lang, stem)
+    return out_path
+
+
 def find_best_source_srt(
     directory: str, stem: str, target_lang: str
 ) -> Optional[str]:
@@ -94,6 +201,10 @@ def find_best_source_srt(
     candidates = [(p, l, s) for p, l, s in candidates if _is_dialogue_srt(p)]
 
     if not candidates:
+        # External sidecar fallback failed — try extracting from embedded tracks
+        embedded_path = _extract_embedded_source_srt(directory, stem, target_lang)
+        if embedded_path:
+            return embedded_path
         return None
 
     # Sort by size descending

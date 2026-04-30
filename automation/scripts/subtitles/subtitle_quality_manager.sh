@@ -964,10 +964,15 @@ cmd_mux() {
     log_mkv_rewrite_audit "$mkv_file"
     mv "$tmp_out" "$mkv_file"
 
-    # Delete external SRT files
+    # Delete external SRT files (KEEP if inferior translator marker exists — gemini/deepl/google
+    # subs are user-flagged for upgrade; ollama subs are good and may be deleted)
     for sf in "${srt_files[@]}"; do
-      rm -f "$sf"
-      log "  Deleted: $(basename "$sf")"
+      if [[ -f "${sf}.gemini" || -f "${sf}.deepl" || -f "${sf}.google" ]]; then
+        log "  Kept (inferior translator marker preserved): $(basename "$sf")"
+      else
+        rm -f "$sf"
+        log "  Deleted: $(basename "$sf")"
+      fi
     done
 
     muxed=$((muxed + ${#srt_files[@]}))
@@ -1353,10 +1358,24 @@ try_providers_for_lang() {
 try_translate_inline() {
   local mkv_file="$1" target_lang="$2"
   log "TRANSLATE_INLINE: attempting translation for lang=$target_lang: $(basename "$mkv_file")"
+  # Per-file flock: ensures the WSL and debian workers never translate the same file simultaneously
+  local _tl_lock_dir="/tmp/sub-translate-locks"
+  mkdir -p "$_tl_lock_dir"
+  local _tl_lock_hash
+  _tl_lock_hash="$(printf '%s' "$mkv_file" | sha1sum | cut -d' ' -f1)"
+  local _tl_lock_path="${_tl_lock_dir}/${_tl_lock_hash}.lock"
+  exec 8>"$_tl_lock_path"
+  if ! flock -n 8; then
+    log "TRANSLATE_INLINE: per-file lock held by another worker, skipping: $(basename "$mkv_file")"
+    exec 8>&-
+    return 1
+  fi
   PYTHONPATH=/config/berenstuff/automation/scripts python3 \
     -m translation.translator translate --file "$mkv_file" </dev/null 2>&1 | while IFS= read -r line; do
     log "TRANSLATE_INLINE: $line"
   done
+  flock -u 8
+  exec 8>&-
   # Check if the SRT was created
   local dir name_stem
   dir="$(dirname "$mkv_file")"
@@ -1831,9 +1850,43 @@ cmd_auto_maintain() {
       ext_lang_norm="$(normalize_track_lang "$ext_lang")"
       [[ "$srt_basename" == *.forced.srt ]] && ext_forced_num=1
 
+      # === content-language check (added 2026-04-27) ===
+      # Reject SRTs whose actual content language doesn't match the lang tag.
+      # Gated by SUB_CONTENT_LANG_CHECK env var (default on). On WRONG_LANG, force BAD verdict.
+      if [[ "${SUB_CONTENT_LANG_CHECK:-1}" != "0" ]] && [[ "$ext_lang_norm" != "und" ]]; then
+        local _lang_check
+        _lang_check="$(check_external_srt_lang "$srt_file" "$ext_lang_norm" 2>/dev/null || true)"
+        if [[ "$_lang_check" == WRONG_LANG* ]]; then
+          log "WRONG_CONTENT_LANG tag=$ext_lang_norm $_lang_check: $srt_basename"
+          rating="BAD"
+        fi
+      fi
+
+
       case "$rating" in
         GOOD)
           # Skip translation-source extractions (embedded original stays intact)
+      # === prefer-embedded-when-clean (added 2026-04-27) ===
+      # If a same-language embedded track exists AND its content is langdetect-OK,
+      # skip the mux and drop the redundant external sidecar. Embedded wins by default.
+      if [[ "${SUB_PREFER_EMBEDDED:-1}" != "0" ]] \
+         && [[ -n "${embedded_lang_idx_p1[$ext_lang_norm]:-}" ]] \
+         && [[ "$ext_lang_norm" != "und" ]]; then
+        local _emb_track_id _emb_sub_idx _emb_check
+        _emb_track_id="${embedded_lang_idx_p1[$ext_lang_norm]}"
+        _emb_sub_idx="$(mkvmerge_track_id_to_sub_index "$mkv_file" "$_emb_track_id" 2>/dev/null || true)"
+        if [[ -n "$_emb_sub_idx" ]]; then
+          _emb_check="$(check_embedded_track_lang "$mkv_file" "$_emb_sub_idx" "$ext_lang_norm" 2>/dev/null || true)"
+          if [[ "$_emb_check" == OK* ]]; then
+            log "PREFER_EMBEDDED: clean embedded $ext_lang_norm exists, removing redundant external: $srt_basename"
+            if [[ "$DRY_RUN" -eq 0 ]]; then
+              rm -f "$srt_file"
+            fi
+            continue
+          fi
+        fi
+      fi
+
           if [[ -f "${srt_file}.deepl-source" ]]; then
             debug "SKIP mux (translation source extraction): $srt_basename"
             continue

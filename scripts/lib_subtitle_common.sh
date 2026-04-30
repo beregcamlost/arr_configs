@@ -20,8 +20,8 @@
 
 SQLITE_TIMEOUT_MS=30000
 
-# shellcheck source=../lib_arr_notify.sh
-source "${BASH_SOURCE[0]%/*}/../lib_arr_notify.sh"
+# shellcheck source=lib_arr_notify.sh
+source "${BASH_SOURCE[0]%/*}/lib_arr_notify.sh"
 
 # Subtitle extensions that can be converted to SRT (text-based formats)
 # shellcheck disable=SC2034

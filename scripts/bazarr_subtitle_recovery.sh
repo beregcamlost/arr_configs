@@ -162,6 +162,19 @@ recovery_db() {
 }
 
 # ---------------------------------------------------------------------------
+# SQLite wrapper for BAZARR_DB (read-only) — applies busy_timeout so that
+# transient write-locks held by the live Bazarr process are waited out
+# rather than causing an immediate SQLITE_BUSY (exit 5).
+# ---------------------------------------------------------------------------
+bazarr_db() {
+  local flags=()
+  while [[ "${1:-}" == -* ]]; do
+    flags+=("$1" "$2"); shift 2
+  done
+  sqlite3 "${flags[@]}" -cmd ".timeout 30000" "$BAZARR_DB" "$@" </dev/null
+}
+
+# ---------------------------------------------------------------------------
 # --report mode: dump state summary and exit
 # ---------------------------------------------------------------------------
 if [[ "$REPORT_MODE" -eq 1 ]]; then
@@ -169,8 +182,8 @@ if [[ "$REPORT_MODE" -eq 1 ]]; then
   echo ""
 
   # Currently missing in Bazarr DB
-  ep_missing="$(sqlite3 "$BAZARR_DB" "SELECT COUNT(*) FROM table_episodes WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]';")"
-  mv_missing="$(sqlite3 "$BAZARR_DB" "SELECT COUNT(*) FROM table_movies WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]';")"
+  ep_missing="$(bazarr_db "SELECT COUNT(*) FROM table_episodes WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]';")"
+  mv_missing="$(bazarr_db "SELECT COUNT(*) FROM table_movies WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]';")"
   echo "Items currently missing subtitles in Bazarr DB:"
   echo "  Episodes: $ep_missing"
   echo "  Movies:   $mv_missing"
@@ -759,11 +772,11 @@ process_item() {
 
     # Re-read from Bazarr DB to check if the download resolved the issue
     if [[ "$media_type" == "episode" ]]; then
-      missing_after_raw="$(sqlite3 "$BAZARR_DB" "SELECT missing_subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
-      subtitles_raw="$(sqlite3 "$BAZARR_DB" "SELECT subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
+      missing_after_raw="$(bazarr_db "SELECT missing_subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
+      subtitles_raw="$(bazarr_db "SELECT subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
     else
-      missing_after_raw="$(sqlite3 "$BAZARR_DB" "SELECT missing_subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
-      subtitles_raw="$(sqlite3 "$BAZARR_DB" "SELECT subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
+      missing_after_raw="$(bazarr_db "SELECT missing_subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
+      subtitles_raw="$(bazarr_db "SELECT subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
     fi
     # Convert refreshed data to JSON
     missing_after_json="$(printf '%s' "$missing_after_raw" | jsonish_to_json 2>/dev/null || echo '[]')"
@@ -797,9 +810,9 @@ process_item() {
         sleep 2  # Give Bazarr a moment to write the file
         # Re-read subtitles to get updated path
         if [[ "$media_type" == "episode" ]]; then
-          subtitles_raw="$(sqlite3 "$BAZARR_DB" "SELECT subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
+          subtitles_raw="$(bazarr_db "SELECT subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
         else
-          subtitles_raw="$(sqlite3 "$BAZARR_DB" "SELECT subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
+          subtitles_raw="$(bazarr_db "SELECT subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
         fi
         subtitles_json="$(printf '%s' "$subtitles_raw" | jsonish_to_json 2>/dev/null || echo '[]')"
         IFS=$'\t' read -r src_lang src_path <<<"$(pick_best_source_sub_for_target "$subtitles_json" "$lang")"
@@ -813,9 +826,9 @@ process_item() {
         add_action "TRANSLATE_TRY $media_type $media_id lang=$lang source=$src_lang http=$tr_http"
 
         if [[ "$media_type" == "episode" ]]; then
-          missing_after_raw="$(sqlite3 "$BAZARR_DB" "SELECT missing_subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
+          missing_after_raw="$(bazarr_db "SELECT missing_subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
         else
-          missing_after_raw="$(sqlite3 "$BAZARR_DB" "SELECT missing_subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
+          missing_after_raw="$(bazarr_db "SELECT missing_subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
         fi
         missing_after_json="$(printf '%s' "$missing_after_raw" | jsonish_to_json 2>/dev/null || echo '[]')"
         if ! has_missing_target "$missing_after_json" "$lang" "$forced" "$hi"; then
@@ -909,7 +922,7 @@ fi
 # Bulk export + convert episodes
 EPISODE_RAW="$TMPDIR_RECOVERY/episodes_raw.tsv"
 EPISODE_JSON="$TMPDIR_RECOVERY/episodes_json.tsv"
-sqlite3 -separator $'\t' "$BAZARR_DB" "
+bazarr_db -separator $'\t' "
   SELECT sonarrEpisodeId || '|' || sonarrSeriesId, missing_subtitles, subtitles
   FROM table_episodes
   WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]'
@@ -934,7 +947,7 @@ done < "$EPISODE_JSON"
 # Bulk export + convert movies
 MOVIE_RAW="$TMPDIR_RECOVERY/movies_raw.tsv"
 MOVIE_JSON="$TMPDIR_RECOVERY/movies_json.tsv"
-sqlite3 -separator $'\t' "$BAZARR_DB" "
+bazarr_db -separator $'\t' "
   SELECT radarrId, missing_subtitles, subtitles
   FROM table_movies
   WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]'

@@ -1433,3 +1433,78 @@ is_file_being_played() {
     | jq --arg path "$file_path" '[.[] | select(.NowPlayingItem.Path == $path)] | length' 2>/dev/null || echo 0)"
   [[ "$playing" -gt 0 ]]
 }
+
+
+# === content-language check (added 2026-04-27) =========================
+# Wraps sub_lang_sniff.py to verify SRT content language matches its lang tag.
+# Args: <srt_path> <expected_2letter_lang>
+# Echoes one of: OK | WRONG_LANG | UNCERTAIN | EMPTY | DISABLED | NOHELPER
+# Returns: 0 OK, 1 WRONG, 2 indeterminate
+check_external_srt_lang() {
+  local srt_path="$1" expected="$2"
+  if [[ "${SUB_CONTENT_LANG_CHECK:-1}" == "0" ]]; then
+    echo "DISABLED"; return 2
+  fi
+  local helper="${0%/*}/sub_lang_sniff.py"
+  [[ -x "$helper" ]] || helper="/config/berenstuff/automation/scripts/subtitles/sub_lang_sniff.py"
+  if [[ ! -x "$helper" ]]; then
+    echo "NOHELPER"; return 2
+  fi
+  local out rc
+  out="$("$helper" "$srt_path" "$expected" 2>/dev/null)"
+  rc=$?
+  case "$rc" in
+    0) echo "OK ${out#OK }" ;;
+    1) echo "WRONG_LANG ${out#WRONG_LANG }" ;;
+    *) echo "UNCERTAIN ${out}" ;;
+  esac
+  return "$rc"
+}
+
+
+# === embedded content-language check (added 2026-04-27 — prefer-embedded rule) ====
+# Extract first ~12 min of an embedded track via ffmpeg, run langdetect.
+# Args: <video_path> <ffmpeg_sub_index_among_subs> <expected_2letter_lang>
+# Echoes one of: OK | WRONG_LANG | UNCERTAIN | EMPTY | DISABLED | NOHELPER | EXTRACT_FAIL
+# Returns: 0 OK, 1 WRONG, 2 indeterminate
+check_embedded_track_lang() {
+  local video="$1" sub_idx="$2" expected="$3"
+  if [[ "${SUB_CONTENT_LANG_CHECK:-1}" == "0" ]]; then
+    echo "DISABLED"; return 2
+  fi
+  local helper="${0%/*}/sub_lang_sniff.py"
+  [[ -x "$helper" ]] || helper="/config/berenstuff/automation/scripts/subtitles/sub_lang_sniff.py"
+  if [[ ! -x "$helper" ]]; then
+    echo "NOHELPER"; return 2
+  fi
+  local tmp
+  tmp="$(mktemp --suffix=.srt)"
+  if ! ffmpeg -y -v error -i "$video" -map "0:s:${sub_idx}" -c:s text -t 720 "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; echo "EXTRACT_FAIL"; return 2
+  fi
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"; echo "EXTRACT_FAIL"; return 2
+  fi
+  local out rc
+  out="$("$helper" "$tmp" "$expected" 2>/dev/null)"; rc=$?
+  rm -f "$tmp"
+  case "$rc" in
+    0) echo "OK ${out#OK }" ;;
+    1) echo "WRONG_LANG ${out#WRONG_LANG }" ;;
+    *) echo "UNCERTAIN ${out}" ;;
+  esac
+  return "$rc"
+}
+
+# Helper: convert a global mkvmerge track id to its index-among-subtitles for
+# ffmpeg -map 0:s:N. Reads embedded track JSON from cache or recomputes.
+# Args: <video_path> <track_id>
+# Echoes: integer index (0-based among subs), or "" if not found.
+mkvmerge_track_id_to_sub_index() {
+  local video="$1" tid="$2"
+  mkvmerge -i -F json "$video" 2>/dev/null \
+    | jq -r --argjson tid "$tid" "
+        [.tracks[] | select(.type==\"subtitles\") | .id] as \$subs
+        | (\$subs | index(\$tid)) // empty
+      "
+}
