@@ -140,9 +140,29 @@ for media_path in "${worklist[@]}"; do
         continue
     fi
 
+    # Per-file flock — prevents two workers from translating the same file
+    lock_path="/tmp/sub-translate-locks/$(echo -n "$media_path" | sha1sum | cut -d' ' -f1).lock"
+    mkdir -p /tmp/sub-translate-locks
+    exec 8>>"$lock_path"
+    if ! flock -n 8; then
+        log "SKIP: per-file lock held by another worker: $(basename "$media_path")"
+        exec 8>&-
+        continue
+    fi
+
+    # Re-check done file after acquiring flock (other worker may have finished it)
+    if grep -qF "$media_path" "$DONE_FILE" 2>/dev/null; then
+        log "SKIP: completed by another worker while we waited for lock"
+        exec 8>&-
+        rm -f "$lock_path"
+        continue
+    fi
+
     # Cap per run
     if [[ -n "$MAX_FILES" && "$MAX_FILES" -gt 0 && "$run_count" -ge "$MAX_FILES" ]]; then
         log "Reached --max-files $MAX_FILES for this run"
+        exec 8>&-
+        rm -f "$lock_path"
         break
     fi
 
@@ -150,12 +170,16 @@ for media_path in "${worklist[@]}"; do
         log "SKIP (not on disk): $(basename "$media_path")"
         echo "$media_path" >> "$FAILED_FILE"
         fail_count=$((fail_count + 1))
+        exec 8>&-
+        rm -f "$lock_path"
         continue
     fi
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
         log "DRY-RUN: $(basename "$media_path")"
         run_count=$((run_count + 1))
+        exec 8>&-
+        rm -f "$lock_path"
         continue
     fi
 
@@ -182,6 +206,9 @@ for media_path in "${worklist[@]}"; do
         echo "$media_path" >> "$FAILED_FILE"
         fail_count=$((fail_count + 1))
     fi
+
+    exec 8>&-
+    rm -f "$lock_path"
 
     # Progress report
     total_done=$(( done_count + run_count ))
