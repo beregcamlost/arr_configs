@@ -20,7 +20,7 @@ CODEC_STATE_DIR="/APPBOX_DATA/storage/.transcode-state-media"
 LOG_LEVEL="info"
 PATH_PREFIX_ROOT=""
 SINCE_MINUTES=0
-STATE_DIR="/APPBOX_DATA/storage/.subtitle-quality-state"
+STATE_DIR="${PIPELINE_DB:-/APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db}"
 EMBY_URL="${EMBY_URL:-}"
 EMBY_API_KEY="${EMBY_API_KEY:-}"
 SONARR_URL="${SONARR_URL:-http://127.0.0.1:8989/sonarr}"
@@ -123,7 +123,7 @@ init_state_db() {
   local db="$1"
   mkdir -p "$(dirname "$db")"
   sqlite3 "$db" "
-    CREATE TABLE IF NOT EXISTS file_audits (
+    CREATE TABLE IF NOT EXISTS sqm_file_audits (
       file_path TEXT PRIMARY KEY,
       mtime INTEGER NOT NULL,
       last_audit_ts INTEGER NOT NULL,
@@ -131,12 +131,12 @@ init_state_db() {
       external_json TEXT DEFAULT '[]',
       action_taken TEXT DEFAULT 'none'
     );
-    CREATE TABLE IF NOT EXISTS pending_work (
+    CREATE TABLE IF NOT EXISTS sqm_pending_work (
       file_path TEXT PRIMARY KEY,
       enqueued_at INTEGER NOT NULL,
       source TEXT DEFAULT 'unknown'
     );
-    CREATE TABLE IF NOT EXISTS needs_upgrade (
+    CREATE TABLE IF NOT EXISTS sqm_needs_upgrade (
       file_path      TEXT    NOT NULL,
       lang           TEXT    NOT NULL,
       forced         INTEGER NOT NULL DEFAULT 0,
@@ -149,16 +149,16 @@ init_state_db() {
       resolved_ts    INTEGER,
       PRIMARY KEY (file_path, lang, forced)
     );
-    CREATE INDEX IF NOT EXISTS idx_nu_last_retry ON needs_upgrade(last_retry_ts);
-    CREATE INDEX IF NOT EXISTS idx_nu_resolved   ON needs_upgrade(resolved_ts);
-    CREATE TABLE IF NOT EXISTS watermark_patterns (
+    CREATE INDEX IF NOT EXISTS idx_nu_last_retry ON sqm_needs_upgrade(last_retry_ts);
+    CREATE INDEX IF NOT EXISTS idx_nu_resolved   ON sqm_needs_upgrade(resolved_ts);
+    CREATE TABLE IF NOT EXISTS sqm_watermark_patterns (
       pattern    TEXT PRIMARY KEY,
       source     TEXT DEFAULT 'builtin',
       added_ts   INTEGER NOT NULL,
       hit_count  INTEGER DEFAULT 0,
       last_hit   INTEGER DEFAULT 0
     );
-    CREATE TABLE IF NOT EXISTS sync_drift_cache (
+    CREATE TABLE IF NOT EXISTS sqm_sync_drift_cache (
       file_path    TEXT NOT NULL,
       target_lang  TEXT NOT NULL,
       file_mtime   INTEGER NOT NULL,
@@ -168,7 +168,7 @@ init_state_db() {
       checked_ts   INTEGER NOT NULL,
       PRIMARY KEY (file_path, target_lang)
     );
-    CREATE TABLE IF NOT EXISTS quality_checks (
+    CREATE TABLE IF NOT EXISTS sqm_quality_checks (
       srt_path      TEXT NOT NULL,
       srt_mtime     INTEGER NOT NULL,
       expected_lang TEXT NOT NULL,
@@ -185,13 +185,13 @@ init_state_db() {
   " </dev/null >/dev/null 2>&1
 }
 
-init_watermark_patterns() {
+init_sqm_watermark_patterns() {
   local db="$1"
   local now
   now="$(date +%s)"
   # One multi-row INSERT covers all builtins — idempotent via OR IGNORE
   sqm_db "$db" "
-    INSERT OR IGNORE INTO watermark_patterns(pattern, source, added_ts) VALUES
+    INSERT OR IGNORE INTO sqm_watermark_patterns(pattern, source, added_ts) VALUES
       ('galaxytv',         'builtin', $now),
       ('yify',             'builtin', $now),
       ('yts',              'builtin', $now),
@@ -207,9 +207,9 @@ init_watermark_patterns() {
   " 2>/dev/null || true
 }
 
-load_watermark_patterns() {
+load_sqm_watermark_patterns() {
   local db="$1"
-  sqm_db "$db" -separator '|' "SELECT pattern FROM watermark_patterns ORDER BY source, pattern;" 2>/dev/null
+  sqm_db "$db" -separator '|' "SELECT pattern FROM sqm_watermark_patterns ORDER BY source, pattern;" 2>/dev/null
 }
 
 # SQLite wrapper: sets busy_timeout via -cmd (no stdout leakage), passes through flags and query
@@ -226,7 +226,7 @@ sqm_db() {
 enqueue_pending() {
   local db="$1" file_path="$2" source="${3:-manual}"
   init_state_db "$db"
-  sqm_db "$db" "INSERT OR REPLACE INTO pending_work (file_path, enqueued_at, source) VALUES ('$(sql_escape "$file_path")', $(date +%s), '$source');" >/dev/null 2>&1 || true
+  sqm_db "$db" "INSERT OR REPLACE INTO sqm_pending_work (file_path, enqueued_at, source) VALUES ('$(sql_escape "$file_path")', $(date +%s), '$source');" >/dev/null 2>&1 || true
 }
 
 # Drain pending queue, returns file paths one per line
@@ -236,9 +236,9 @@ drain_pending() {
   local -a paths=()
   while IFS= read -r p; do
     [[ -n "$p" ]] && paths+=("$p")
-  done < <(sqm_db "$db" "SELECT file_path FROM pending_work;" 2>/dev/null || true)
+  done < <(sqm_db "$db" "SELECT file_path FROM sqm_pending_work;" 2>/dev/null || true)
   # Delete drained entries
-  sqm_db "$db" "DELETE FROM pending_work;" 2>/dev/null || true
+  sqm_db "$db" "DELETE FROM sqm_pending_work;" 2>/dev/null || true
   for p in "${paths[@]}"; do
     printf '%s\n' "$p"
   done
@@ -274,7 +274,7 @@ is_file_being_converted() {
   [[ "${running:-0}" -gt 0 ]]
 }
 
-STREAMING_STATE_DB="/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
+STREAMING_STATE_DB="${PIPELINE_DB:-/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db}"
 
 # Pre-loaded streaming candidate paths (populated by load_streaming_candidates)
 declare -A _STREAMING_PATHS=()
@@ -670,10 +670,10 @@ check_sync_drift() {
 cmd_audit() {
   log "Auditing subtitles in: $PATH_PREFIX (recursive=$RECURSIVE)"
 
-  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  local state_db="$STATE_DIR"
   init_state_db "$state_db"
-  init_watermark_patterns "$state_db"
-  _CACHED_WATERMARK_PATTERNS="$(load_watermark_patterns "$state_db")"
+  init_sqm_watermark_patterns "$state_db"
+  _CACHED_WATERMARK_PATTERNS="$(load_sqm_watermark_patterns "$state_db")"
   [[ -z "$_CACHED_WATERMARK_PATTERNS" ]] && _CACHED_WATERMARK_PATTERNS="$WATERMARK_PATTERNS"
 
   local total_files=0 total_tracks=0 good=0 warn=0 bad=0
@@ -1434,7 +1434,7 @@ run_upgrade_retries() {
 
   while IFS=$'\t' read -r nu_path nu_lang nu_forced _ _ nu_retries; do
     [[ -z "$nu_path" ]] && continue
-    [[ ! -f "$nu_path" ]] && { resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"; continue; }
+    [[ ! -f "$nu_path" ]] && { resolve_sqm_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"; continue; }
 
     # Check if file already has a good sub for this lang now
     local nu_duration
@@ -1444,7 +1444,7 @@ run_upgrade_retries() {
 
     # Dead-end sources cap early; provider-cycle sources get more attempts.
     local nu_source
-    nu_source="$(sqm_db "$state_db" "SELECT source FROM needs_upgrade WHERE file_path='$(sql_escape "$nu_path")' AND lang='$(sql_escape "$nu_lang")' AND forced=$nu_forced;" 2>/dev/null || echo "external")"
+    nu_source="$(sqm_db "$state_db" "SELECT source FROM sqm_needs_upgrade WHERE file_path='$(sql_escape "$nu_path")' AND lang='$(sql_escape "$nu_lang")' AND forced=$nu_forced;" 2>/dev/null || echo "external")"
     local effective_max
     if [[ "$nu_source" == "embedded_desync" || "$nu_source" == "missing" ]]; then
       effective_max="$UPGRADE_MAX_RETRY"
@@ -1454,7 +1454,7 @@ run_upgrade_retries() {
 
     if [[ "$nu_retries" -ge "$effective_max" ]]; then
       log "UPGRADE_ABANDONED: max retries ($effective_max) reached lang=$nu_lang source=$nu_source: $(basename "$nu_path")"
-      sqm_db "$state_db" "UPDATE needs_upgrade SET source='accepted_fallback', resolved_ts=$(date +%s) WHERE file_path='$(sql_escape "$nu_path")' AND lang='$(sql_escape "$nu_lang")' AND forced=$nu_forced;" 2>/dev/null || true
+      sqm_db "$state_db" "UPDATE sqm_needs_upgrade SET source='accepted_fallback', resolved_ts=$(date +%s) WHERE file_path='$(sql_escape "$nu_path")' AND lang='$(sql_escape "$nu_lang")' AND forced=$nu_forced;" 2>/dev/null || true
       abandoned=$((abandoned + 1))
       continue
     fi
@@ -1482,7 +1482,7 @@ run_upgrade_retries() {
     # Try providers
     if [[ -n "$BAZARR_API_KEY" ]] && try_providers_for_lang "$nu_path" "$nu_lang" "$nu_duration"; then
       log "UPGRADE_RESOLVED: via providers lang=$nu_lang: $(basename "$nu_path")"
-      resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
+      resolve_sqm_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
       resolved=$((resolved + 1))
       continue
     fi
@@ -1490,7 +1490,7 @@ run_upgrade_retries() {
     # Try translation
     if try_translate_inline "$nu_path" "$nu_lang"; then
       log "UPGRADE_RESOLVED: via translation lang=$nu_lang: $(basename "$nu_path")"
-      resolve_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
+      resolve_sqm_needs_upgrade "$state_db" "$nu_path" "$nu_lang" "$nu_forced"
       resolved=$((resolved + 1))
       continue
     fi
@@ -1507,10 +1507,10 @@ cmd_auto_maintain() {
   load_guard "auto-maintain" || return 0
   log "auto-maintain: path=$PATH_PREFIX_ROOT since=$SINCE_MINUTES keep_profile_langs=$KEEP_PROFILE_LANGS bloat_threshold=$BLOAT_THRESHOLD dry_run=$DRY_RUN"
 
-  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  local state_db="$STATE_DIR"
   init_state_db "$state_db"
-  init_watermark_patterns "$state_db"
-  _CACHED_WATERMARK_PATTERNS="$(load_watermark_patterns "$state_db")"
+  init_sqm_watermark_patterns "$state_db"
+  _CACHED_WATERMARK_PATTERNS="$(load_sqm_watermark_patterns "$state_db")"
   [[ -z "$_CACHED_WATERMARK_PATTERNS" ]] && _CACHED_WATERMARK_PATTERNS="$WATERMARK_PATTERNS"
   _DEEPL_QUOTA_CACHED=""  # Reset per-run cache
 
@@ -1613,7 +1613,7 @@ cmd_auto_maintain() {
       local current_mtime stored_mtime stored_audit_ts
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
       local stored_row
-      stored_row="$(sqm_db "$state_db" -separator '|' "SELECT mtime, last_audit_ts FROM file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null || true)"
+      stored_row="$(sqm_db "$state_db" -separator '|' "SELECT mtime, last_audit_ts FROM sqm_file_audits WHERE file_path='$(sql_escape "$mkv_file")';" 2>/dev/null || true)"
       stored_mtime="${stored_row%%|*}"
       stored_audit_ts="${stored_row##*|}"
       [[ -z "$stored_mtime" ]] && stored_mtime=0
@@ -1808,7 +1808,7 @@ cmd_auto_maintain() {
             BAD)
               log "PHASE_0.75: embedded desync detected lang=$p075_norm drift=${drift_max}s ref=$drift_ref: $basename"
               if [[ "$DRY_RUN" -eq 0 ]]; then
-                upsert_needs_upgrade "$state_db" "$mkv_file" "$p075_norm" 0 "BAD" 0 "embedded_desync"
+                upsert_sqm_needs_upgrade "$state_db" "$mkv_file" "$p075_norm" 0 "BAD" 0 "embedded_desync"
               fi
               ;;
             WARN)
@@ -1952,7 +1952,7 @@ cmd_auto_maintain() {
           if [[ "$DRY_RUN" -eq 0 ]]; then
             local warn_score
             warn_score="$(subtitle_quality_score "$srt_file" "${duration%.*}" "$ext_forced_num")"
-            upsert_needs_upgrade "$state_db" "$mkv_file" "$ext_lang_norm" "$ext_forced_num" "WARN" "$warn_score" "external"
+            upsert_sqm_needs_upgrade "$state_db" "$mkv_file" "$ext_lang_norm" "$ext_forced_num" "WARN" "$warn_score" "external"
             log "MARK_WARN: usable but subpar, marked for upgrade lang=$ext_lang_norm: $basename"
           fi
           ;;
@@ -2405,7 +2405,7 @@ cmd_auto_maintain() {
       [[ "$muxed_files" -gt 0 ]] && [[ "$file_modified" -eq 1 ]] && action_val="muxed"
       [[ "$stripped_files" -gt 0 ]] && [[ "$file_modified" -eq 1 ]] && action_val="stripped"
       current_mtime="$(stat -c %Y "$mkv_file" 2>/dev/null || echo 0)"
-      sqm_db "$state_db" "INSERT OR REPLACE INTO file_audits (file_path, mtime, last_audit_ts, action_taken) VALUES ('$(sql_escape "$mkv_file")', $current_mtime, $(date +%s), '$action_val');" 2>/dev/null || true
+      sqm_db "$state_db" "INSERT OR REPLACE INTO sqm_file_audits (file_path, mtime, last_audit_ts, action_taken) VALUES ('$(sql_escape "$mkv_file")', $current_mtime, $(date +%s), '$action_val');" 2>/dev/null || true
     fi
   done
 
@@ -2496,7 +2496,7 @@ cmd_auto_maintain() {
 }
 
 cmd_compliance() {
-  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  local state_db="$STATE_DIR"
   init_state_db "$state_db"
 
   local format="${COMPLIANCE_FORMAT:-text}"
@@ -2552,9 +2552,9 @@ cmd_compliance() {
       local pcn
       pcn="$(normalize_track_lang "$pc")"
       if [[ -n "${comp_emb_langs[$pcn]:-}" ]] || [[ -n "${comp_ext_langs[$pcn]:-}" ]]; then
-        # Has sub — check if it's in needs_upgrade
+        # Has sub — check if it's in sqm_needs_upgrade
         local nu_row
-        nu_row="$(sqm_db "$state_db" "SELECT current_rating FROM needs_upgrade WHERE file_path='$(sql_escape "$mkv_file")' AND lang='$(sql_escape "$pcn")' AND resolved_ts IS NULL LIMIT 1;" 2>/dev/null || true)"
+        nu_row="$(sqm_db "$state_db" "SELECT current_rating FROM sqm_needs_upgrade WHERE file_path='$(sql_escape "$mkv_file")' AND lang='$(sql_escape "$pcn")' AND resolved_ts IS NULL LIMIT 1;" 2>/dev/null || true)"
         if [[ -n "$nu_row" ]]; then
           file_status="UPGRADE"
           file_upgrade="${file_upgrade:+$file_upgrade,}$pcn"
@@ -2582,10 +2582,10 @@ cmd_compliance() {
       --argjson total "$total" \
       --argjson compliant "$compliant" \
       --argjson missing "$missing" \
-      --argjson needs_upgrade "$needs_upg" \
+      --argjson sqm_needs_upgrade "$needs_upg" \
       --argjson no_profile "$no_profile" \
       --arg rate "$rate" \
-      '{total: $total, compliant: $compliant, missing: $missing, needs_upgrade: $needs_upgrade, no_profile: $no_profile, compliance_rate: $rate}'
+      '{total: $total, compliant: $compliant, missing: $missing, sqm_needs_upgrade: $sqm_needs_upgrade, no_profile: $no_profile, compliance_rate: $rate}'
   else
     printf '\n=== Subtitle Compliance Report ===\n'
     printf 'Total files:     %d\n' "$total"
@@ -2604,7 +2604,7 @@ cmd_compliance() {
 }
 
 cmd_enqueue() {
-  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  local state_db="$STATE_DIR"
   local count=0
   # Remaining args after options were parsed are in ENQUEUE_FILES
   for f in "${ENQUEUE_FILES[@]}"; do
@@ -2622,22 +2622,22 @@ cmd_enqueue() {
 update_watermark_hits() {
   local db="$1" srt_file="$2"
   local patterns
-  patterns="$(load_watermark_patterns "$db")"
+  patterns="$(load_sqm_watermark_patterns "$db")"
   [[ -z "$patterns" ]] && return 0
   local now
   now="$(date +%s)"
   while IFS= read -r pat; do
     [[ -z "$pat" ]] && continue
     if grep -qiE "$pat" "$srt_file" 2>/dev/null; then
-      sqm_db "$db" "UPDATE watermark_patterns SET hit_count = hit_count + 1, last_hit = $now WHERE pattern = '$(sql_escape "$pat")';" 2>/dev/null || true
+      sqm_db "$db" "UPDATE sqm_watermark_patterns SET hit_count = hit_count + 1, last_hit = $now WHERE pattern = '$(sql_escape "$pat")';" 2>/dev/null || true
     fi
   done < <(printf '%s\n' "$patterns" | tr '|' '\n')
 }
 
 cmd_watermark() {
-  local state_db="$STATE_DIR/subtitle_quality_state.db"
+  local state_db="$STATE_DIR"
   init_state_db "$state_db"
-  init_watermark_patterns "$state_db"
+  init_sqm_watermark_patterns "$state_db"
 
   local subcmd="${1:-list}"
   shift 2>/dev/null || true
@@ -2651,33 +2651,33 @@ cmd_watermark() {
         local last_str="--"
         [[ "$last" -gt 0 ]] && last_str="$(date -d "@$last" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$last")"
         printf '%-30s %-8s %-6s %-20s\n' "$pat" "$src" "$hits" "$last_str" >&2
-      done < <(sqm_db "$state_db" -separator $'\t' "SELECT pattern, source, hit_count, last_hit FROM watermark_patterns ORDER BY source, pattern;" 2>/dev/null)
+      done < <(sqm_db "$state_db" -separator $'\t' "SELECT pattern, source, hit_count, last_hit FROM sqm_watermark_patterns ORDER BY source, pattern;" 2>/dev/null)
       ;;
     add)
       local pattern="${1:-}"
       [[ -z "$pattern" ]] && { echo "Usage: watermark add \"pattern\"" >&2; return 1; }
       local now
       now="$(date +%s)"
-      sqm_db "$state_db" "INSERT OR IGNORE INTO watermark_patterns(pattern, source, added_ts) VALUES ('$(sql_escape "$pattern")', 'user', $now);" 2>/dev/null
+      sqm_db "$state_db" "INSERT OR IGNORE INTO sqm_watermark_patterns(pattern, source, added_ts) VALUES ('$(sql_escape "$pattern")', 'user', $now);" 2>/dev/null
       log "WATERMARK_ADD: pattern='$pattern' source=user"
       ;;
     remove)
       local pattern="${1:-}"
       [[ -z "$pattern" ]] && { echo "Usage: watermark remove \"pattern\"" >&2; return 1; }
       local src
-      src="$(sqm_db "$state_db" "SELECT source FROM watermark_patterns WHERE pattern='$(sql_escape "$pattern")';" 2>/dev/null || true)"
+      src="$(sqm_db "$state_db" "SELECT source FROM sqm_watermark_patterns WHERE pattern='$(sql_escape "$pattern")';" 2>/dev/null || true)"
       if [[ "$src" == "builtin" ]]; then
         echo "Cannot remove builtin pattern: $pattern" >&2
         return 1
       fi
-      sqm_db "$state_db" "DELETE FROM watermark_patterns WHERE pattern='$(sql_escape "$pattern")' AND source != 'builtin';" 2>/dev/null
+      sqm_db "$state_db" "DELETE FROM sqm_watermark_patterns WHERE pattern='$(sql_escape "$pattern")' AND source != 'builtin';" 2>/dev/null
       log "WATERMARK_REMOVE: pattern='$pattern'"
       ;;
     test)
       local srt_file="${1:-}"
       [[ -z "$srt_file" || ! -f "$srt_file" ]] && { echo "Usage: watermark test file.srt" >&2; return 1; }
       local patterns
-      patterns="$(load_watermark_patterns "$state_db")"
+      patterns="$(load_sqm_watermark_patterns "$state_db")"
       if [[ -z "$patterns" ]]; then
         echo "No patterns loaded." >&2
         return 1

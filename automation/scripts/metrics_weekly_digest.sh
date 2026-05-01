@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # metrics_weekly_digest.sh — Compose and POST a weekly pipeline digest to Discord.
 #
-# Reads daily_aggregates for the past 7 days, computes rollup stats, generates
+# Reads metrics_daily_aggregates for the past 7 days, computes rollup stats, generates
 # a markdown table, auto-generates highlights and issues, and POSTs to
 # DISCORD_WEBHOOK_URL (from .env).
 #
@@ -13,7 +13,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly LOG_PREFIX="[metrics_weekly]"
-readonly METRICS_DB="/APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db"
+METRICS_DB="${PIPELINE_DB:-/APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db}"
+readonly METRICS_DB
 readonly ENV_FILE="/config/berenstuff/.env"
 readonly METRICS_TIMEOUT_MS=5000
 
@@ -79,7 +80,7 @@ _query_week() {
           SUM(failed_runs)           AS fail_runs,
           SUM(total_files_processed) AS files,
           AVG(avg_duration_sec)      AS avg_dur
-        FROM daily_aggregates
+        FROM metrics_daily_aggregates
         WHERE date >= '${week_start}'
         GROUP BY subsystem
         ORDER BY subsystem;
@@ -119,7 +120,7 @@ _build_highlights() {
     local top_files
     top_files="$(_db "
         SELECT subsystem, SUM(total_files_processed) AS f
-        FROM daily_aggregates
+        FROM metrics_daily_aggregates
         WHERE date >= '${week_start}'
         GROUP BY subsystem
         ORDER BY f DESC
@@ -137,7 +138,7 @@ _build_highlights() {
     local perfect
     perfect="$(_db "
         SELECT subsystem
-        FROM daily_aggregates
+        FROM metrics_daily_aggregates
         WHERE date >= '${week_start}'
         GROUP BY subsystem
         HAVING SUM(total_runs) > 0
@@ -165,7 +166,7 @@ _build_issues() {
     local failed_rows
     failed_rows="$(_db "
         SELECT subsystem, SUM(failed_runs) AS fails
-        FROM daily_aggregates
+        FROM metrics_daily_aggregates
         WHERE date >= '${week_start}'
         GROUP BY subsystem
         HAVING fails > 0
@@ -185,7 +186,7 @@ _build_issues() {
         SELECT subsystem,
                SUM(successful_runs) AS ok,
                SUM(total_runs) AS total
-        FROM daily_aggregates
+        FROM metrics_daily_aggregates
         WHERE date >= '${week_start}'
         GROUP BY subsystem
         HAVING total >= 5

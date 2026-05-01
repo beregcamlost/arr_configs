@@ -16,7 +16,8 @@ PROVIDER_MAP = {
 
 DEFAULT_PROVIDERS = ["netflix", "disney", "crunchyroll"]
 DEFAULT_COUNTRY = "CL"
-DEFAULT_DB_PATH = "/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
+import os as _os
+DEFAULT_DB_PATH = _os.environ.get("PIPELINE_DB", "/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db")
 
 
 @dataclass
@@ -86,5 +87,5 @@ def load_config(
         providers=parsed_providers,
         dry_run=dry_run,
         verbose=verbose,
-        db_path=db_path or DEFAULT_DB_PATH,
+        db_path=db_path or _os.environ.get("PIPELINE_DB", DEFAULT_DB_PATH),
     )

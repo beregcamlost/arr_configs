@@ -25,12 +25,10 @@ readonly STATE_FILE="/tmp/pipeline_health.state"
 readonly ENV_FILE="/config/berenstuff/.env"
 
 # State DBs to health-check
+# Phase 6 I-A: consolidated pipeline.db replaces individual state DBs
+readonly PIPELINE_DB_PATH="${PIPELINE_DB:-/APPBOX_DATA/storage/pipeline.db}"
 readonly -a STATE_DBS=(
-    "/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db"
-    "/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
-    "/APPBOX_DATA/storage/.translation-state/translation_state.db"
-    "/APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db"
-    "/APPBOX_DATA/storage/.subtitle-dedupe-state/subtitle_dedupe.db"
+    "${PIPELINE_DB_PATH}"
     "/APPBOX_DATA/storage/.bazarr-snapshot/bazarr.db"
     "/opt/bazarr/data/db/bazarr.db"
 )
@@ -93,7 +91,7 @@ record() {
 # Check 1: Orchestrator freshness
 # ---------------------------------------------------------------------------
 check_orchestrator_freshness() {
-    local db="/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db"
+    local db="${PIPELINE_DB:-/APPBOX_DATA/storage/pipeline.db}"
     if [[ ! -f "$db" ]]; then
         record "ALARM" "Orchestrator DB missing: $db"
         return

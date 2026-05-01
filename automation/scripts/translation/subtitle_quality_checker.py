@@ -33,7 +33,8 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_SAMPLE_COUNT = 10
-DEFAULT_STATE_DB = "/APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db"
+import os as _sqc_os
+DEFAULT_STATE_DB = _sqc_os.environ.get("PIPELINE_DB", "/APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db")
 
 # Session-scoped set of exhausted API keys (mirrors gemini_client pattern)
 _exhausted_keys: set = set()
@@ -148,7 +149,7 @@ def parse_quality_response(response_text: str) -> Optional[dict]:
 def _ensure_quality_table(conn: sqlite3.Connection):
     """Create the quality_checks table if it does not exist yet."""
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS quality_checks (
+        CREATE TABLE IF NOT EXISTS sqm_quality_checks (
             srt_path    TEXT NOT NULL,
             srt_mtime   INTEGER NOT NULL,
             expected_lang TEXT NOT NULL,
@@ -172,7 +173,7 @@ def check_cache(db_path: str, srt_path: str, srt_mtime: int,
         conn.execute("PRAGMA busy_timeout = 30000")
         _ensure_quality_table(conn)
         row = conn.execute(
-            "SELECT quality, confidence, actual_lang, reason FROM quality_checks "
+            "SELECT quality, confidence, actual_lang, reason FROM sqm_quality_checks "
             "WHERE srt_path = ? AND expected_lang = ? AND srt_mtime = ?",
             (srt_path, expected_lang, srt_mtime),
         ).fetchone()
@@ -197,7 +198,7 @@ def save_cache(db_path: str, srt_path: str, srt_mtime: int,
         conn.execute("PRAGMA busy_timeout = 30000")
         _ensure_quality_table(conn)
         conn.execute(
-            "INSERT OR REPLACE INTO quality_checks "
+            "INSERT OR REPLACE INTO sqm_quality_checks "
             "(srt_path, srt_mtime, expected_lang, actual_lang, quality, reason, "
             " confidence, checked_ts, provider) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'gemini')",

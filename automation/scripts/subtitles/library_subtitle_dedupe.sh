@@ -3,7 +3,7 @@ set -euo pipefail
 
 PATH_PREFIX="${PATH_PREFIX:-/APPBOX_DATA/storage/media}"
 STATE_DIR="${STATE_DIR:-/APPBOX_DATA/storage/.subtitle-dedupe-state}"
-DB_PATH="${DB_PATH:-$STATE_DIR/subtitle_dedupe.db}"
+DB_PATH="${DB_PATH:-${PIPELINE_DB:-/APPBOX_DATA/storage/pipeline.db}}"
 LOG_PATH="${LOG_PATH:-/config/berenstuff/automation/logs/library_subtitle_dedupe.log}"
 BAZARR_DB="${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}"
 BAZARR_URL="${BAZARR_URL:-http://127.0.0.1:6767/bazarr}"
@@ -125,7 +125,7 @@ if ! flock -n 9; then
 fi
 
 sqlite3 "$DB_PATH" '
-CREATE TABLE IF NOT EXISTS media_state (
+CREATE TABLE IF NOT EXISTS dedupe_media_state (
   media_path TEXT PRIMARY KEY,
   media_dir TEXT,
   media_size INTEGER,
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS media_state (
   renamed_count INTEGER DEFAULT 0,
   removed_count INTEGER DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_media_state_dir ON media_state(media_dir);
+CREATE INDEX IF NOT EXISTS idx_dedupe_media_state_dir ON dedupe_media_state(media_dir);
 '
 
 subtitle_group_key() {
@@ -470,7 +470,7 @@ while IFS= read -r -d '' media; do
   sig_before="$(subtitle_signature "$stem")"
 
   esc_media="$(sql_escape "$media")"
-  row="$(sqlite3 "$DB_PATH" "SELECT media_size || '|' || media_mtime || '|' || sub_sig FROM media_state WHERE media_path='$esc_media' LIMIT 1;")"
+  row="$(sqlite3 "$DB_PATH" "SELECT media_size || '|' || media_mtime || '|' || sub_sig FROM dedupe_media_state WHERE media_path='$esc_media' LIMIT 1;")"
   last_size="${row%%|*}"
   rest="${row#*|}"
   if [[ "$row" == "$rest" ]]; then
@@ -517,7 +517,7 @@ while IFS= read -r -d '' media; do
     esc_status="$(sql_escape "$status")"
 
     sqlite3 "$DB_PATH" "
-      INSERT INTO media_state (
+      INSERT INTO dedupe_media_state (
         media_path, media_dir, media_size, media_mtime, sub_sig,
         last_status, last_scan_ts, renamed_count, removed_count
       ) VALUES (

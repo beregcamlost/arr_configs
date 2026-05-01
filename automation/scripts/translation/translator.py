@@ -59,6 +59,10 @@ MARKER_EXTENSIONS = {
 
 
 def _db_path(state_dir: str) -> str:
+    # Phase 6 I-A: use centralized pipeline.db if PIPELINE_DB env var is set
+    pipeline_db = os.environ.get("PIPELINE_DB", "").strip()
+    if pipeline_db:
+        return pipeline_db
     return os.path.join(state_dir, "translation_state.db")
 
 

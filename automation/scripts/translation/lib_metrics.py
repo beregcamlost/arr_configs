@@ -24,7 +24,8 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-_METRICS_DB = Path("/APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db")
+import os as _os
+_METRICS_DB = Path(_os.environ.get("PIPELINE_DB", "/APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db"))
 _BUSY_TIMEOUT_MS = 5000
 
 # ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ def _ensure_schema() -> None:
     try:
         conn = _connect()
         conn.executescript("""
-            CREATE TABLE IF NOT EXISTS subsystem_runs (
+            CREATE TABLE IF NOT EXISTS metrics_subsystem_runs (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               subsystem TEXT NOT NULL,
               started_at INTEGER NOT NULL,
@@ -54,9 +55,9 @@ def _ensure_schema() -> None:
               files_failed INTEGER DEFAULT 0,
               metadata TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_subsystem_runs_subsystem_time
-              ON subsystem_runs(subsystem, started_at);
-            CREATE TABLE IF NOT EXISTS daily_aggregates (
+            CREATE INDEX IF NOT EXISTS idx_metrics_subsystem_runs_subsystem_time
+              ON metrics_subsystem_runs(subsystem, started_at);
+            CREATE TABLE IF NOT EXISTS metrics_daily_aggregates (
               date TEXT NOT NULL,
               subsystem TEXT NOT NULL,
               total_runs INTEGER NOT NULL,
@@ -86,14 +87,14 @@ except Exception:  # noqa: BLE001
 
 def record_run_start(subsystem: str) -> int:
     """
-    Insert a new subsystem_runs row and return its run_id.
+    Insert a new metrics_subsystem_runs row and return its run_id.
 
     Returns -1 if the DB is unavailable (fail-soft — caller should tolerate).
     """
     try:
         conn = _connect()
         cur = conn.execute(
-            "INSERT INTO subsystem_runs (subsystem, started_at) VALUES (?, ?)",
+            "INSERT INTO metrics_subsystem_runs (subsystem, started_at) VALUES (?, ?)",
             (subsystem, int(time.time())),
         )
         conn.commit()
@@ -113,7 +114,7 @@ def record_run_end(
     metadata: Optional[dict] = None,
 ) -> None:
     """
-    Update the subsystem_runs row for run_id with completion info.
+    Update the metrics_subsystem_runs row for run_id with completion info.
 
     Fail-soft: logs a warning and returns if the DB is unavailable or run_id
     is -1 (sentinel for a failed record_run_start).
@@ -126,7 +127,7 @@ def record_run_end(
         conn = _connect()
         conn.execute(
             """
-            UPDATE subsystem_runs
+            UPDATE metrics_subsystem_runs
             SET finished_at     = ?,
                 exit_code       = ?,
                 files_processed = ?,

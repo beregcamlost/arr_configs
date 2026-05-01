@@ -14,7 +14,7 @@
 [[ -n "${_LIB_METRICS_LOADED:-}" ]] && return 0
 readonly _LIB_METRICS_LOADED=1
 
-readonly _METRICS_DB="/APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db"
+readonly _METRICS_DB="${PIPELINE_DB:-/APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db}"
 readonly _METRICS_TIMEOUT_MS=5000
 
 # ── Internal helper ────────────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ _metrics_ensure_schema() {
     # Pipe SQL to sqlite3 to avoid here-doc + stdin redirect conflict (SC2261)
     printf '%s\n' \
         "PRAGMA journal_mode=WAL;" \
-        "CREATE TABLE IF NOT EXISTS subsystem_runs (" \
+        "CREATE TABLE IF NOT EXISTS metrics_subsystem_runs (" \
         "  id INTEGER PRIMARY KEY AUTOINCREMENT," \
         "  subsystem TEXT NOT NULL," \
         "  started_at INTEGER NOT NULL," \
@@ -41,9 +41,9 @@ _metrics_ensure_schema() {
         "  files_failed INTEGER DEFAULT 0," \
         "  metadata TEXT" \
         ");" \
-        "CREATE INDEX IF NOT EXISTS idx_subsystem_runs_subsystem_time" \
-        "  ON subsystem_runs(subsystem, started_at);" \
-        "CREATE TABLE IF NOT EXISTS daily_aggregates (" \
+        "CREATE INDEX IF NOT EXISTS idx_metrics_subsystem_runs_subsystem_time" \
+        "  ON metrics_subsystem_runs(subsystem, started_at);" \
+        "CREATE TABLE IF NOT EXISTS metrics_daily_aggregates (" \
         "  date TEXT NOT NULL," \
         "  subsystem TEXT NOT NULL," \
         "  total_runs INTEGER NOT NULL," \
@@ -70,7 +70,7 @@ metrics_run_start() {
 
     local run_id
     run_id="$(_metrics_db "
-        INSERT INTO subsystem_runs (subsystem, started_at)
+        INSERT INTO metrics_subsystem_runs (subsystem, started_at)
         VALUES ('${subsystem}', ${now});
         SELECT last_insert_rowid();
     " 2>/dev/null)" || { printf '[lib_metrics] WARNING: could not start metrics row for %s\n' "$subsystem" >&2; return 1; }
@@ -108,7 +108,7 @@ metrics_run_end() {
     fi
 
     _metrics_db "
-        UPDATE subsystem_runs
+        UPDATE metrics_subsystem_runs
         SET finished_at      = ${now},
             exit_code        = ${exit_code},
             files_processed  = ${files_processed},
@@ -132,7 +132,7 @@ metrics_get_recent() {
     _metrics_db "
         SELECT id, subsystem, started_at, finished_at, exit_code,
                files_processed, files_failed
-        FROM subsystem_runs
+        FROM metrics_subsystem_runs
         WHERE subsystem = '${subsystem}'
           AND started_at >= ${cutoff}
         ORDER BY started_at;

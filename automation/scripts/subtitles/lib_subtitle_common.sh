@@ -1090,7 +1090,7 @@ strip_all_embedded_subs() {
 }
 
 # ---------------------------------------------------------------------------
-# needs_upgrade DB helpers (shared by import hook + auto-maintain)
+# sqm_needs_upgrade DB helpers (shared by import hook + auto-maintain)
 # ---------------------------------------------------------------------------
 
 # State DB path — callers may override before calling these functions
@@ -1098,12 +1098,12 @@ strip_all_embedded_subs() {
 
 # Upsert a needs-upgrade entry for a file/lang/forced tuple.
 # $1=state_db  $2=file_path  $3=lang  $4=forced(0|1)  $5=rating  $6=score  $7=source(embedded|external)
-upsert_needs_upgrade() {
+upsert_sqm_needs_upgrade() {
   local db="$1" fp="$2" lang="$3" forced="$4" rating="$5" score="$6" src="${7:-external}"
   local now
   now="$(date +%s)"
   sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
-    INSERT INTO needs_upgrade (file_path, lang, forced, current_rating, current_score, source, first_seen_ts, last_retry_ts, retry_count, resolved_ts)
+    INSERT INTO sqm_needs_upgrade (file_path, lang, forced, current_rating, current_score, source, first_seen_ts, last_retry_ts, retry_count, resolved_ts)
     VALUES ('$(sql_escape "$fp")', '$(sql_escape "$lang")', $forced, '$rating', $score, '$src', $now, 0, 0, NULL)
     ON CONFLICT(file_path, lang, forced) DO UPDATE SET
       current_rating = '$rating',
@@ -1115,12 +1115,12 @@ upsert_needs_upgrade() {
 
 # Mark a needs-upgrade entry as resolved.
 # $1=state_db  $2=file_path  $3=lang  $4=forced(0|1)
-resolve_needs_upgrade() {
+resolve_sqm_needs_upgrade() {
   local db="$1" fp="$2" lang="$3" forced="$4"
   local now
   now="$(date +%s)"
   sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
-    UPDATE needs_upgrade SET resolved_ts = $now
+    UPDATE sqm_needs_upgrade SET resolved_ts = $now
     WHERE file_path = '$(sql_escape "$fp")' AND lang = '$(sql_escape "$lang")' AND forced = $forced AND resolved_ts IS NULL;
   " </dev/null 2>/dev/null || true
 }
@@ -1137,7 +1137,7 @@ drain_upgrade_candidates() {
   cutoff="$(( $(date +%s) - threshold ))"
   sqlite3 -separator $'\t' -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
     SELECT file_path, lang, forced, current_rating, current_score, retry_count
-    FROM needs_upgrade
+    FROM sqm_needs_upgrade
     WHERE resolved_ts IS NULL
       AND last_retry_ts < $cutoff
       AND retry_count < $max_retries
@@ -1153,7 +1153,7 @@ touch_upgrade_retry() {
   local now
   now="$(date +%s)"
   sqlite3 -cmd ".timeout $SQLITE_TIMEOUT_MS" "$db" "
-    UPDATE needs_upgrade SET last_retry_ts = $now, retry_count = retry_count + 1
+    UPDATE sqm_needs_upgrade SET last_retry_ts = $now, retry_count = retry_count + 1
     WHERE file_path = '$(sql_escape "$fp")' AND lang = '$(sql_escape "$lang")' AND forced = $forced;
   " </dev/null 2>/dev/null || true
 }

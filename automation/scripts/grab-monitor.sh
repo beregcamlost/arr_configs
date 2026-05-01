@@ -30,7 +30,7 @@ source "${BASH_SOURCE[0]%/*}/lib_transmission.sh"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 readonly STATE_DIR="/APPBOX_DATA/storage/.grab-monitor-state"
-readonly STATE_DB="${STATE_DIR}/seen.db"
+readonly STATE_DB="${PIPELINE_DB:-${STATE_DIR}/seen.db}"
 readonly LOOK_BACK_SECONDS=300   # 5 minutes
 
 # Language IDs — always allowed regardless of original language
@@ -73,7 +73,7 @@ die() { log "ERROR: $*"; exit 1; }
 init_db() {
   mkdir -p "$STATE_DIR"
   sqlite3 -cmd ".timeout 30000" "$STATE_DB" \
-    "CREATE TABLE IF NOT EXISTS seen_grabs (
+    "CREATE TABLE IF NOT EXISTS grabmon_seen_grabs (
        history_id   INTEGER PRIMARY KEY,
        app          TEXT    NOT NULL,
        title        TEXT,
@@ -85,7 +85,7 @@ is_seen() {
   local history_id="$1"
   local count
   count="$(sqlite3 -cmd ".timeout 30000" "$STATE_DB" \
-    "SELECT COUNT(*) FROM seen_grabs WHERE history_id=CAST('${history_id}' AS INTEGER);" </dev/null)"
+    "SELECT COUNT(*) FROM grabmon_seen_grabs WHERE history_id=CAST('${history_id}' AS INTEGER);" </dev/null)"
   [[ "$count" -gt 0 ]]
 }
 
@@ -94,13 +94,13 @@ mark_seen() {
   local safe_title
   safe_title="${title//\'/\'\'}"   # escape single quotes
   sqlite3 -cmd ".timeout 30000" "$STATE_DB" \
-    "INSERT OR IGNORE INTO seen_grabs (history_id, app, title, processed_at)
+    "INSERT OR IGNORE INTO grabmon_seen_grabs (history_id, app, title, processed_at)
      VALUES (CAST('${history_id}' AS INTEGER), '${app}', '${safe_title}', strftime('%s','now'));" </dev/null
 }
 
 purge_old_seen() {
   sqlite3 -cmd ".timeout 30000" "$STATE_DB" \
-    "DELETE FROM seen_grabs WHERE processed_at < strftime('%s','now') - 86400;" </dev/null
+    "DELETE FROM grabmon_seen_grabs WHERE processed_at < strftime('%s','now') - 86400;" </dev/null
 }
 
 # remove_from_transmission HASH

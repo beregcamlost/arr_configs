@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # metrics_daily_aggregate.sh — Compute yesterday's per-subsystem metrics and
-# INSERT / REPLACE rows into daily_aggregates.
+# INSERT / REPLACE rows into metrics_daily_aggregates.
 #
 # Runs once per day (01:00 via cron).
 # Cron entry (staged in jobs.yml — NOT active):
@@ -9,7 +9,8 @@
 set -euo pipefail
 
 readonly LOG_PREFIX="[metrics_aggregate]"
-readonly METRICS_DB="/APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db"
+METRICS_DB="${PIPELINE_DB:-/APPBOX_DATA/storage/.metrics-state/pipeline_metrics.db}"
+readonly METRICS_DB
 readonly METRICS_TIMEOUT_MS=5000
 
 log() { printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_PREFIX" "$*" >&2; }
@@ -25,7 +26,7 @@ _ensure_schema() {
     # Pipe SQL to avoid here-doc + stdin redirect conflict (SC2261)
     printf '%s\n' \
         "PRAGMA journal_mode=WAL;" \
-        "CREATE TABLE IF NOT EXISTS subsystem_runs (" \
+        "CREATE TABLE IF NOT EXISTS metrics_subsystem_runs (" \
         "  id INTEGER PRIMARY KEY AUTOINCREMENT," \
         "  subsystem TEXT NOT NULL," \
         "  started_at INTEGER NOT NULL," \
@@ -35,9 +36,9 @@ _ensure_schema() {
         "  files_failed INTEGER DEFAULT 0," \
         "  metadata TEXT" \
         ");" \
-        "CREATE INDEX IF NOT EXISTS idx_subsystem_runs_subsystem_time" \
-        "  ON subsystem_runs(subsystem, started_at);" \
-        "CREATE TABLE IF NOT EXISTS daily_aggregates (" \
+        "CREATE INDEX IF NOT EXISTS idx_metrics_subsystem_runs_subsystem_time" \
+        "  ON metrics_subsystem_runs(subsystem, started_at);" \
+        "CREATE TABLE IF NOT EXISTS metrics_daily_aggregates (" \
         "  date TEXT NOT NULL," \
         "  subsystem TEXT NOT NULL," \
         "  total_runs INTEGER NOT NULL," \
@@ -71,7 +72,7 @@ main() {
     local subsystems
     subsystems="$(_db "
         SELECT DISTINCT subsystem
-        FROM subsystem_runs
+        FROM metrics_subsystem_runs
         WHERE started_at >= ${yesterday_start}
           AND started_at <= ${yesterday_end};
     ")" || { log "No rows found (DB may be empty) — nothing to aggregate"; exit 0; }
@@ -99,7 +100,7 @@ main() {
                 THEN finished_at - started_at
                 ELSE NULL
               END) AS avg_duration_sec
-            FROM subsystem_runs
+            FROM metrics_subsystem_runs
             WHERE subsystem = '${subsystem}'
               AND started_at >= ${yesterday_start}
               AND started_at <= ${yesterday_end};
@@ -125,7 +126,7 @@ main() {
         fi
 
         _db "
-            INSERT OR REPLACE INTO daily_aggregates
+            INSERT OR REPLACE INTO metrics_daily_aggregates
               (date, subsystem, total_runs, successful_runs, failed_runs,
                total_files_processed, avg_duration_sec)
             VALUES

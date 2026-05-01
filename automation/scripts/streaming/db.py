@@ -43,7 +43,7 @@ def init_db(db_path):
                 stale_flagged_at TEXT,
                 PRIMARY KEY (tmdb_id, media_type, provider_id)
             );
-            CREATE TABLE IF NOT EXISTS scan_history (
+            CREATE TABLE IF NOT EXISTS streaming_scan_history (
                 scan_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
                 country TEXT NOT NULL DEFAULT 'CL',
@@ -333,7 +333,7 @@ def record_scan(db_path, country, movies_checked, series_checked,
     now = _now_iso()
     with contextlib.closing(_connect(db_path)) as conn:
         conn.execute("""
-            INSERT INTO scan_history
+            INSERT INTO streaming_scan_history
             (timestamp, country, movies_checked, series_checked, matches_found,
              newly_streaming, left_streaming, duration_seconds)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -389,7 +389,7 @@ def get_scan_history(db_path, limit=5):
     """Get most recent scan history entries."""
     with contextlib.closing(_connect(db_path)) as conn:
         cursor = conn.execute(
-            "SELECT * FROM scan_history ORDER BY scan_id DESC LIMIT ?", (limit,)
+            "SELECT * FROM streaming_scan_history ORDER BY scan_id DESC LIMIT ?", (limit,)
         )
         rows = [dict(r) for r in cursor.fetchall()]
     return rows
@@ -468,7 +468,7 @@ def get_summary_stats(db_path):
 
         # Last scan
         last_scan_row = conn.execute(
-            "SELECT * FROM scan_history ORDER BY scan_id DESC LIMIT 1"
+            "SELECT * FROM streaming_scan_history ORDER BY scan_id DESC LIMIT 1"
         ).fetchone()
         last_scan = dict(last_scan_row) if last_scan_row else None
 
