@@ -2,9 +2,14 @@
 # automation/scripts/translation/translator.py
 """Subtitle translator CLI — Ollama-only (DeepL/Gemini/Google removed 2026-04-29)."""
 
+import concurrent.futures
 import logging
 import os
+import re
+import subprocess
 import sys
+import tempfile
+import threading
 
 import click
 
@@ -35,6 +40,11 @@ logging.basicConfig(
 # Session-level flag: once Ollama is down, skip it for the rest of the run.
 _ollama_unavailable = False
 
+# Worker count for parallel batch translation (--since / --all modes).
+# Override via TRANSLATOR_WORKERS env var without code edits.
+_TRANSLATOR_WORKERS = int(os.environ.get("TRANSLATOR_WORKERS", "8"))
+_results_lock = threading.Lock()
+
 # Metrics helper (fail-soft: if lib_metrics is missing or DB unavailable,
 # record_run_start returns -1 and record_run_end is a no-op)
 try:
@@ -56,6 +66,211 @@ MARKER_EXTENSIONS = {
     PROVIDER_OLLAMA: ".ollama",
     "ollama+gemini": ".ollama",  # backward-compat: old marker name still .ollama
 }
+
+# ── Embedded Spanish extraction ───────────────────────────────────────────────
+
+_PROVIDER_EMBEDDED = "embedded-extract"
+
+# Language tags that indicate a Spanish subtitle stream.
+_SPA_LANG_TAGS = {"spa", "es", "es-es", "es-mx", "es-419", "es-419", "esl", "esm"}
+
+# Text-based codec names ffprobe reports for extractable subtitle streams.
+_TEXT_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+# Spanish / English marker words for content-based fingerprinting.
+_ES_MARKERS = re.compile(
+    r"\b(que|para|porque|también|nunca|señor|hola|gracias|hijo|estás|"
+    r"qué|sí|cómo|está|esto|aquí|ahora|pero|tiene|cuando|donde|como)\b",
+    re.IGNORECASE,
+)
+_EN_MARKERS = re.compile(
+    r"\b(the|and|you|that|with|never|hello|thanks|sir|are|what|yes|"
+    r"how|this|here|now|but|have|when|where|like)\b",
+    re.IGNORECASE,
+)
+
+# langdetect seed for deterministic results.
+try:
+    from langdetect import detect as _langdetect_detect
+    from langdetect import DetectorFactory as _DetectorFactory
+    _DetectorFactory.seed = 42
+    _HAS_LANGDETECT = True
+except ImportError:
+    _HAS_LANGDETECT = False
+
+
+def _ffprobe_spa_streams(video_path: str) -> list:
+    """Return list of (track_id_or_index, codec_name, lang_tag) for spa-tagged text sub streams.
+
+    For MKV files, uses mkvmerge -J to get track IDs (needed by mkvextract).
+    For other containers, falls back to ffprobe stream indices.
+    The returned 'track_id' field is interpreted by _extract_spa_sub accordingly.
+    """
+    import json as _json
+
+    ext = os.path.splitext(video_path)[1].lower()
+    if ext == ".mkv":
+        # mkvmerge path: faster probe, returns real track IDs for mkvextract
+        try:
+            result = subprocess.run(
+                ["mkvmerge", "-J", video_path],
+                capture_output=True, text=True, timeout=20,
+            )
+            if result.returncode != 0:
+                return []
+            data = _json.loads(result.stdout or "{}")
+            found = []
+            # mkvmerge -J returns human-readable codec names like "SubRip/SRT", "ASS", etc.
+            # Accept any text-based subtitle codec; exclude image-based (PGS, DVDSUB, VOBSUB).
+            _MKV_IMAGE_CODECS = {"VOBSUB", "PGS", "HDMV PGS", "BMP", "DVDVOBSUB"}
+            for t in data.get("tracks", []):
+                if t.get("type") != "subtitles":
+                    continue
+                codec = t.get("codec", "")
+                if codec in _MKV_IMAGE_CODECS:
+                    continue
+                props = t.get("properties", {}) or {}
+                lang = (props.get("language") or "und").lower()
+                # Normalize 3-letter ISO 639-2 to 2-letter
+                if lang == "spa":
+                    lang = "es"
+                if lang in _SPA_LANG_TAGS:
+                    if props.get("forced_track") or props.get("flag_hearing_impaired"):
+                        continue  # not a primary content track; skip
+                    found.append((t["id"], codec, lang))
+            return found
+        except Exception as e:
+            log.debug("mkvmerge probe failed for %s: %s", video_path, e)
+            return []
+    else:
+        # Non-MKV: use ffprobe, return stream indices for ffmpeg extraction
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-select_streams", "s",
+                    "-show_entries", "stream=index,codec_name:stream_tags=language:stream_disposition=forced,hearing_impaired",
+                    "-of", "json",
+                    video_path,
+                ],
+                capture_output=True, text=True, timeout=20,
+            )
+            if result.returncode != 0:
+                return []
+            data = _json.loads(result.stdout or "{}")
+            found = []
+            for s in data.get("streams", []):
+                codec = (s.get("codec_name") or "").lower()
+                if codec not in _TEXT_CODECS:
+                    continue
+                lang = (s.get("tags", {}).get("language") or "").lower().strip()
+                if lang in _SPA_LANG_TAGS:
+                    disp = s.get("disposition", {}) or {}
+                    if disp.get("forced", 0) or disp.get("hearing_impaired", 0):
+                        continue  # not a primary content track; skip
+                    found.append((s["index"], codec, lang))
+            return found
+        except Exception as e:
+            log.debug("ffprobe failed for %s: %s", video_path, e)
+            return []
+
+
+def _extract_spa_sub(video_path: str, track_id: int, out_path: str) -> bool:
+    """Extract a subtitle track to out_path. Uses mkvextract for MKV, ffmpeg for others.
+
+    Returns True on success.
+    """
+    ext = os.path.splitext(video_path)[1].lower()
+    try:
+        if ext == ".mkv":
+            result = subprocess.run(
+                ["mkvextract", "tracks", video_path, f"{track_id}:{out_path}"],
+                capture_output=True, timeout=300,
+            )
+        else:
+            # ffmpeg with absolute stream index; -c:s copy avoids re-encoding
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-i", video_path,
+                    "-map", f"0:{track_id}",
+                    "-c:s", "copy",
+                    out_path,
+                ],
+                capture_output=True, timeout=300,
+            )
+        return result.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+    except Exception as e:
+        log.debug("extract failed track %d from %s: %s", track_id, video_path, e)
+        return False
+
+
+def _looks_like_spanish(srt_path: str) -> bool:
+    """Return True if the SRT file content is genuinely Spanish.
+
+    Uses langdetect on the middle 30% of the file if available;
+    falls back to ES/EN marker-word ratio (>=30 ES hits, ratio >=3:1).
+    """
+    try:
+        text = open(srt_path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return False
+
+    # Strip SRT timing/index lines to get dialogue only.
+    dialogue = re.sub(r"^\d+\s*$|^\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}\s*$",
+                      "", text, flags=re.MULTILINE)
+
+    if _HAS_LANGDETECT:
+        # Sample the middle 30% of dialogue text for stability.
+        start = len(dialogue) // 3
+        sample = dialogue[start: start + max(500, len(dialogue) // 3)]
+        if len(sample.strip()) < 50:
+            sample = dialogue[:2000]
+        try:
+            return _langdetect_detect(sample) == "es"
+        except Exception:
+            pass  # fall through to marker heuristic
+
+    es_count = len(_ES_MARKERS.findall(dialogue))
+    en_count = len(_EN_MARKERS.findall(dialogue))
+    return es_count >= 30 and es_count >= en_count * 3
+
+
+def _try_embedded_spanish(video_path: str, target_srt: str) -> bool:
+    """Extract a genuine Spanish embedded subtitle track to target_srt.
+
+    Returns True if a real Spanish track was found, extracted, and moved into place.
+    Falls through silently if nothing usable is found.
+    """
+    streams = _ffprobe_spa_streams(video_path)
+    if not streams:
+        return False
+
+    import shutil
+    tmp_dir = tempfile.mkdtemp(prefix="emb_es_")
+    try:
+        for track_id, codec, lang_tag in streams:
+            tmp_path = os.path.join(tmp_dir, f"track_{track_id}.srt")
+            if not _extract_spa_sub(video_path, track_id, tmp_path):
+                log.debug("embedded-extract: extraction failed track %d in %s",
+                          track_id, os.path.basename(video_path))
+                continue
+            if _looks_like_spanish(tmp_path):
+                shutil.move(tmp_path, target_srt)
+                log.info(
+                    "embedded-extract: used track %d (tag=%s codec=%s) from %s -> %s",
+                    track_id, lang_tag, codec,
+                    os.path.basename(video_path), os.path.basename(target_srt),
+                )
+                return True
+            log.debug(
+                "embedded-extract: track %d lang=%s fingerprint FAILED (English content), skipping",
+                track_id, lang_tag,
+            )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return False
 
 
 def _db_path(state_dir: str) -> str:
@@ -105,10 +320,13 @@ def _translate_cues_with_ollama(cfg, cues, source_lang_code, base_lang):
         raise
 
 
-def translate_file(cfg: Config, media_path: str, chars_remaining=None):
+def translate_file(cfg: Config, media_path: str, chars_remaining=None,
+                   no_embedded_fallback: bool = False):
     """Translate missing subtitle languages for a single media file.
 
     Returns (list of {file, target, chars, provider}, list of {file, target, error}).
+    If no_embedded_fallback is False (default), checks the source MKV for embedded
+    genuine Spanish tracks before invoking the LoRA translator.
     """
     db_path = _db_path(cfg.state_dir)
 
@@ -137,6 +355,13 @@ def translate_file(cfg: Config, media_path: str, chars_remaining=None):
     for target_lang in missing:
         base_lang = target_lang.split(":")[0]
 
+        # Guard: this pipeline is EN→ES only. Any non-ES target would cause
+        # the Ollama EN→ES model to produce Spanish content saved under the wrong
+        # language tag (e.g. .en.srt with Spanish content). Skip silently.
+        if base_lang != "es":
+            log.info("Skipping non-ES target '%s' — translator is EN→ES only", base_lang)
+            continue
+
         if base_lang not in ALL_SUPPORTED_LANGS:
             log.info("No translation mapping for '%s', skipping", base_lang)
             continue
@@ -155,6 +380,28 @@ def translate_file(cfg: Config, media_path: str, chars_remaining=None):
         if chars_remaining is not None and chars_remaining <= 0:
             log.info("Max chars reached, stopping")
             break
+
+        # ── Embedded Spanish fast-path ────────────────────────────────────────
+        # Before invoking the LoRA translator, check if the MKV already has a
+        # genuine Spanish subtitle stream. If so, extract it directly and skip
+        # GPU translation entirely.  Bypass with --no-embedded-fallback.
+        if base_lang == "es" and not no_embedded_fallback and os.path.isfile(media_path):
+            target_srt = os.path.join(directory, f"{stem}.{base_lang}.srt")
+            if _try_embedded_spanish(media_path, target_srt):
+                # Write a distinct marker so we can audit embedded-vs-translated.
+                open(target_srt + ".embedded", "w").close()
+                record_translation(
+                    db_path, media_path, "spa-embedded", base_lang,
+                    os.path.getsize(target_srt), "success", _PROVIDER_EMBEDDED,
+                )
+                translated.append({
+                    "file": basename, "target": base_lang,
+                    "chars": os.path.getsize(target_srt),
+                    "provider": _PROVIDER_EMBEDDED,
+                })
+                log.info("lora-translate: SKIPPED — embedded-extract succeeded for %s", basename)
+                continue
+        # ── End embedded fast-path ────────────────────────────────────────────
 
         source_srt = find_best_source_srt(directory, stem, base_lang)
         if not source_srt:
@@ -294,7 +541,10 @@ def cli():
 @click.option("--bazarr-db", type=str, default=None)
 @click.option("--max-files", type=int, default=None,
               help="Max files to process in this run (applied after scan)")
-def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db, max_files):
+@click.option("--no-embedded-fallback", "no_embedded_fallback", is_flag=True, default=False,
+              help="Skip embedded Spanish track check; always use LoRA translator")
+def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db, max_files,
+              no_embedded_fallback):
     """Translate missing subtitles via Ollama."""
     global _ollama_unavailable
     _ollama_unavailable = False
@@ -317,7 +567,8 @@ def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db, max_f
         if not os.path.isfile(file_path):
             log.error("File not found: %s", file_path)
             return
-        t, f = translate_file(cfg, file_path, chars_remaining)
+        t, f = translate_file(cfg, file_path, chars_remaining,
+                               no_embedded_fallback=no_embedded_fallback)
         all_translated.extend(t)
         all_failed.extend(f)
 
@@ -337,20 +588,26 @@ def translate(since, scan_all, file_path, max_chars, state_dir, bazarr_db, max_f
         if max_files is not None:
             results = results[:max_files]
         click.echo(f"Found {len(results)} file(s) with missing subtitles")
-        for item in results:
-            if chars_remaining is not None and chars_remaining <= 0:
-                log.info("Max chars reached, stopping batch")
-                break
-            try:
-                t, f = translate_file(cfg, item["path"], chars_remaining)
-                all_translated.extend(t)
-                all_failed.extend(f)
-                if chars_remaining is not None:
-                    chars_remaining -= sum(x["chars"] for x in t)
+        # budget tracking disabled in parallel path: local Ollama, no per-call cost
+        def _worker(item, _nef=no_embedded_fallback):
+            return item, translate_file(cfg, item["path"], None, no_embedded_fallback=_nef)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_TRANSLATOR_WORKERS) as pool:
+            futures = {pool.submit(_worker, item): item for item in results}
+            for fut in concurrent.futures.as_completed(futures):
+                item = futures[fut]
+                try:
+                    _item, (t, f) = fut.result()
+                except Exception as e:
+                    log.exception("translate_file failed for %s: %s", item.get("path"), e)
+                    with _results_lock:
+                        all_failed.append({"path": item.get("path"), "error": str(e)})
+                    continue
+                with _results_lock:
+                    all_translated.extend(t)
+                    all_failed.extend(f)
                 if t and cfg.bazarr_api_key:
                     _trigger_bazarr_rescan(cfg, item["path"])
-            except Exception as e:
-                log.error("Error processing %s: %s", item["path"], e)
     else:
         click.echo("Must specify --since N, --file PATH, or --all")
         return

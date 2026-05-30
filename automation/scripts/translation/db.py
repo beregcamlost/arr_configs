@@ -143,15 +143,19 @@ def get_monthly_chars(db_path, provider=None, key_index=None):
 
 
 def is_permanently_failed(db_path, media_path, target_lang):
-    """Return True if (media_path, target_lang) has a prior NoneType parse failure.
+    """Return True if (media_path, target_lang) has a prior NoneType parse failure
+    recorded by the current provider (ollama).
 
-    NoneType errors arise from source SRTs that cannot be parsed — retrying
-    never helps, so these are skipped permanently rather than cycling every 24h.
+    Scoped to provider='ollama' so that legacy DeepL JSON-parse errors
+    (recorded before DeepL was removed 2026-04-29) do not permanently block
+    Ollama from retrying the same file.  NoneType errors from Ollama are
+    genuine source-SRT parse failures; retrying never helps.
     """
     with contextlib.closing(_connect(db_path)) as conn:
         cursor = conn.execute(
             """SELECT 1 FROM translation_log
                WHERE media_path = ? AND target_lang = ?
+                 AND provider = 'ollama'
                  AND (status LIKE '%NoneType%' OR status LIKE '%the JSON%')
                LIMIT 1""",
             (media_path, target_lang),

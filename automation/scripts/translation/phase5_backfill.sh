@@ -188,7 +188,7 @@ for media_path in "${worklist[@]}"; do
     output="$(cd "$WORK_DIR" && PYTHONPATH="$PYTHONPATH_DIR" \
         python3 -m translation.translator translate --file "$media_path" 2>&1)" || true
 
-    if echo "$output" | grep -qE "Done: [1-9][0-9]* translated|All profile langs present"; then
+    if echo "$output" | grep -qE "Done: [1-9][0-9]* translated|All profile langs present|Done: 0 translated, 0 failed"; then
         log "OK: $(basename "$media_path")"
         echo "$media_path" >> "$DONE_FILE"
         done_set["$media_path"]=1
