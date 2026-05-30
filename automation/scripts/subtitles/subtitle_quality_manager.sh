@@ -9,6 +9,10 @@ PATH_PREFIX=""
 RECURSIVE=0
 DRY_RUN=0
 FORCE=0
+# Subtitle standard: SIDECAR-ONLY by default. Embedding subs into media is no
+# longer the norm (slow on-the-fly extraction in Emby Web). SUB_EMBED=1 re-enables
+# the legacy embed behavior; SUB_EMBED=0 (default) keeps external .srt sidecars.
+SUB_EMBED="${SUB_EMBED:-0}"
 TRACK_TARGET=""
 KEEP_ONLY=""
 KEEP_PROFILE_LANGS=0
@@ -47,7 +51,8 @@ Usage: subtitle_quality_manager.sh <command> [options]
 
 Commands:
   audit          Score subtitle tracks (embedded + external) and output quality report
-  mux            Embed good external .srt files into MKV/MP4/M4V (runs audit first)
+  mux            (legacy) Embed good external .srt into media. DEFAULT OFF —
+                 sidecars are the standard now. Set SUB_EMBED=1 (or --embed) to embed.
   strip          Remove specific embedded subtitle tracks from MKV/MP4/M4V
   auto-maintain  Automated mux/strip with safety checks (quick + full mode)
   enqueue        Add file path(s) to pending work queue for next auto-maintain run
@@ -67,6 +72,8 @@ Common options:
 
 Mux options:
   --force               Mux even if audit rates subtitles as WARN/BAD
+  --embed               Embed subs into the container (legacy). Default is sidecar-only.
+  --no-embed            Force sidecar-only (this is the default; SUB_EMBED=0).
 
 Strip options:
   --track TARGET        Language code (e.g. eng) or stream index (e.g. 2) to remove
@@ -350,7 +357,7 @@ get_video_duration() {
 get_embedded_subs() {
   local mkv_file="$1"
   ffprobe -v quiet -print_format json -show_streams -select_streams s "$mkv_file" 2>/dev/null \
-    | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und"), title: (.tags.title // "")}, forced: (.disposition.forced // 0)}]'
+    | jq -c '[.streams[] | {index, codec_name, tags: {language: (.tags.language // "und"), title: (.tags.title // "")}, forced: (.disposition.forced // 0), hearing_impaired: (.disposition.hearing_impaired // 0)}]'
 }
 
 build_embedded_lang_map() {
@@ -888,6 +895,11 @@ cmd_mux() {
     [[ ${#srt_files[@]} -eq 0 ]] && continue
 
     total_files=$((total_files + 1))
+
+    if [[ "$SUB_EMBED" != "1" ]]; then
+      log "KEEP ${#srt_files[@]} sidecar(s) (embed disabled, SUB_EMBED=0): $basename"
+      continue
+    fi
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
       log "[DRY-RUN] Would mux ${#srt_files[@]} subtitle(s) into: $basename"
@@ -1651,14 +1663,15 @@ cmd_auto_maintain() {
       if [[ -n "$am_profile_set" ]] && [[ "$emb_count_p0" -gt 0 ]]; then
         local -a p0_strip_indices=()
         for ((i=0; i<emb_count_p0; i++)); do
-          local p0_idx p0_lang p0_codec p0_forced
+          local p0_idx p0_lang p0_codec p0_forced p0_hi
           p0_idx="$(jq -r ".[$i].index" <<<"$emb_json_p0")"
           p0_lang="$(jq -r ".[$i].tags.language" <<<"$emb_json_p0")"
           p0_codec="$(jq -r ".[$i].codec_name" <<<"$emb_json_p0")"
           p0_forced="$(jq -r ".[$i].forced" <<<"$emb_json_p0")"
+          p0_hi="$(jq -r ".[$i].hearing_impaired" <<<"$emb_json_p0")"
 
-          # Profile tracks: never strip
-          if lang_in_set "$p0_lang" "$am_profile_set"; then
+          # Profile tracks: never strip — but forced/HI tracks don't count as primary
+          if lang_in_set "$p0_lang" "$am_profile_set" && [[ "${p0_forced:-0}" -eq 0 && "${p0_hi:-0}" -eq 0 ]]; then
             continue
           fi
 
@@ -1869,7 +1882,8 @@ cmd_auto_maintain() {
       # === prefer-embedded-when-clean (added 2026-04-27) ===
       # If a same-language embedded track exists AND its content is langdetect-OK,
       # skip the mux and drop the redundant external sidecar. Embedded wins by default.
-      if [[ "${SUB_PREFER_EMBEDDED:-1}" != "0" ]] \
+      if [[ "$SUB_EMBED" == "1" ]] \
+         && [[ "${SUB_PREFER_EMBEDDED:-1}" != "0" ]] \
          && [[ -n "${embedded_lang_idx_p1[$ext_lang_norm]:-}" ]] \
          && [[ "$ext_lang_norm" != "und" ]]; then
         local _emb_track_id _emb_sub_idx _emb_check
@@ -1970,7 +1984,9 @@ cmd_auto_maintain() {
 
     # Mux GOOD external SRTs
     if [[ ${#good_srts[@]} -gt 0 ]]; then
-      if [[ "$DRY_RUN" -eq 1 ]]; then
+      if [[ "$SUB_EMBED" != "1" ]]; then
+        log "KEEP ${#good_srts[@]} sidecar(s) (embed disabled, SUB_EMBED=0): $basename"
+      elif [[ "$DRY_RUN" -eq 1 ]]; then
         log "[DRY-RUN] Would mux ${#good_srts[@]} sub(s) into: $basename"
         if [[ ${#premux_strip_indices_p1[@]} -gt 0 ]]; then
           log "[DRY-RUN] Would strip ${#premux_strip_indices_p1[@]} superseded embedded track(s) from: $basename"
@@ -2531,7 +2547,7 @@ cmd_compliance() {
       [[ -z "$el" ]] && continue
       el="$(normalize_track_lang "$el")"
       comp_emb_langs["$el"]=1
-    done < <(jq -r '.[].tags.language // "und"' <<<"$emb_json")
+    done < <(jq -r '.[] | select(.forced == 0 and .hearing_impaired == 0) | .tags.language // "und"' <<<"$emb_json")
 
     # Get external SRTs
     declare -A comp_ext_langs=()
@@ -2745,6 +2761,8 @@ else
       --track)      TRACK_TARGET="${2:-}"; shift 2 ;;
       --keep-only)  KEEP_ONLY="${2:-}"; shift 2 ;;
       --keep-profile-langs) KEEP_PROFILE_LANGS=1; shift ;;
+      --embed)      SUB_EMBED=1; shift ;;
+      --no-embed)   SUB_EMBED=0; shift ;;
       --bloat-threshold) BLOAT_THRESHOLD="${2:-6}"; shift 2 ;;
       --bazarr-url) BAZARR_URL="${2:-}"; shift 2 ;;
       --bazarr-db)  BAZARR_DB="${2:-}"; shift 2 ;;

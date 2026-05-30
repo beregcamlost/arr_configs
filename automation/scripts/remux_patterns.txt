@@ -1,0 +1,7 @@
+Dual-Lat
+DualLat
+Dual.Lat
+EN+ES
+ES+EN
+[EN+ES]
+[ES+EN]

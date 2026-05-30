@@ -5,7 +5,8 @@
 # Priority order: quick jobs → subtitle pipeline → translation
 # Codec conversion runs independently via its own cron (library_codec_manager.sh).
 #
-# Cron entries (two lanes — crons are currently STOPPED, kept for reference):
+# Cron entries (two lanes — ACTIVE in crontab; fast every 5m, slow every 30m,
+# plus a daily 1am full subtitle auto-maintain). Reference copy:
 #   */5  * * * * /usr/bin/flock -n /tmp/media_pipeline_fast.lock /bin/bash /config/berenstuff/automation/scripts/media_pipeline.sh --lane fast >> /config/berenstuff/automation/logs/media_pipeline.log 2>&1
 #   */30 * * * * /usr/bin/flock -n /tmp/media_pipeline_slow.lock /bin/bash /config/berenstuff/automation/scripts/media_pipeline.sh --lane slow >> /config/berenstuff/automation/logs/media_pipeline.log 2>&1
 #

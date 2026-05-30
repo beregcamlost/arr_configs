@@ -2,6 +2,18 @@
 
 > A full subtitle lifecycle pipeline for MKV/MP4/M4V media — from import-time extraction through ongoing quality maintenance, deduplication, and recovery. Bazarr-profile-aware, codec-smart, streaming-candidate-safe.
 
+> ⚠️ **Subtitle standard changed 2026-05-30 → SIDECAR-ONLY.**
+> Subtitles are kept as external `.srt` sidecars, **not embedded** into the media container.
+> Embedding forced Emby Web to run a slow on-the-fly ffmpeg extraction at playback
+> (measured **14s–183s** on the 2-vCPU appbox, per track, first play); external sidecars load
+> instantly. Changes:
+> - `subtitle_quality_manager.sh` now defaults to **`SUB_EMBED=0`** (keep sidecars, never embed).
+>   Set `SUB_EMBED=1` or pass `--embed` to opt back into the legacy embed behavior.
+> - `arr_remux_on_import.sh` (MKV→MP4 import hook) now **extracts** embedded text subs to
+>   `.<lang>[.forced].srt` sidecars instead of muxing them into the MP4.
+> - A one-time library de-embed migration converts already-embedded files to sidecars
+>   (best sub per Bazarr-profile language, no duplicates).
+
 ---
 
 ## 🗂️ Files
