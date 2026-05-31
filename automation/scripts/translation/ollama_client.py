@@ -14,7 +14,10 @@ from translation.prompt_utils import build_prompt, parse_response, build_system_
 
 log = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZE = 400
+# Option A (2026-05-31): subtitler:v2 truncates large batches; the empty-cue
+# retry then refills MIS-ALIGNED text (wrong cue). One cue per request can't
+# cross-contaminate, and is faster. Was 400.
+DEFAULT_BATCH_SIZE = 1
 DEFAULT_MODEL = "phi4-mini-subs"
 DEFAULT_TIMEOUT = 600
 DEFAULT_MAX_WORKERS = int(os.environ.get("OLLAMA_MAX_WORKERS", "2"))
