@@ -389,7 +389,7 @@ def translate_file(cfg: Config, media_path: str, chars_remaining=None,
             target_srt = os.path.join(directory, f"{stem}.{base_lang}.srt")
             if _try_embedded_spanish(media_path, target_srt):
                 # Write a distinct marker so we can audit embedded-vs-translated.
-                open(target_srt + ".embedded", "w").close()
+                # [markers-off 2026-05-31] open(target_srt + ".embedded", "w").close()
                 record_translation(
                     db_path, media_path, "spa-embedded", base_lang,
                     os.path.getsize(target_srt), "success", _PROVIDER_EMBEDDED,
@@ -434,7 +434,7 @@ def translate_file(cfg: Config, media_path: str, chars_remaining=None,
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(write_srt(translated_cues))
             marker_ext = MARKER_EXTENSIONS.get(provider, ".ollama")
-            open(output_path + marker_ext, "w").close()
+            # [markers-off 2026-05-31] open(output_path + marker_ext, "w").close()
 
             record_translation(db_path, media_path, source_lang_code,
                                base_lang, chars_used, "success", provider,
