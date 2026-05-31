@@ -710,6 +710,9 @@ expand_lang_codes_inline() {
       eng) [[ -z "${seen[en]:-}" ]]  && { seen[en]=1;  result+="en "; }  ;;
       es)  [[ -z "${seen[spa]:-}" ]] && { seen[spa]=1; result+="spa "; } ;;
       spa) [[ -z "${seen[es]:-}" ]]  && { seen[es]=1;  result+="es "; }  ;;
+      # ea = Spanish (Latin America) — Bazarr non-standard code; treat as Spanish
+      ea)  [[ -z "${seen[es]:-}"  ]] && { seen[es]=1;  result+="es "; }
+           [[ -z "${seen[spa]:-}" ]] && { seen[spa]=1; result+="spa "; } ;;
       fr)  [[ -z "${seen[fre]:-}" ]] && { seen[fre]=1; result+="fre "; } ;;
       fre|fra) [[ -z "${seen[fr]:-}" ]] && { seen[fr]=1; result+="fr "; }
                [[ "$code" == "fre" && -z "${seen[fra]:-}" ]] && { seen[fra]=1; result+="fra "; }
@@ -818,6 +821,31 @@ resolve_original_lang_by_id() {
   local media_type="$1" ref_id="$2" bazarr_db="$3"
   [[ -z "$ref_id" || "$ref_id" == "NULL" || ! -f "$bazarr_db" ]] && return 0
 
+  # Load API creds if not already in environment (safe for cron / non-interactive shells).
+  if [[ -z "${RADARR_KEY:-}" || -z "${SONARR_KEY:-}" ]] && [[ -f /config/berenstuff/.env ]]; then
+    source /config/berenstuff/.env 2>/dev/null || true
+  fi
+
+  # --- Primary: query Radarr/Sonarr for the TRUE cinematic original language ---
+  local api_lang_name="" api_iso=""
+  if [[ "$media_type" == "movie" && -n "${RADARR_URL:-}" && -n "${RADARR_KEY:-}" ]]; then
+    api_lang_name="$(curl --max-time 5 --connect-timeout 2 --silent --fail       --header "X-Api-Key: $RADARR_KEY"       "$RADARR_URL/api/v3/movie/$ref_id" 2>/dev/null       | jq -r '.originalLanguage.name // empty' 2>/dev/null)" || true
+  elif [[ "$media_type" == "series" && -n "${SONARR_URL:-}" && -n "${SONARR_KEY:-}" ]]; then
+    api_lang_name="$(curl --max-time 5 --connect-timeout 2 --silent --fail       --header "X-Api-Key: $SONARR_KEY"       "$SONARR_URL/api/v3/series/$ref_id" 2>/dev/null       | jq -r '.originalLanguage.name // empty' 2>/dev/null)" || true
+  fi
+
+  if [[ -n "$api_lang_name" ]]; then
+    api_iso="$(lang_name_to_iso "$api_lang_name")"
+  fi
+
+  log "debug" "resolve_original_lang: type=${media_type} ref=${ref_id} radarr_url_set=${RADARR_URL:+yes} sonarr_url_set=${SONARR_URL:+yes} api_name=${api_lang_name} api_iso=${api_iso}"
+
+  if [[ -n "$api_iso" ]]; then
+    echo "$api_iso"
+    return 0
+  fi
+
+  # --- Fallback: original Bazarr audio_language[0] logic (unchanged) ---
   local raw_lang=""
   if [[ "$media_type" == "series" ]]; then
     # Use the most common audio_language across all episodes of this show
@@ -972,6 +1000,15 @@ SQL
   if [[ "$has_deleted_at" -eq 0 ]]; then
     db "ALTER TABLE media_files ADD COLUMN deleted_at TEXT DEFAULT NULL;"
     log "info" "Migrated media_files: added deleted_at column"
+  fi
+
+  # Migration: add claimed_by column if missing (multi-host distributed claim support).
+  # Safe to run on every invocation — returns 0 rows for missing columns.
+  local has_claimed_by
+  has_claimed_by="$(db "SELECT COUNT(*) FROM pragma_table_info('conversion_plan') WHERE name='claimed_by';")"
+  if [[ "$has_claimed_by" -eq 0 ]]; then
+    db "ALTER TABLE conversion_plan ADD COLUMN claimed_by TEXT;" || true
+    log "info" "Migrated conversion_plan: added claimed_by column"
   fi
 }
 
@@ -1274,9 +1311,9 @@ LEFT JOIN (
          MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END) AS max_w,
          MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END) AS max_h,
          MAX(CASE WHEN stream_type='video' THEN is_hdr ELSE 0 END) AS has_hdr,
-         SUM(CASE WHEN stream_type='video' AND codec IN ($codec_list_sql) THEN 1 ELSE 0 END) AS compliant_v,
+         SUM(CASE WHEN stream_type='video' AND codec IN ($codec_list_sql) AND pix_fmt='yuv420p' THEN 1 ELSE 0 END) AS compliant_v,
          SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END) AS total_v,
-         SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END) AS good_a,
+         SUM(CASE WHEN stream_type='audio' AND codec IN ('aac','ac3') AND channels<=2 THEN 1 ELSE 0 END) AS good_a,
          SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END) AS total_a
   FROM probe_streams
   GROUP BY media_id
@@ -1527,7 +1564,7 @@ verify_transcoded_file() {
   dur_delta="$(awk -v a="$src_dur" -v b="$dst_dur" 'BEGIN{d=a-b; if(d<0)d=-d; printf "%.3f", d}')"
 
   v_ok="$(ffprobe -v error -select_streams v -show_entries stream=codec_name -of csv=p=0 "$dst" 2>/dev/null | awk -F',' '{if($1!="h264") bad=1} END{if(bad) print 0; else print 1}')"
-  a_ok="$(ffprobe -v error -select_streams a -show_entries stream=codec_name,channels -of csv=p=0 "$dst" 2>/dev/null | awk -F',' '{if($1!="aac" || $2>2) bad=1} END{if(NR==0||bad) print 0; else print 1}')"
+  a_ok="$(ffprobe -v error -select_streams a -show_entries stream=codec_name,channels -of csv=p=0 "$dst" 2>/dev/null | awk -F',' '{if(($1!="aac" && $1!="ac3") || $2>2) bad=1} END{if(NR==0||bad) print 0; else print 1}')"
 
   if awk -v d="$dur_delta" 'BEGIN{exit (d<=2.5)?0:1}'; then
     :
@@ -1586,8 +1623,8 @@ verify_converted_file_standalone() {
   fi
 
   acodec="$(jq -r '[.streams[] | select(.codec_type=="audio")][0].codec_name // ""' <<<"$probe_json")"
-  if [[ "$acodec" != "aac" ]]; then
-    VERIFY_FAIL_REASON="audio_codec=$acodec (expected aac)"
+  if [[ "$acodec" != "aac" && "$acodec" != "ac3" ]]; then
+    VERIFY_FAIL_REASON="audio_codec=$acodec (expected aac or ac3)"
     return 1
   fi
 
@@ -1608,10 +1645,40 @@ audio_streams_already_compliant() {
         {
           n++
           gsub(/[[:space:]]+/, "", $1)
-          if ($1 != "aac" || $2 > 2 || $3 != 48000) ok=0
+          # AAC stereo/mono OR AC3 stereo/mono at 48kHz are both compliant.
+          # AC3 5.1+ (channels>2) still triggers downmix to AAC stereo.
+          if (($1 != "aac" && $1 != "ac3") || $2 > 2 || $3 != 48000) ok=0
         }
         END { exit (n > 0 && ok) ? 0 : 1 }
       '
+}
+
+# build_audio_disposition_args orig_lang desc_entry...
+# Prints -disposition:a:N flags for each output audio stream (0-based OUTPUT index).
+# The orig_lang track gets "default"; all others get "0".
+# If orig_lang is "und" or not found in the desc list, all streams get "0" (no forced default).
+# desc_entry format: "INPUT_IDX:LANG" as emitted by select_audio_streams_for_conversion.
+# OUTPUT index is the position in the list (0-based), NOT the input stream index.
+build_audio_disposition_args() {
+  local orig_lang="${1:-und}"
+  shift
+  local -a descs=("$@")
+  local found_pos=-1
+  local i
+  for (( i=0; i<${#descs[@]}; i++ )); do
+    local entry_lang="${descs[$i]##*:}"
+    if [[ "$orig_lang" != "und" && "$entry_lang" == "$orig_lang" ]]; then
+      found_pos=$i
+      break
+    fi
+  done
+  for (( i=0; i<${#descs[@]}; i++ )); do
+    if [[ $i -eq $found_pos ]]; then
+      printf -- '-disposition:a:%d\ndefault\n' "$i"
+    else
+      printf -- '-disposition:a:%d\n0\n' "$i"
+    fi
+  done
 }
 
 select_audio_streams_for_conversion() {
@@ -1662,7 +1729,12 @@ select_audio_streams_for_conversion() {
   # Profile-aware selection: keep streams matching profile OR original language.
   if [[ -n "$profile_lang_set" ]]; then
     local orig_expanded=""
-    [[ -n "$orig_lang_override" ]] && orig_expanded="$(expand_lang_codes_inline "$orig_lang_override")"
+    if [[ -n "$orig_lang_override" ]]; then
+      orig_expanded="$(expand_lang_codes_inline "$orig_lang_override")"
+    elif [[ -n "$orig_lang" && "$orig_lang" != "und" ]]; then
+      # Change C: when resolver had no API result, still protect the locally-detected original track.
+      orig_expanded="$(expand_lang_codes_inline "$orig_lang")"
+    fi
     while IFS=$'\t' read -r idx lang def; do
       [[ -z "$idx" ]] && continue
       local keep=0
@@ -1681,7 +1753,7 @@ select_audio_streams_for_conversion() {
     if [[ "$orig_lang" == "und" ]]; then
       while IFS=$'\t' read -r idx lang def; do
         [[ -z "$idx" ]] && continue
-        if [[ "$def" == "1" || "$lang" == "eng" || "$lang" == "spa" || "$lang" == "ita" ]]; then
+        if [[ "$def" == "1" || "$lang" == "eng" || "$lang" == "spa" ]]; then
           if [[ -z "${seen[$idx]:-}" ]]; then
             seen["$idx"]=1
             printf '%s\t%s\n' "$idx" "$lang"
@@ -1691,7 +1763,7 @@ select_audio_streams_for_conversion() {
     else
       while IFS=$'\t' read -r idx lang def; do
         [[ -z "$idx" ]] && continue
-        if [[ "$lang" == "$orig_lang" || "$lang" == "eng" || "$lang" == "spa" || "$lang" == "ita" ]]; then
+        if [[ "$lang" == "$orig_lang" || "$lang" == "eng" || "$lang" == "spa" ]]; then
           if [[ -z "${seen[$idx]:-}" ]]; then
             seen["$idx"]=1
             printf '%s\t%s\n' "$idx" "$lang"
@@ -1702,12 +1774,15 @@ select_audio_streams_for_conversion() {
   fi
 
   # Safety fallback: always select at least one stream.
+  # Prefer the default-disposition track; fall back to the first track.
   if [[ "${#seen[@]}" -eq 0 ]]; then
+    local fb_default="" fb_first=""
     while IFS=$'\t' read -r idx lang def; do
       [[ -z "$idx" ]] && continue
-      printf '%s\t%s\n' "$idx" "$lang"
-      break
+      [[ -z "$fb_first" ]] && fb_first="${idx}"$'\t'"${lang}"
+      if [[ "$def" == "1" ]]; then fb_default="${idx}"$'\t'"${lang}"; break; fi
     done <<<"$rows"
+    printf '%s\n' "${fb_default:-$fb_first}"
   fi
 }
 
@@ -1718,9 +1793,11 @@ video_streams_already_compliant() {
         BEGIN { n=0; ok=1 }
         {
           n++
-          gsub(/[[:space:]]+/, "", $1)
-          gsub(/[[:space:]]+/, "", $2)
-          if ($1 != "h264" || $2 != "yuv420p") ok=0
+          codec=$1
+          pix=$2
+          gsub(/[[:space:]]+/, "", codec)
+          gsub(/[[:space:]]+/, "", pix)
+          if (codec != "h264" || pix != "yuv420p") ok=0
         }
         END { exit (n > 0 && ok) ? 0 : 1 }
       '
@@ -1746,6 +1823,88 @@ build_temp_output_path() {
   [[ -z "$safe_stem" ]] && safe_stem="media_${media_id}"
 
   printf '%s/%s.media_%s.%s' "$run_dir" "$safe_stem" "$media_id" "$tmp_ext"
+}
+
+# Tag a successfully-transcoded media item with keep-local in Sonarr or Radarr.
+# Args: $1 = source file path (absolute)
+# Idempotent + non-fatal on failure. Never blocks the transcode swap.
+add_keeplocal_tag() {
+  local src="$1"
+  local tag_id media_id
+
+  case "$src" in
+    */media/tv/*|*/media/tvanimated/*)
+      local sonarr_db="/config/.config/Sonarr/sonarr.db"
+      local sonarr_key
+      sonarr_key=$(grep -oP "(?<=<ApiKey>)[^<]+" /config/.config/Sonarr/config.xml 2>/dev/null) || return 0
+      media_id=$(sqlite3 "$sonarr_db" "SELECT Id FROM Series WHERE '$(sql_quote "$src")' LIKE Path || '/%' LIMIT 1;" 2>/dev/null)
+      [ -z "$media_id" ] && return 0
+      tag_id=$(curl -sS -H "X-Api-Key: $sonarr_key" "http://localhost:8989/sonarr/api/v3/tag" 2>/dev/null | python3 -c "
+import sys, json
+tags = json.load(sys.stdin)
+for t in tags:
+    if t.get('label') == 'keep-local':
+        print(t['id']); break
+" 2>/dev/null)
+      if [ -z "$tag_id" ]; then
+        tag_id=$(curl -sS -X POST -H "X-Api-Key: $sonarr_key" -H "Content-Type: application/json" \
+          "http://localhost:8989/sonarr/api/v3/tag" -d '{"label":"keep-local"}' 2>/dev/null | python3 -c "
+import sys, json
+print(json.load(sys.stdin).get('id', ''))
+" 2>/dev/null)
+      fi
+      [ -z "$tag_id" ] && return 0
+      curl -sS -X PUT -H "X-Api-Key: $sonarr_key" -H "Content-Type: application/json" \
+        "http://localhost:8989/sonarr/api/v3/series/editor" \
+        -d "{\"seriesIds\":[$media_id],\"tags\":[$tag_id],\"applyTags\":\"add\"}" \
+        >/dev/null 2>&1 || true
+      ;;
+    */media/movies/*|*/media/moviesanimated/*)
+      local radarr_db radarr_config radarr_key
+      radarr_db=$(find /config -name "radarr.db" -maxdepth 6 2>/dev/null | head -1)
+      [ -z "$radarr_db" ] && return 0
+      radarr_config=$(find /config -path "*adarr*" -name "config.xml" -maxdepth 6 2>/dev/null | head -1)
+      radarr_key=$(grep -oP "(?<=<ApiKey>)[^<]+" "$radarr_config" 2>/dev/null) || return 0
+      media_id=$(sqlite3 "$radarr_db" "SELECT Id FROM Movies WHERE '$(sql_quote "$src")' LIKE Path || '/%' LIMIT 1;" 2>/dev/null)
+      [ -z "$media_id" ] && return 0
+      tag_id=$(curl -sS -H "X-Api-Key: $radarr_key" "http://localhost:7878/radarr/api/v3/tag" 2>/dev/null | python3 -c "
+import sys, json
+tags = json.load(sys.stdin)
+for t in tags:
+    if t.get('label') == 'keep-local':
+        print(t['id']); break
+" 2>/dev/null)
+      if [ -z "$tag_id" ]; then
+        tag_id=$(curl -sS -X POST -H "X-Api-Key: $radarr_key" -H "Content-Type: application/json" \
+          "http://localhost:7878/radarr/api/v3/tag" -d '{"label":"keep-local"}' 2>/dev/null | python3 -c "
+import sys, json
+print(json.load(sys.stdin).get('id', ''))
+" 2>/dev/null)
+      fi
+      [ -z "$tag_id" ] && return 0
+      curl -sS -X PUT -H "X-Api-Key: $radarr_key" -H "Content-Type: application/json" \
+        "http://localhost:7878/radarr/api/v3/movie/editor" \
+        -d "{\"movieIds\":[$media_id],\"tags\":[$tag_id],\"applyTags\":\"add\"}" \
+        >/dev/null 2>&1 || true
+      ;;
+  esac
+  return 0
+}
+
+# Trigger Emby library refresh via PUBLIC URL (localhost:8096 not reachable from container).
+# Non-fatal, idempotent, no-op safe. Sources EMBY_API_KEY from .env if not already in env.
+notify_emby_refresh() {
+  local emby_key="${EMBY_API_KEY:-}" emby_url="${EMBY_URL:-}"
+  local env_file="/config/berenstuff/.env"
+  if [ -z "$emby_key" ] || [ -z "$emby_url" ]; then
+    [ -f "$env_file" ] && source "$env_file" 2>/dev/null || true
+    emby_key="${EMBY_API_KEY:-}"
+    emby_url="${EMBY_URL:-}"
+  fi
+  [ -z "$emby_key" ] || [ -z "$emby_url" ] && return 0
+  curl -sS -X POST "${emby_url}/Library/Refresh?api_key=${emby_key}" \
+    --max-time 30 >/dev/null 2>&1 || true
+  return 0
 }
 
 run_convert_for_media() {
@@ -1844,6 +2003,11 @@ run_convert_for_media() {
   else
     ff_cmd+=( -c:a aac -ac 2 -ar "$TARGET_SAMPLE_RATE" -b:a "$TARGET_AUDIO_BITRATE" )
   fi
+  # Set -disposition:a:N flags so the original-language track is the default audio.
+  # build_audio_disposition_args uses OUTPUT positions (0-based), not input stream indexes.
+  # If orig_lang is "und" or not present in the kept set, all tracks get "0" (no crash, no stray default).
+  mapfile -t _audio_disp_args < <(build_audio_disposition_args "$orig_lang" "${selected_audio_desc[@]}")
+  ff_cmd+=( "${_audio_disp_args[@]}" )
   ff_cmd+=( -c:s copy )
   if [[ "$tmp_ext" == "mp4" ]]; then
     ff_cmd+=( -movflags +faststart )
@@ -1915,6 +2079,8 @@ SQL
         "$_tc_size_before" "$_tc_size_after" \
         "${_tc_duration_sec:-0}" "$_tc_conv_time" \
         || log "warn" "Discord transcode notify failed for media_id=$media_id (non-fatal)"
+      add_keeplocal_tag "$src" || true
+      notify_emby_refresh || true
     else
       mv "$backup_path" "$src" || true
       db "UPDATE conversion_runs SET end_ts=CURRENT_TIMESTAMP,status='rolled_back',error='swap_failed_rolled_back' WHERE run_id='$(sql_quote "$run_id")' AND media_id=$media_id AND status='running';"
@@ -2207,9 +2373,9 @@ enqueue_import_cmd() {
       COALESCE(MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END),0),
       COALESCE(MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END),0),
       COALESCE(MAX(CASE WHEN stream_type='video' THEN is_hdr ELSE 0 END),0),
-      COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' AND pix_fmt='yuv420p' THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END),0),
-      COALESCE(SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='audio' AND codec IN ('aac','ac3') AND channels<=2 THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0)
     FROM probe_streams WHERE media_id=$media_id;"
   )
