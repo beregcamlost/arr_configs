@@ -1576,14 +1576,16 @@ verify_transcoded_file() {
   [[ "$v_ok" -eq 1 ]] || { echo "video_codec_validation_failed"; return 1; }
   [[ "$a_ok" -eq 1 ]] || { echo "audio_codec_validation_failed"; return 1; }
 
-  # Subtitle stream count check — catch silent drops (e.g. ASS/PGS in MP4)
-  local src_subs dst_subs
-  src_subs="$(ffprobe -v error -select_streams s -show_entries stream=index \
-    -of csv=p=0 "$src" </dev/null 2>/dev/null | wc -l)"
-  dst_subs="$(ffprobe -v error -select_streams s -show_entries stream=index \
-    -of csv=p=0 "$dst" </dev/null 2>/dev/null | wc -l)"
-  if [[ "$src_subs" -gt 0 && "$dst_subs" -lt "$src_subs" ]]; then
-    echo "subtitle_stream_loss:src=${src_subs},dst=${dst_subs}"
+  # Subtitle check under the sidecar standard: TEXT subs are extracted to .srt sidecars and
+  # intentionally dropped from the container, so a lower TOTAL sub count is expected. Only fail
+  # if an IMAGE-based sub (PGS/VOBSUB) — which cannot become a sidecar — was lost.
+  local src_img_subs dst_img_subs
+  src_img_subs="$(ffprobe -v error -select_streams s -show_entries stream=codec_name \
+    -of csv=p=0 "$src" </dev/null 2>/dev/null | grep -cE '^(hdmv_pgs_subtitle|dvd_subtitle|pgssub|dvdsub)$')"
+  dst_img_subs="$(ffprobe -v error -select_streams s -show_entries stream=codec_name \
+    -of csv=p=0 "$dst" </dev/null 2>/dev/null | grep -cE '^(hdmv_pgs_subtitle|dvd_subtitle|pgssub|dvdsub)$')"
+  if [[ "$src_img_subs" -gt 0 && "$dst_img_subs" -lt "$src_img_subs" ]]; then
+    echo "image_subtitle_loss:src=${src_img_subs},dst=${dst_img_subs}"
     return 1
   fi
 
@@ -1907,6 +1909,75 @@ notify_emby_refresh() {
   return 0
 }
 
+# Sidecar subtitle standard (decision 4): extract embedded TEXT subtitles to external
+# .<lang>[.forced|.sdh].srt sidecars for each Bazarr-profile language, so they no longer
+# need to live inside the container. Image-based subs (PGS/VOBSUB) cannot be SRT and are
+# left in the container by the caller.
+#   $1 = source media file
+#   $2 = profile_lang_set (expanded space-separated set; empty -> no-op)
+# No-clobber (never overwrites an existing sidecar). Non-fatal: always returns 0.
+extract_profile_subtitle_sidecars() {
+  local src="$1" profile_set="$2"
+  [[ -z "$profile_set" || ! -f "$src" ]] && return 0
+  command -v ffprobe >/dev/null 2>&1 || return 0
+
+  local dir stem
+  dir="$(dirname "$src")"
+  stem="$(basename "${src%.*}")"
+
+  # Text subtitle codecs we can export to SRT.
+  local text_codecs=" subrip ass ssa mov_text webvtt text "
+
+  local sub_rows
+  sub_rows="$(ffprobe -v error -select_streams s \
+    -show_entries stream=index,codec_name:stream_tags=language:stream_disposition=forced,hearing_impaired \
+    -of json "$src" 2>/dev/null \
+    | jq -r '.streams[]? | [ (.index|tostring), ((.codec_name // "")|ascii_downcase),
+              ((.tags.language // "und")|ascii_downcase),
+              ((.disposition.forced // 0)|tostring),
+              ((.disposition.hearing_impaired // 0)|tostring) ] | @tsv' 2>/dev/null)"
+  [[ -z "$sub_rows" ]] && return 0
+
+  local -A done_bucket=()
+  local idx codec lang forced hi
+  while IFS=$'\t' read -r idx codec lang forced hi; do
+    [[ -z "$idx" ]] && continue
+    [[ "$text_codecs" == *" $codec "* ]] || continue          # text codecs only
+    lang_in_set_inline "$lang" "$profile_set" || continue     # profile languages only
+    [[ "$lang" == "und" ]] && continue
+
+    # Normalize 3-letter ISO to the 2-letter code Bazarr/Emby use for sidecar discovery.
+    local lang2="$lang"
+    case "$lang" in
+      eng) lang2=en ;; spa) lang2=es ;; fre|fra) lang2=fr ;; por) lang2=pt ;;
+      ger|deu) lang2=de ;; ita) lang2=it ;; jpn) lang2=ja ;; kor) lang2=ko ;;
+      zho|chi) lang2=zh ;;
+    esac
+    local suffix="$lang2"
+    if [[ "$forced" == "1" ]]; then suffix="${lang2}.forced"
+    elif [[ "$hi" == "1" ]]; then suffix="${lang2}.sdh"; fi
+    [[ -n "${done_bucket[$suffix]:-}" ]] && continue
+
+    local sidecar="${dir}/${stem}.${suffix}.srt"
+    if [[ -f "$sidecar" ]]; then
+      done_bucket["$suffix"]=1                                # keep existing; never clobber
+      continue
+    fi
+
+    local tmp="${sidecar}.extract.tmp"
+    if ffmpeg -hide_banner -nostdin -y -v error -i "$src" -map "0:${idx}" -c:s srt -f srt "$tmp" </dev/null 2>>"$LOG_PATH" \
+        && [[ -s "$tmp" ]]; then
+      mv -f "$tmp" "$sidecar"
+      done_bucket["$suffix"]=1
+      log "info" "sidecar-extract: $(basename "$src") track $idx ($suffix) -> $(basename "$sidecar")"
+    else
+      rm -f "$tmp" 2>/dev/null
+      log "debug" "sidecar-extract: failed track $idx ($lang) in $(basename "$src")"
+    fi
+  done <<< "$sub_rows"
+  return 0
+}
+
 run_convert_for_media() {
   local run_id="$1" media_id="$2" attempt_no="$3"
   local src container media_type_val bazarr_ref_id_val
@@ -1990,9 +2061,21 @@ run_convert_for_media() {
     audio_copy=1
   fi
 
+  # SIDECAR SUBTITLE STANDARD (decision 4): extract profile-language TEXT subs to external
+  # .srt sidecars, then keep ONLY image-based subs (PGS/VOBSUB) in the container. Text subs
+  # are intentionally dropped (they now live as sidecars); image subs can't be SRT so they stay.
+  extract_profile_subtitle_sidecars "$src" "$profile_lang_set"
+  local -a subtitle_map_args=()
+  local _sidx
+  while IFS= read -r _sidx; do
+    [[ -z "$_sidx" ]] && continue
+    subtitle_map_args+=( -map "0:${_sidx}" )
+  done < <(ffprobe -v error -select_streams s -show_entries stream=index,codec_name -of csv=p=0 "$src" 2>/dev/null \
+           | awk -F',' '$2=="hdmv_pgs_subtitle"||$2=="dvd_subtitle"||$2=="pgssub"||$2=="dvdsub"{print $1}')
+
   ff_cmd=(ffmpeg -hide_banner -nostdin -y -i "$src" -map 0:v:0)
   ff_cmd+=( "${audio_map_args[@]}" )
-  ff_cmd+=( -map 0:s? )
+  ff_cmd+=( "${subtitle_map_args[@]}" )
   if [[ "$video_copy" -eq 1 ]]; then
     ff_cmd+=( -c:v copy )
   else
@@ -2008,6 +2091,7 @@ run_convert_for_media() {
   # If orig_lang is "und" or not present in the kept set, all tracks get "0" (no crash, no stray default).
   mapfile -t _audio_disp_args < <(build_audio_disposition_args "$orig_lang" "${selected_audio_desc[@]}")
   ff_cmd+=( "${_audio_disp_args[@]}" )
+  # -c:s copy applies only to the image-based subs mapped above (text subs are now sidecars).
   ff_cmd+=( -c:s copy )
   if [[ "$tmp_ext" == "mp4" ]]; then
     ff_cmd+=( -movflags +faststart )
