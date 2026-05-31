@@ -6,7 +6,7 @@ This folder centralizes automation scripts, logs, and docs for subtitle/profile 
 - `scripts/subtitles/` subtitle/profile extraction + Sonarr/Radarr hooks
 - `scripts/transcode/` library codec manager
 - `scripts/streaming/` streaming availability checker
-- `scripts/translation/` DeepL subtitle translator
+- `scripts/translation/` Ollama (local LLM) EN->ES subtitle translator + embedded-Spanish extraction
 - `logs/` automation logs
 - `docs/` persistent context and operational notes
 

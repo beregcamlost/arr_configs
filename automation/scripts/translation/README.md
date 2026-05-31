@@ -1,6 +1,8 @@
 # 🌍 Subtitle Translator
 
-> Automatically translate missing subtitle languages using Gemini, DeepL, or Google Translate — bridging the gap when Bazarr can't find a subtitle in your profile language.
+> Fill in missing **Spanish** subtitles for your library using a **local Ollama LLM** — translating English subtitles to Spanish when Bazarr can't find a `es` subtitle in your profile. Where a genuine Spanish subtitle is already baked into the file, it's extracted directly instead of translated.
+
+> **Scope:** This translator is **EN→ES only** and uses a **single local Ollama provider**. The old multi-provider stack (DeepL / Gemini / Google Translate) was **removed on 2026-04-29** — there are no third-party translation APIs, no API keys, no failover chain, and no character quotas anymore.
 
 ---
 
@@ -8,31 +10,29 @@
 
 | File | Role |
 |------|------|
-| `translator.py` | 🚀 CLI entry point — `translate`, `status`, `usage` commands |
-| `subtitle_scanner.py` | 🔎 Scan Bazarr DB for missing subtitles; find best source SRT |
-| `deepl_client.py` | 🌐 DeepL API wrapper — batched SRT cue translation |
-| `gemini_client.py` | 🤖 Gemini API client — multi-key rotation, batched translation |
-| `google_client.py` | 🔄 Google Translate fallback |
-| `subtitle_quality_checker.py` | 🔍 Gemini-powered content quality checker (lang detection, quality scoring) |
+| `translator.py` | 🚀 CLI entry point — `translate` and `status` commands |
+| `ollama_client.py` | 🤖 Local Ollama LLM client — batched EN→ES SRT cue translation |
+| `subtitle_scanner.py` | 🔎 Scan Bazarr DB for missing subtitles; find best source SRT; read profile langs |
 | `srt_parser.py` | 📄 SRT parse/write with timing preservation |
-| `db.py` | 🗄️ SQLite state DB — translation history + 24h cooldown |
-| `config.py` | ⚙️ Config loader + language code mappings (ISO 639 ↔ provider codes) |
-| `discord.py` | 💬 Discord webhook — translation summaries + quota warnings |
-| `tests/` | ✅ pytest tests covering all modules |
+| `db.py` | 🗄️ SQLite state DB — translation history, cooldown, permanent-fail guard |
+| `config.py` | ⚙️ Config loader + Ollama language map (`OLLAMA_LANG_MAP`) |
+| `discord.py` | 💬 Discord webhook — translation summaries |
+| `lib_metrics.py` | 📊 Optional run metrics (fail-soft; no-op if missing) |
+| `tests/` | ✅ pytest tests covering the modules |
 
 ---
 
 ## ✨ Features
 
-- **🤖 Multi-provider** — Gemini 2.5 Pro (primary, auto-fallback to 2.5 Flash), DeepL Pro API (fallback), Google Translate (last resort)
-- **🔄 Automatic failover** — Gemini (Pro → Flash) → DeepL → Google, with per-key rotation and per-model quota tracking
-- **🧠 Smart source SRT selection** — picks the largest non-forced SRT; prefers English if it's within 20% of the largest
-- **🔍 Bazarr profile integration** — reads your Bazarr language profile to know exactly which languages are needed per file
-- **⏱️ 24-hour cooldown** — avoids re-translating the same (file, language) pair too soon after a failure
-- **📦 Batched translation** — sends subtitle cues in ~3K char batches to stay within model limits
-- **🏷️ Marker files** — `.deepl`/`.gemini` signals `auto-maintain` to defer muxing until translation is confirmed stable
-- **🔔 Discord notifications** — green summary on success, red alert on quota exceeded
-- **↔️ Two modes** — cron batch mode (`--since N`) and single-file import hook mode (`--file PATH`)
+- **🤖 Local Ollama provider** — translation runs entirely against a local Ollama LLM (`OLLAMA_BASE_URL` + `OLLAMA_MODEL`). No third-party APIs, no keys, no per-call cost.
+- **🇪🇸 EN→ES only** — the only translation path is English → Spanish. Any non-`es` target language is skipped (a non-ES target would otherwise save Spanish content under the wrong language tag).
+- **📼 Embedded-Spanish extraction fast-path** — before invoking the LLM for a missing `es` subtitle, the source media is probed for a genuine, non-forced, non–hearing-impaired Spanish text subtitle stream. If one exists and passes a language fingerprint, it's extracted directly to `{stem}.es.srt` (provider `embedded-extract`) — skipping GPU translation entirely. Bypass with `--no-embedded-fallback`.
+- **⚡ Parallel batch translation** — `--since` / `--all` runs fan out across a `ThreadPoolExecutor` (default **8** workers, override with `TRANSLATOR_WORKERS`).
+- **🔍 Bazarr profile integration** — reads the Bazarr language profile for each file to determine which languages are needed, then checks what's already present on disk.
+- **⏱️ Cooldown + permanent-fail guard** — a per-`(media, target)` cooldown avoids re-hammering problem files; a permanent-fail guard skips files with a prior unrecoverable parse failure (scoped to `provider='ollama'`).
+- **🏷️ Marker files** — translated output gets a `.ollama` marker; extracted embedded Spanish gets a `.embedded` marker. These signal `auto-maintain` to defer muxing until the subtitle is confirmed stable, and let you audit embedded-vs-translated.
+- **🔔 Discord notifications** — a summary of translated/failed files after each run.
+- **↔️ Two modes** — cron/batch mode (`--since N` or `--all`) and single-file import-hook mode (`--file PATH`).
 
 ---
 
@@ -47,81 +47,120 @@ python3 -m translation.translator <command> [options]
 ### 🔄 `translate` — Run translations
 
 ```bash
-# Cron mode: translate all files with missing subs modified in last 60 minutes
-python3 -m translation.translator translate --since 60
+# Cron/batch mode: translate files with missing subs modified in the last N minutes
+python3 -m translation.translator translate --since 10
 
-# Import hook mode: translate a single just-imported file (runs in background)
+# Translate all files with missing subtitles (mutually exclusive with --since)
+python3 -m translation.translator translate --all
+
+# Import-hook mode: translate a single just-imported file
 python3 -m translation.translator translate --file "/path/to/Show.S01E01.mkv"
 
-# Cap characters used in this run (budget control)
-python3 -m translation.translator translate --since 60 --max-chars 50000
+# Cap the number of files processed in this batch run
+python3 -m translation.translator translate --since 10 --max-files 3
+
+# Skip the embedded-Spanish fast-path and always use the LLM translator
+python3 -m translation.translator translate --since 10 --no-embedded-fallback
 ```
 
-### 📊 `status` — Check recent translations
+**Options**
+
+| Option | Meaning |
+|--------|---------|
+| `--since N` | Only process files modified in the last `N` minutes |
+| `--all` | Process all files with missing subtitles (mutually exclusive with `--since`) |
+| `--file PATH` | Translate a single file |
+| `--max-files N` | Cap files processed per batch run (applied after the scan) |
+| `--no-embedded-fallback` | Skip the embedded-Spanish track check; always use the LLM translator |
+| `--state-dir DIR` | Override the state directory |
+| `--bazarr-db PATH` | Override the Bazarr DB path |
+
+> `OLLAMA_BASE_URL` must be set — `translate` exits with an error if it isn't, since the local LLM is the only provider.
+
+### 📊 `status` — Recent activity
 
 ```bash
 python3 -m translation.translator status
 # Output:
-#   Monthly usage: 42,318 / 500,000 chars (8.5%)
+#   Monthly usage: 128,540 chars
+#     embedded-extract: 41,902 chars
+#     ollama: 86,638 chars
 #
 #   Recent translations (10):
-#     2026-03-01 14:22:05 | success         | en->fr | 3,241 chars | Show.S02E05.mkv
-#     2026-03-01 14:20:11 | no_source       | ?->es  |         0 chars | Movie.mkv
+#     2026-05-30 14:22:05 | success         | en->es | 3,241 chars | ollama  | Show.S02E05.mkv
+#     2026-05-30 14:20:11 | success         | spa-embedded->es |  5,108 chars | embedded-extract | Movie.mkv
+#     2026-05-30 14:18:44 | no_source       | ?->es  |      0 chars | ollama  | Other.mkv
 ```
 
-### 📈 `usage` — Live quota check from DeepL API
-
-```bash
-python3 -m translation.translator usage
-# DeepL API usage: 42,318 / 500,000 chars (8.5%)
-```
+`status` reports total monthly characters with a **per-provider breakdown** (`ollama`, `embedded-extract`) and the 10 most recent rows. There is **no quota denominator or percentage** — translation is local and uncapped.
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-Import event (Sonarr/Radarr)
-       │
-       ▼
-arr_profile_extract_on_import.sh
-       │  (background, </dev/null &, disown)
-       ▼
-translator.py --file /path/to/file.mkv
-       │
-       ├──► subtitle_scanner.find_best_source_srt()   ← picks en.srt / largest
-       ├──► subtitle_scanner.find_missing_langs_on_disk()  ← what's absent
-       ├──► db.is_on_cooldown()                        ← 24h skip guard
-       ├──► gemini/deepl/google translate_srt_cues()    ← batched API calls
-       ├──► srt_parser.write_srt()                     ← output fr.srt
-       ├──► touch fr.srt.{gemini,deepl}                ← defer auto-maintain mux
-       ├──► db.record_translation()                    ← state + cooldown
-       └──► bazarr scan-disk                           ← Bazarr picks up new SRT
-
-Cron mode (every 30 min):
-  translator.py --since 60
-       │
-       └──► subtitle_scanner.scan_recent_missing()     ← Bazarr DB query
-            └── same pipeline above, for each file
+Import event (Sonarr/Radarr) ─── or ─── Cron (media_pipeline.sh slow lane)
+       │                                        │
+       ▼                                        ▼
+translator.py --file /path/file.mkv     translator.py --since 10 --max-files 3
+       │                                        │
+       │                          scan_recent_missing()  ← Bazarr DB query
+       │                                        │  (fan out across 8 workers)
+       └────────────────┬───────────────────────┘
+                        ▼
+        _resolve_profile_for_path()           ← Bazarr profileId for the file
+        get_profile_langs()                   ← languages required by the profile
+        find_missing_langs_on_disk()          ← which profile langs are absent
+                        │
+                        ▼  (for each missing target; non-'es' targets skipped)
+        is_permanently_failed() / is_on_cooldown()   ← retry guards
+                        │
+            ┌───────────┴────────────────────────────────┐
+            ▼                                             ▼
+  Embedded-Spanish fast-path                    LLM translation path
+  (es target, source is media file,             (no usable embedded Spanish)
+   --no-embedded-fallback NOT set)                        │
+            │                              find_best_source_srt()  ← English source SRT
+  probe streams (mkvmerge -J /ffprobe)                    │
+  extract (mkvextract / ffmpeg copy)         parse_srt(source)
+  language-fingerprint (langdetect /                      │
+    ES/EN marker ratio)                      _translate_cues_with_ollama()  ← EN→ES
+            │                                              │
+  write {stem}.es.srt                          write {stem}.es.srt
+  touch {stem}.es.srt.embedded                 touch {stem}.es.srt.ollama
+  record_translation(provider=                 record_translation(provider=
+    'embedded-extract')                          'ollama')
+            └───────────────────┬─────────────────────────┘
+                                ▼
+                  _trigger_bazarr_rescan()   ← Bazarr scan-disk picks up the new SRT
+                                ▼
+                  notify_translations()      ← Discord summary
 ```
 
 ### 🗄️ State Database
 
-SQLite at `/APPBOX_DATA/storage/.translation-state/translation_state.db`
+SQLite, resolved as:
 
-- Tracks every translation attempt: file path, source lang, target lang, chars used, status, timestamp
-- Cooldown enforced per `(media_path, target_lang)` — prevents hammering on problem files
-- Monthly character usage aggregated for quota warnings
+- `${PIPELINE_DB}` when the `PIPELINE_DB` env var is set (centralized pipeline DB — Phase 6), **or**
+- `{state_dir}/translation_state.db` otherwise.
+
+It tracks every translation attempt — media path, source lang, target lang, chars used, status, provider, timestamp — and backs the retry guards:
+
+- **Cooldown** (`is_on_cooldown`) — per `(media_path, target_lang)`, prevents re-hammering problem files.
+- **Permanent-fail** (`is_permanently_failed`) — skips files with a prior unrecoverable parse failure, scoped to `provider='ollama'` (legacy DeepL-era failures no longer block Ollama retries).
+
+Monthly character totals are aggregated **per provider** for the `status` view and the Discord summary — purely informational, not a budget.
 
 ### 🗺️ Language Mapping
 
-Config maps ISO 639-1/2 codes to DeepL API identifiers:
+`config.py` exposes `OLLAMA_LANG_MAP`, which maps the ISO language codes used on disk to the language names the Ollama prompt expects. In practice only the EN→ES pair is exercised:
 
 ```
-en → EN-US      fr → FR      es → ES
-de → DE         ja → JA      zh → ZH
-pt → PT-PT      it → IT      ...
+en → English
+es → Spanish
 ```
+
+A target is translated only if its base language is `es`; the source side accepts the supported source languages, but the live path is `en → es`.
 
 ---
 
@@ -130,43 +169,51 @@ pt → PT-PT      it → IT      ...
 ```bash
 cd /config/berenstuff/automation/scripts
 python3 -m pytest translation/tests/ -v
-# 151 tests covering all modules
 ```
 
 ---
 
 ## ⚙️ Configuration
 
-All secrets in `/config/berenstuff/.env`:
+Config is loaded from the environment / `/config/berenstuff/.env`. The translator is **local-only** — there are no API keys, no per-key budgets, and no quota tracking.
 
 ```bash
-DEEPL_API_KEY=....:fx          # Free tier key (ends with :fx)
-GEMINI_API_KEYS=AIza...,AIza...  # Comma-separated keys for rotation
+# ── Ollama (translation provider) ─────────────────────────────────
+OLLAMA_BASE_URL=http://127.0.0.1:11434   # REQUIRED — translate exits if unset
+OLLAMA_MODEL=...                         # model used for EN→ES translation
+
+# ── Bazarr (profile lookup + post-translation rescan) ─────────────
 BAZARR_URL=http://127.0.0.1:6767/bazarr
 BAZARR_API_KEY=...
+# Bazarr DB path (also overridable per-run with --bazarr-db)
+
+# ── Notifications ─────────────────────────────────────────────────
 DISCORD_WEBHOOK_URL=...
-# State dir defaults to /APPBOX_DATA/storage/.translation-state/
 
-# Per-key budgets (default values = DeepL/Gemini free tier limits)
-DEEPL_MONTHLY_BUDGET_PER_KEY=500000      # chars/mo per DeepL key
-GEMINI_MONTHLY_BUDGET_PER_KEY=500000     # chars/mo per Gemini key
-GEMINI_DAILY_REQUESTS_BUDGET_PER_KEY=9   # requests/day per Gemini key (~50 RPD free tier ÷ ~5 batches/file, −10% safety)
-GOOGLE_MONTHLY_BUDGET=500000             # aggregate Google chars/mo (no per-key; unauthenticated)
+# ── State / parallelism ───────────────────────────────────────────
+PIPELINE_DB=...            # optional — use the centralized pipeline DB instead of state_dir
+TRANSLATOR_WORKERS=8       # parallel workers for --since/--all (default 8)
 ```
 
-Budget is tracked per API key via the `key_index` column in `translation_log`. A provider only falls through to the next when **all** its keys are budget-exhausted. Per-key budget exhaustion drops that key from the available list; it does **not** trip the session quota flag (`_deepl_quota_exceeded` / `_gemini_quota_exceeded`) — those flags flip only on genuine API quota errors.
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `OLLAMA_BASE_URL` | Base URL of the local Ollama server (the sole translation provider) | **Yes** — `translate` exits if unset |
+| `OLLAMA_MODEL` | Ollama model used for EN→ES translation | No (uses the client default) |
+| `BAZARR_URL` | Bazarr base URL for triggering post-translation `scan-disk` | No (rescan skipped if unset) |
+| `BAZARR_API_KEY` | Bazarr API key for the rescan call | No (rescan skipped if unset) |
+| `DISCORD_WEBHOOK_URL` | Discord webhook for run summaries | No |
+| `PIPELINE_DB` | Path to the centralized pipeline DB; overrides the default `{state_dir}/translation_state.db` | No |
+| `TRANSLATOR_WORKERS` | Worker count for parallel `--since` / `--all` batches (default `8`) | No |
 
-Per-key budget checks use 2 grouped SQL queries per provider (`get_monthly_chars_by_key`, `get_daily_requests_by_key`) rather than per-key lookups. The index `idx_per_key_budget (provider, key_index, created_at)` covers these hot-path queries.
+### ⏰ Scheduling
 
-Only `GEMINI_DAILY_REQUESTS_BUDGET` (without `_PER_KEY`) is legacy-honored and emits a deprecation warning in the log. `DEEPL_MONTHLY_BUDGET` and `GEMINI_MONTHLY_BUDGET` are not legacy names — use the `_PER_KEY` variants.
+The translator is **not** run from its own cron. It is invoked by **`media_pipeline.sh`'s slow lane** (cron every 30 min, guarded by `flock /tmp/media_pipeline_slow.lock`) as the final step, roughly:
 
-### 📅 Cron Schedule
-
-```cron
-# Every 30 minutes, with flock to prevent overlap
-*/30 * * * * flock -n /tmp/deepl_translate.lock \
-  python3 -m translation.translator translate --since 60 \
-  >> /config/berenstuff/automation/logs/deepl_translate.log 2>&1
+```bash
+python3 translation/translator.py translate \
+  --since ${TRANSLATOR_SINCE_MINUTES:-10} \
+  --max-files ${TRANSLATOR_MAX_FILES_PER_RUN:-3} \
+  --bazarr-db <bazarr.db>
 ```
 
-> **Budgets:** DeepL Pro 400K chars/month budget cap, Gemini 2.5 Pro 25 RPM / Flash 30 RPM (free tier, 1500 req/day per key × 13 keys). Google Translate is free (unofficial API, no guaranteed SLA). The `status` command shows current consumption.
+So the real cadence into the translator is a **10-minute window capped at 3 files per run** (`--since 10 --max-files 3`). The old standalone `/tmp/deepl_translate.lock` `--since 60` cron is obsolete.

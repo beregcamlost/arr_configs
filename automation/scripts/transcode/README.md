@@ -2,6 +2,16 @@
 
 > SQLite-backed audit → plan → convert pipeline that normalizes your entire media library to H.264 + AAC. Priority queue, UHD/4K skip, streaming-candidate awareness, and full Discord telemetry.
 
+> ⚠️ **Standard (2026-05-30):**
+> - **8-bit only** — a video stream is "compliant" only when `codec=h264` **and** `pix_fmt=yuv420p`.
+>   10-bit h264 is re-encoded to 8-bit yuv420p, so no 10-bit stays in the library.
+> - **AC3 ok** — AC3 stereo/mono @48k counts as compliant alongside AAC; AC3 5.1+ is downmixed to AAC stereo.
+> - **Sidecar subtitles** — transcode extracts embedded **text** subs (Bazarr-profile langs) to external
+>   `.<lang>[.forced|.sdh].srt` sidecars and drops them from the container; only **image** subs (PGS/VOBSUB)
+>   stay embedded. Verification fails only on image-sub loss.
+> - **Audio keep-set** = Bazarr profile langs ∪ original language; the original-language track is set as default.
+> - The one-time library **de-embed migration** is `batch_extract_embedded.sh` (dry-run by default; `--execute` to act).
+
 ---
 
 ## 🗂️ Files
@@ -9,6 +19,7 @@
 | File | Role |
 |------|------|
 | `library_codec_manager.sh` | 🚀 Single-file manager — all subcommands, state management, conversion logic |
+| `batch_extract_embedded.sh` | 🧹 One-time library de-embed migration — extract embedded text subs to sidecars + strip from container (DRY-RUN by default) |
 
 ### State (external)
 
@@ -28,7 +39,7 @@
 - **🛡️ UHD/4K/HDR skip** — never touches 4K or HDR content
 - **🌊 Streaming candidate skip** — files flagged by the streaming checker are excluded from conversion
 - **🔄 Profile-aware audio selection** — resolves Bazarr profile + original language from metadata; keeps only profile + orig audio streams
-- **✅ Triple verification** — codec check + duration check + subtitle count check before swapping original
+- **✅ Triple verification** — codec check + duration check + image-subtitle preservation check (text subs are expected to drop → sidecars) before swapping original
 - **🔒 Safe swap workflow** — temp output → verify → backup original → atomic rename
 - **📡 Post-swap rescan** — triggers Sonarr/Radarr rescan + Bazarr scan-disk + direct Bazarr DB `audio_language` update after every swap
 - **📊 Rich Discord audit notification** — progress bar, conversion rate, ETA, per-category counts
