@@ -1010,6 +1010,21 @@ SQL
     db "ALTER TABLE conversion_plan ADD COLUMN claimed_by TEXT;" || true
     log "info" "Migrated conversion_plan: added claimed_by column"
   fi
+
+  # Migration: add Emby watch-stats columns used to order the convert queue
+  # NEWEST-first then MOST-WATCHED (populated by sync_emby_stats).
+  local has_play_count
+  has_play_count="$(db "SELECT COUNT(*) FROM pragma_table_info('media_files') WHERE name='play_count';")"
+  if [[ "$has_play_count" -eq 0 ]]; then
+    db "ALTER TABLE media_files ADD COLUMN play_count INTEGER DEFAULT 0;" || true
+    log "info" "Migrated media_files: added play_count column"
+  fi
+  local has_added_ts
+  has_added_ts="$(db "SELECT COUNT(*) FROM pragma_table_info('media_files') WHERE name='added_ts';")"
+  if [[ "$has_added_ts" -eq 0 ]]; then
+    db "ALTER TABLE media_files ADD COLUMN added_ts INTEGER DEFAULT 0;" || true
+    log "info" "Migrated media_files: added added_ts column"
+  fi
 }
 
 insert_event() {
@@ -1278,6 +1293,9 @@ plan_cmd() {
     waited=$((waited + 30))
   done
   log "info" "Plan acquired convert lock"
+
+  # Refresh Emby watch-stats so the queue orders NEWEST-first then MOST-WATCHED.
+  sync_emby_stats
 
   load_streaming_candidates
   load_stale_candidates
@@ -1909,6 +1927,79 @@ notify_emby_refresh() {
   return 0
 }
 
+# Pull per-item watch stats from Emby and store them on media_files so the convert
+# queue can be ordered NEWEST-first then MOST-WATCHED (Beren's priority, 2026-06-01).
+#   play_count = number of Emby users who have PLAYED the item (watch popularity;
+#                this server reports UserData.PlayCount=0, so we count Played=true users)
+#   added_ts   = Emby DateCreated as unix epoch (when the item entered the library)
+# Non-fatal: Emby down / creds missing -> leaves existing values; ordering falls back to mtime.
+sync_emby_stats() {
+  local emby_key="${EMBY_API_KEY:-}" emby_url="${EMBY_URL:-}"
+  local env_file="/config/berenstuff/.env"
+  if [ -z "$emby_key" ] || [ -z "$emby_url" ]; then
+    [ -f "$env_file" ] && source "$env_file" 2>/dev/null || true
+    emby_key="${EMBY_API_KEY:-}"; emby_url="${EMBY_URL:-}"
+  fi
+  if [ -z "$emby_key" ] || [ -z "$emby_url" ]; then
+    log "warn" "Emby creds missing — skipping watch-stats sync (queue falls back to mtime order)"
+    return 0
+  fi
+
+  local users admin
+  users="$(curl -fsS --max-time 20 "${emby_url}/Users?api_key=${emby_key}" 2>/dev/null | jq -r '.[].Id' 2>/dev/null)"
+  if [ -z "$users" ]; then
+    log "warn" "Emby /Users query failed — skipping watch-stats sync"
+    return 0
+  fi
+  admin="$(printf '%s\n' "$users" | head -1)"
+
+  local dates watch wcounts agg uid nusers
+  dates="$(mktemp)"; watch="$(mktemp)"; wcounts="$(mktemp)"; agg="$(mktemp)"
+
+  # added_ts: DateCreated is server-global, so one call (any user) covers every item.
+  curl -fsS --max-time 120 \
+    "${emby_url}/Users/${admin}/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path,DateCreated&api_key=${emby_key}" 2>/dev/null \
+    | jq -r '.Items[]? | select(.Path != null) |
+        [ .Path,
+          ((.DateCreated // "") | if . == "" then 0
+            else ((sub("\\.[0-9]+";"")) | (sub("Z$";"")) + "Z" | fromdateiso8601? // 0) end)
+        ] | @tsv' 2>/dev/null > "$dates"
+
+  if [ ! -s "$dates" ]; then
+    log "warn" "Emby returned no items — skipping watch-stats update"
+    rm -f "$dates" "$watch" "$wcounts" "$agg"; return 0
+  fi
+
+  # watch popularity = how many users have PLAYED each item. This server reports
+  # UserData.PlayCount=0 even for played items, so we count distinct users with
+  # UserData.Played=true (IsPlayed=true filter — also keeps the payloads small).
+  nusers=0
+  for uid in $users; do
+    nusers=$((nusers + 1))
+    curl -fsS --max-time 90 \
+      "${emby_url}/Users/${uid}/Items?Recursive=true&IncludeItemTypes=Movie,Episode&IsPlayed=true&Fields=Path&api_key=${emby_key}" 2>/dev/null \
+      | jq -r '.Items[]? | select(.Path != null) | .Path' 2>/dev/null
+  done >> "$watch"
+
+  # watchers per path (whole line is the path -> space-safe), then merge with dates.
+  awk '{ c[$0]++ } END { for (p in c) printf "%s\t%d\n", p, c[p] }' "$watch" > "$wcounts"
+  awk -F'\t' 'FNR==NR { w[$1]=$2; next }
+              { printf "%s\t%d\t%d\n", $1, ($1 in w ? w[$1] : 0), $2 }' "$wcounts" "$dates" > "$agg"
+
+  local n; n="$(wc -l < "$agg" | tr -d ' ')"
+  # One sqlite session: temp table + import + UPDATE by path (dot-commands must be unindented).
+  sqlite3 -cmd ".timeout 30000" "$DB_PATH" <<SQL 2>/dev/null
+CREATE TEMP TABLE _emby_stats(path TEXT PRIMARY KEY, pc INTEGER, ts INTEGER);
+.mode tabs
+.import $agg _emby_stats
+UPDATE media_files
+   SET play_count = COALESCE((SELECT e.pc FROM _emby_stats e WHERE e.path = media_files.path), play_count),
+       added_ts   = COALESCE((SELECT e.ts FROM _emby_stats e WHERE e.path = media_files.path), added_ts);
+SQL
+  log "info" "Emby watch-stats synced: ${n} items; watch popularity from ${nusers} user(s)"
+  rm -f "$dates" "$watch" "$wcounts" "$agg"
+}
+
 # Sidecar subtitle standard (decision 4): extract embedded TEXT subtitles to external
 # .<lang>[.forced|.sdh].srt sidecars for each Bazarr-profile language, so they no longer
 # need to live inside the container. Image-based subs (PGS/VOBSUB) cannot be SRT and are
@@ -2260,7 +2351,12 @@ WHERE cp.eligible=1
   AND mf.deleted_at IS NULL
   AND COALESCE(cr.status,'') NOT IN ('swapped','running','attempt_limit_reached')
   AND (cp.claimed_by IS NULL OR cp.claimed_by = 'mubuntu')
-ORDER BY cp.priority, cp.media_id${limit_clause};
+ORDER BY
+  CASE WHEN cp.priority = 0 THEN 0 ELSE 1 END,            -- import-hook (brand-new) absolute top
+  COALESCE(NULLIF(mf.added_ts,0), mf.mtime) DESC,          -- NEWEST first (Emby added date, else file mtime)
+  COALESCE(mf.play_count,0) DESC,                          -- then MOST-WATCHED (household play count)
+  cp.priority,                                             -- then cheaper op (audio remux=1 before video=10)
+  cp.media_id${limit_clause};
 ")
 
   log "info" "Convert run complete run_id=$run_id processed=$processed"
@@ -2576,6 +2672,9 @@ main() {
       ;;
     enqueue-import)
       enqueue_import_cmd
+      ;;
+    sync-stats)
+      sync_emby_stats
       ;;
     *)
       usage
