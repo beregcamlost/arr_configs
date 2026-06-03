@@ -980,10 +980,8 @@ CREATE TABLE IF NOT EXISTS events (
   message TEXT,
   context_json TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_conversion_plan_eligible_priority ON conversion_plan(eligible, priority);
 CREATE INDEX IF NOT EXISTS idx_conversion_runs_status ON conversion_runs(status);
 CREATE INDEX IF NOT EXISTS idx_conversion_runs_media_status ON conversion_runs(media_id, status);
-CREATE INDEX IF NOT EXISTS idx_media_files_deleted_at ON media_files(deleted_at);
 SQL
 
   # Migration: add priority column if missing (existing DBs)
@@ -1010,6 +1008,12 @@ SQL
     db "ALTER TABLE conversion_plan ADD COLUMN claimed_by TEXT;" || true
     log "info" "Migrated conversion_plan: added claimed_by column"
   fi
+
+  # Indexes that depend on migrated columns — created AFTER the ALTERs above so pre-existing
+  # DBs (whose tables were made before these columns existed) self-heal instead of aborting
+  # init_db with "no such column: priority/deleted_at" (fix 2026-06-02).
+  db "CREATE INDEX IF NOT EXISTS idx_conversion_plan_eligible_priority ON conversion_plan(eligible, priority);" || true
+  db "CREATE INDEX IF NOT EXISTS idx_media_files_deleted_at ON media_files(deleted_at);" || true
 
   # Migration: add Emby watch-stats columns used to order the convert queue
   # NEWEST-first then MOST-WATCHED (populated by sync_emby_stats).
