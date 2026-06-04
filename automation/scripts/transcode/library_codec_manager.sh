@@ -2276,11 +2276,19 @@ SQL
 convert_cmd() {
   acquire_convert_lock || return 0
 
-  # Load guard: skip transcode when system is overloaded
+  # Load guard: skip transcode when OUR cgroup is CPU-pressured.
+  # /proc/loadavg shows the 128-core HOST load (~80 is normal there) — it kept this
+  # guard permanently tripped since May (cron-resume dead, queue never drained).
+  # cgroup v2 PSI (cpu.pressure "some avg10" = % of time our tasks stall) measures
+  # THIS container's real contention, which is what matters on a shared appbox.
   local _lg_load _lg_int _lg_thresh
-  _lg_load="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
-  _lg_int="${_lg_load%%.*}"
-  _lg_thresh="${CODEC_LOAD_GUARD_THRESHOLD:-${LOAD_GUARD_THRESHOLD:-75}}"
+  if [[ -r /sys/fs/cgroup/cpu.pressure ]]; then
+    _lg_load="$(awk -F'avg10=' 'NR==1{split($2,a," "); print a[1]}' /sys/fs/cgroup/cpu.pressure 2>/dev/null || echo 0)"
+    _lg_thresh="${CODEC_LOAD_GUARD_THRESHOLD:-${LOAD_GUARD_THRESHOLD:-60}}"
+  else
+    _lg_load="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+    _lg_thresh="${CODEC_LOAD_GUARD_THRESHOLD:-${LOAD_GUARD_THRESHOLD:-75}}"
+  fi
   if [[ "$_lg_int" -ge "$_lg_thresh" ]]; then
     log "warn" "convert_cmd: load=${_lg_load} >= codec_threshold=${_lg_thresh} — skipping resume run"
     return 0
