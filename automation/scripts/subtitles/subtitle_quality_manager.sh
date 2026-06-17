@@ -258,9 +258,9 @@ drain_pending() {
 find_media_files() {
   local dir="$1"
   if [[ "$RECURSIVE" -eq 1 ]]; then
-    find "$dir" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" | sort
+    find "$dir" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" ! -name "*.bak.mkv" ! -name "*.bak" | sort
   else
-    find "$dir" -maxdepth 1 -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" | sort
+    find "$dir" -maxdepth 1 -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" ! -name "*.bak.mkv" ! -name "*.bak" | sort
   fi
 }
 
@@ -1580,7 +1580,7 @@ cmd_auto_maintain() {
     fi
 
     mkv_files+=("$mkv_file")
-  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" 2>/dev/null | sort)
+  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" ! -name "*.bak.mkv" ! -name "*.bak" 2>/dev/null | sort)
 
   # Add pending files that are outside PATH_PREFIX_ROOT (edge case) or weren't found by the scan
   local -A mkv_seen=()
@@ -2587,7 +2587,7 @@ cmd_compliance() {
       UPGRADE) needs_upg=$((needs_upg + 1)); results+=("[UPGRADE:$file_upgrade] $basename") ;;
     esac
 
-  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" 2>/dev/null | sort)
+  done < <(find "$PATH_PREFIX_ROOT" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.m4v" \) ! -name "*tmp.*" ! -name "*.bak.mkv" ! -name "*.bak" 2>/dev/null | sort)
 
   # Output
   local rate=0

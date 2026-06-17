@@ -109,6 +109,11 @@ translate_file() {
     return 1
   fi
 
+  # 2026-06-17: never translate codec/mux backups (*.pre-mux.bak.mkv, *pre-rebuild*.bak.mkv)
+  case "$mkv_file" in
+    *.bak.mkv) log "SKIP: backup file, not a library item: $(basename "$mkv_file")"; return 1 ;;
+  esac
+
   # Check we have a source to translate from: .en.srt sidecar OR English audio_language
   local dir stem
   dir="$(dirname "$mkv_file")"

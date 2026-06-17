@@ -91,31 +91,22 @@ record() {
 # Check 1: Orchestrator freshness
 # ---------------------------------------------------------------------------
 check_orchestrator_freshness() {
-    local db="${PIPELINE_DB:-/APPBOX_DATA/storage/pipeline.db}"
-    if [[ ! -f "$db" ]]; then
-        record "ALARM" "Orchestrator DB missing: $db"
+    # 2026-06-17: pipeline_state went vestigial after the flock-lane refactor
+    # (last write 2026-05-01). Freshness is now derived from media_pipeline.log,
+    # which the fast lane appends to every 5 min.
+    local logf="${LOG_DIR}/media_pipeline.log"
+    if [[ ! -f "$logf" ]]; then
+        record "WARN" "media_pipeline.log missing: $logf"
         return
     fi
-
-    local last_run
-    last_run="$(sqlite3 "$db" \
-        "SELECT MAX(last_run_ts) FROM pipeline_state WHERE last_run_ts IS NOT NULL;" 2>/dev/null || true)"
-
-    if [[ -z "$last_run" ]]; then
-        record "WARN" "pipeline_state: no last_run_ts found in DB"
-        return
-    fi
-
-    local last_epoch
-    last_epoch="$(date -d "$last_run" +%s 2>/dev/null || echo 0)"
-    local now_epoch
+    local last_epoch now_epoch age_min
+    last_epoch="$(stat -c %Y "$logf" 2>/dev/null || echo 0)"
     now_epoch="$(date +%s)"
-    local age_min=$(( (now_epoch - last_epoch) / 60 ))
-
+    age_min=$(( (now_epoch - last_epoch) / 60 ))
     if (( age_min > PIPELINE_FRESHNESS_MIN )); then
-        record "WARN" "Orchestrator stale: last run was ${age_min}m ago (threshold ${PIPELINE_FRESHNESS_MIN}m)"
+        record "WARN" "Pipeline stale: media_pipeline.log idle ${age_min}m (threshold ${PIPELINE_FRESHNESS_MIN}m)"
     else
-        record "OK" "Orchestrator fresh: last run ${age_min}m ago"
+        record "OK" "Pipeline fresh: media_pipeline.log written ${age_min}m ago"
     fi
 }
 
