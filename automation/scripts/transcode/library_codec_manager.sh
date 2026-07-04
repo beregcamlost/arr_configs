@@ -2289,6 +2289,8 @@ convert_cmd() {
     _lg_load="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
     _lg_thresh="${CODEC_LOAD_GUARD_THRESHOLD:-${LOAD_GUARD_THRESHOLD:-75}}"
   fi
+  _lg_int="${_lg_load%%.*}"
+  _lg_int="${_lg_int:-0}"
   if [[ "$_lg_int" -ge "$_lg_thresh" ]]; then
     log "warn" "convert_cmd: load=${_lg_load} >= codec_threshold=${_lg_thresh} — skipping resume run"
     return 0
