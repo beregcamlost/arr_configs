@@ -512,3 +512,28 @@ jobs:
     depends_on: .env, DISCORD_WEBHOOK_URL, daily_aggregates populated
     safe_to_disable: yes
     enabled: false  # staged only — enable after Phase 6 L review
+
+  # ── Capa 0 de intake de subtitulos (2026-07-04) ──────────────────────────
+
+  - id: subtitle_intake_gate
+    schedule: "*/30 * * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/subtitle_intake_gate.lock
+      /usr/bin/python3 /config/berenstuff/automation/scripts/subtitles/subtitle_intake_gate.py
+    log: /config/berenstuff/automation/logs/subtitle_intake_gate.log
+    purpose: >-
+      Capa 0 de intake: puntua cada .es.srt modificado en las ultimas 26 h con
+      los detectores estructurales de scan2 (scan2_lib.py, copia sincronizada
+      del canonico en berentendo). RED/SEVERE con fuente EN al lado se renombra
+      a .es.srt.intake-rejected-<stamp> y translator.py lo rehace desde el EN
+      en el siguiente lane. Exime keep-local (manifiesto en el state-dir) y
+      archivos elegidos por QE capa 2 (marcador .qe-rejected-* al lado; QE
+      manda sobre capa 0). Maximo 1 rechazo automatico por archivo; si la
+      reposicion tambien sale mal, ESCALATE en el log para revision manual.
+    runtime_typical: 30-60s
+    timeout_hard: none (flock previene solape)
+    state_db: /APPBOX_DATA/storage/.subtitle-intake-state/intake_gate_state.json
+    lock: /tmp/subtitle_intake_gate.lock
+    on_failure: solo log; el siguiente run reintenta (firma mtime:size por archivo)
+    depends_on: scan2_lib.py, keep_local.json (build_keep_local.py en berentendo lo empuja)
+    safe_to_disable: yes (solo se pierde el rechazo automatico de subs malos nuevos)
