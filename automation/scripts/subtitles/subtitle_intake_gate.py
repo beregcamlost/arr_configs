@@ -93,6 +93,9 @@ def main():
             st = os.stat(path)
         except FileNotFoundError:
             continue
+        if time.time() - st.st_mtime < 600:
+            continue  # ventana de asentamiento: puede ser un batch en curso
+                      # (subredo/translator escribiendo); el proximo run lo ve
         sig = "%d:%d" % (int(st.st_mtime), st.st_size)
         rec = state.get(path, {})
         if rec.get("sig") == sig:
