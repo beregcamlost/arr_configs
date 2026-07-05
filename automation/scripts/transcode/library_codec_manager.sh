@@ -1287,8 +1287,8 @@ plan_cmd() {
   exec 8>"$lock_file"
   local waited=0
   while ! flock -n 8; do
-    if (( waited >= 1800 )); then
-      log "error" "Plan aborted: convert lock held for >30min"
+    if (( waited >= 14400 )); then
+      log "error" "Plan aborted: convert lock held for >4h"
       exec 8>&-
       return 1
     fi

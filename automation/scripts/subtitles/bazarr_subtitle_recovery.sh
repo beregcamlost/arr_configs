@@ -290,6 +290,22 @@ for line in open(sys.argv[1], 'r'):
 " "$input_file" > "$output_file"
 }
 
+# ---------------------------------------------------------------------------
+# Bazarr >= 1.6.0 moved per-language subtitle rows out of the
+# table_episodes.subtitles / table_movies.subtitles columns into the new
+# table_episodes_subtitles / table_movies_subtitles tables (one row per sub).
+# These helpers emit the legacy shape [[lang[:hi|:forced], path, size], ...]
+# so pick_best_source_sub_for_target and the jsonish parsers keep working.
+# Embedded tracks (path NULL/empty) are excluded: stage 2 needs a file on disk.
+# ---------------------------------------------------------------------------
+episode_subtitles_legacy_json() {
+  bazarr_db "SELECT COALESCE((SELECT json_group_array(json_array(s.language || CASE WHEN s.hi=1 THEN ':hi' WHEN s.forced=1 THEN ':forced' ELSE '' END, s.path, COALESCE(s.size,0))) FROM table_episodes_subtitles s WHERE s.sonarrEpisodeId=$1 AND s.path IS NOT NULL AND s.path <> ''), '[]');"
+}
+
+movie_subtitles_legacy_json() {
+  bazarr_db "SELECT COALESCE((SELECT json_group_array(json_array(s.language || CASE WHEN s.hi=1 THEN ':hi' WHEN s.forced=1 THEN ':forced' ELSE '' END, s.path, COALESCE(s.size,0))) FROM table_movies_subtitles s WHERE s.radarrId=$1 AND s.path IS NOT NULL AND s.path <> ''), '[]');"
+}
+
 notify_discord() {
   local title="$1" body="$2"
   [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
@@ -773,10 +789,10 @@ process_item() {
     # Re-read from Bazarr DB to check if the download resolved the issue
     if [[ "$media_type" == "episode" ]]; then
       missing_after_raw="$(bazarr_db "SELECT missing_subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
-      subtitles_raw="$(bazarr_db "SELECT subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
+      subtitles_raw="$(episode_subtitles_legacy_json "$media_id")"
     else
       missing_after_raw="$(bazarr_db "SELECT missing_subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
-      subtitles_raw="$(bazarr_db "SELECT subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
+      subtitles_raw="$(movie_subtitles_legacy_json "$media_id")"
     fi
     # Convert refreshed data to JSON
     missing_after_json="$(printf '%s' "$missing_after_raw" | jsonish_to_json 2>/dev/null || echo '[]')"
@@ -810,15 +826,20 @@ process_item() {
         sleep 2  # Give Bazarr a moment to write the file
         # Re-read subtitles to get updated path
         if [[ "$media_type" == "episode" ]]; then
-          subtitles_raw="$(bazarr_db "SELECT subtitles FROM table_episodes WHERE sonarrEpisodeId=$media_id LIMIT 1;")"
+          subtitles_raw="$(episode_subtitles_legacy_json "$media_id")"
         else
-          subtitles_raw="$(bazarr_db "SELECT subtitles FROM table_movies WHERE radarrId=$media_id LIMIT 1;")"
+          subtitles_raw="$(movie_subtitles_legacy_json "$media_id")"
         fi
         subtitles_json="$(printf '%s' "$subtitles_raw" | jsonish_to_json 2>/dev/null || echo '[]')"
         IFS=$'\t' read -r src_lang src_path <<<"$(pick_best_source_sub_for_target "$subtitles_json" "$lang")"
       fi
 
-      if [[ -n "${src_path:-}" && -f "$src_path" ]]; then
+      # Stage 2 calls Bazarr's INTERNAL translator (google_translate) — violates the
+      # one-engine design (2026-05-31): champion NMT via translator.py fill-missing owns
+      # "have source, missing ES". Disabled by default; re-enable with RECOVERY_BAZARR_TRANSLATE=1.
+      if [[ "${RECOVERY_BAZARR_TRANSLATE:-0}" != "1" ]]; then
+        log "TRANSLATE_SKIP type=$media_type id=$media_id lang=$token reason=bazarr_google_translate_disabled"
+      elif [[ -n "${src_path:-}" && -f "$src_path" ]]; then
         tr_http="$(try_translate_to_lang "$media_type" "$media_id" "$src_path" "$lang")"
         translations=$((translations + 1))
         state_set "$media_type" "$media_id" "$lang" "$forced" "$hi" "$last_baz" "$now_ts" "$last_arr" "translate_http_$tr_http"
@@ -923,10 +944,13 @@ fi
 EPISODE_RAW="$TMPDIR_RECOVERY/episodes_raw.tsv"
 EPISODE_JSON="$TMPDIR_RECOVERY/episodes_json.tsv"
 bazarr_db -separator $'\t' "
-  SELECT sonarrEpisodeId || '|' || sonarrSeriesId, missing_subtitles, subtitles
-  FROM table_episodes
-  WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]'
-  ORDER BY sonarrEpisodeId;
+  SELECT e.sonarrEpisodeId || '|' || e.sonarrSeriesId, e.missing_subtitles,
+         COALESCE((SELECT json_group_array(json_array(s.language || CASE WHEN s.hi=1 THEN ':hi' WHEN s.forced=1 THEN ':forced' ELSE '' END, s.path, COALESCE(s.size,0)))
+                   FROM table_episodes_subtitles s
+                   WHERE s.sonarrEpisodeId = e.sonarrEpisodeId AND s.path IS NOT NULL AND s.path <> ''), '[]')
+  FROM table_episodes e
+  WHERE e.missing_subtitles IS NOT NULL AND e.missing_subtitles <> '[]'
+  ORDER BY e.sonarrEpisodeId;
 " > "$EPISODE_RAW"
 batch_jsonish_to_json "$EPISODE_RAW" "$EPISODE_JSON"
 
@@ -948,10 +972,13 @@ done < "$EPISODE_JSON"
 MOVIE_RAW="$TMPDIR_RECOVERY/movies_raw.tsv"
 MOVIE_JSON="$TMPDIR_RECOVERY/movies_json.tsv"
 bazarr_db -separator $'\t' "
-  SELECT radarrId, missing_subtitles, subtitles
-  FROM table_movies
-  WHERE missing_subtitles IS NOT NULL AND missing_subtitles <> '[]'
-  ORDER BY radarrId;
+  SELECT m.radarrId, m.missing_subtitles,
+         COALESCE((SELECT json_group_array(json_array(s.language || CASE WHEN s.hi=1 THEN ':hi' WHEN s.forced=1 THEN ':forced' ELSE '' END, s.path, COALESCE(s.size,0)))
+                   FROM table_movies_subtitles s
+                   WHERE s.radarrId = m.radarrId AND s.path IS NOT NULL AND s.path <> ''), '[]')
+  FROM table_movies m
+  WHERE m.missing_subtitles IS NOT NULL AND m.missing_subtitles <> '[]'
+  ORDER BY m.radarrId;
 " > "$MOVIE_RAW"
 batch_jsonish_to_json "$MOVIE_RAW" "$MOVIE_JSON"
 
