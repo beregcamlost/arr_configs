@@ -121,10 +121,27 @@ check_state_dbs() {
             any_failed=true
             continue
         fi
-        local result
-        result="$(sqlite3 "$db" "PRAGMA quick_check;" 2>&1 || true)"
+        local result=""
+        local attempt
+        # Retry with a busy-timeout so a transient writer lock (media_pipeline
+        # mid-write) does not trip a false ALARM. A lock is contention, not
+        # corruption -> WARN (Discord only fires on consecutive WARN).
+        for attempt in 1 2 3; do
+            result="$(sqlite3 -cmd ".timeout 8000" "$db" "PRAGMA quick_check;" 2>&1 || true)"
+            if [[ "$result" == "ok" ]]; then
+                break
+            fi
+            if [[ "$result" != *"is locked"* && "$result" != *"is busy"* ]]; then
+                break
+            fi
+            sleep 2
+        done
         if [[ "$result" != "ok" ]]; then
-            record "ALARM" "DB check failed ($db): $result"
+            if [[ "$result" == *"is locked"* || "$result" == *"is busy"* ]]; then
+                record "WARN" "DB busy (transient lock), quick_check skipped ($db): $result"
+            else
+                record "ALARM" "DB check failed ($db): $result"
+            fi
             any_failed=true
         fi
     done
