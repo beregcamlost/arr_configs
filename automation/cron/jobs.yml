@@ -43,7 +43,7 @@ jobs:
       /config/berenstuff/automation/scripts/transcode/library_codec_manager.sh
       resume --state-dir /APPBOX_DATA/storage/.transcode-state-media
       --batch-size 2 --log-level info
-    log: /APPBOX_DATA/storage/.transcode-state-media/cron-resume.log
+    log: /APPBOX_DATA/storage/.transcode-state-media/manager.log
     purpose: >-
       Picks up the next batch of 2 queued transcode jobs from the plan.
       Runs independently of media_pipeline.sh to avoid contention.
