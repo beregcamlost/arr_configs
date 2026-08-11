@@ -5,9 +5,6 @@
 # no quality loss. Designed to fix MKV-container stutter on Xiaomi 55" TVs.
 set -euo pipefail
 
-LOCK_FILE="/tmp/arr_remux_on_import.lock"
-exec 9>"$LOCK_FILE"
-flock -n 9 || exit 0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATTERNS_FILE="$SCRIPT_DIR/remux_patterns.txt"
@@ -20,6 +17,40 @@ log() { printf '%s %s\n' "$(ts)" "$*" >> "$LOG"; }
 # --- 1. Get file path from Sonarr/Radarr env vars ---
 FILE="${sonarr_episodefile_path:-${radarr_moviefile_path:-}}"
 [ -z "$FILE" ] && { log "EXIT: no file path env var set"; exit 0; }
+
+# --- 1b. Codec fast-path (2026-08-11): enqueue EVERY import into the codec queue at
+# priority=0, so a brand-new download is normalised within ~10 min (next convert cron)
+# instead of waiting for the 03:00 audit + 03:45 plan (up to ~24 h). Runs from an EXIT
+# trap so it fires on every early SKIP path too, and it is placed BEFORE the remux
+# flock so concurrent imports (season packs) are still enqueued when the lock is busy.
+CODEC_MGR="$SCRIPT_DIR/transcode/library_codec_manager.sh"
+CODEC_STATE_DIR="/APPBOX_DATA/storage/.transcode-state-media"
+FINAL_FILE="$FILE"
+enqueue_codec() {
+  local rc=0 mtype ref
+  if [ ! -f "$FINAL_FILE" ]; then log "ENQUEUE skip (file gone): $FINAL_FILE"; return 0; fi
+  if [ ! -x "$CODEC_MGR" ]; then log "ENQUEUE skip (codec manager not executable)"; return 0; fi
+  if [ -n "${sonarr_episodefile_path:-}" ]; then
+    mtype="series"; ref="${sonarr_series_id:-}"
+  else
+    mtype="movie"; ref="${radarr_movie_id:-}"
+  fi
+  local args=( enqueue-import --file "$FINAL_FILE" --media-type "$mtype" --state-dir "$CODEC_STATE_DIR" --log-level info )
+  if [ -n "$ref" ]; then args+=( --ref-id "$ref" ); fi
+  timeout 600 "$CODEC_MGR" "${args[@]}" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "ENQUEUE ok ($mtype ref=${ref:-none}): $FINAL_FILE"
+  else
+    log "WARN: enqueue-import failed rc=$rc (non-fatal): $FINAL_FILE"
+  fi
+  return 0
+}
+trap 'enqueue_codec' EXIT
+
+LOCK_FILE="/tmp/arr_remux_on_import.lock"
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
+
 [[ "$FILE" != *.mkv ]] && { log "SKIP(not-mkv): $FILE"; exit 0; }
 [ ! -f "$FILE" ] && { log "SKIP(missing): $FILE"; exit 0; }
 
@@ -113,6 +144,7 @@ if [ "$ABS_DIFF" -gt 10 ]; then
 fi
 
 RESTORE_BAK_ON_ERR=0
+FINAL_FILE="$MP4"   # remux done: the compliant path is now the .mp4
 log "OK: $MP4 size=$(numfmt --to=iec "$MP4_SZ" 2>/dev/null || echo $MP4_SZ)"
 
 # --- 6. Trigger Sonarr/Radarr rescan so they pick up the .mp4 ---

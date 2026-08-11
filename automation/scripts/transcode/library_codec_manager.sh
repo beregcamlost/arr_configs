@@ -1711,6 +1711,10 @@ select_audio_streams_for_conversion() {
   local orig_lang_override="${3:-}"   # 3-letter code from Bazarr metadata
   local rows="" orig_lang="und"
   local -A seen=()
+  # ANIME-JPN-GUARD (2026-07-28): in animated libraries the Japanese original
+  # audio must never be dropped and should be the default track.
+  local is_animated=0
+  case "$src" in */tvanimated/*|*/moviesanimated/*) is_animated=1 ;; esac
 
   rows="$(ffprobe -v error -show_entries stream=index,codec_type:stream_tags=language:stream_disposition=default -of json "$src" 2>/dev/null \
     | jq -r '
@@ -1748,6 +1752,12 @@ select_audio_streams_for_conversion() {
     fi
   fi
 
+  if [[ "$is_animated" -eq 1 ]]; then
+    while IFS=$'\t' read -r _idx _lang _def; do
+      if [[ "$_lang" == "jpn" || "$_lang" == "ja" ]]; then orig_lang="jpn"; break; fi
+    done <<<"$rows"
+  fi
+
   printf '__ORIG__\t%s\n' "$orig_lang"
 
   # Profile-aware selection: keep streams matching profile OR original language.
@@ -1766,6 +1776,8 @@ select_audio_streams_for_conversion() {
         keep=1
       elif [[ -n "$orig_expanded" ]] && lang_in_set_inline "$lang" "$orig_expanded"; then
         keep=1
+      elif [[ "$is_animated" -eq 1 && ( "$lang" == "jpn" || "$lang" == "ja" ) ]]; then
+        keep=1
       fi
       if [[ "$keep" -eq 1 && -z "${seen[$idx]:-}" ]]; then
         seen["$idx"]=1
@@ -1777,7 +1789,7 @@ select_audio_streams_for_conversion() {
     if [[ "$orig_lang" == "und" ]]; then
       while IFS=$'\t' read -r idx lang def; do
         [[ -z "$idx" ]] && continue
-        if [[ "$def" == "1" || "$lang" == "eng" || "$lang" == "spa" ]]; then
+        if [[ "$def" == "1" || "$lang" == "eng" || "$lang" == "spa" || ( "$is_animated" -eq 1 && ( "$lang" == "jpn" || "$lang" == "ja" ) ) ]]; then
           if [[ -z "${seen[$idx]:-}" ]]; then
             seen["$idx"]=1
             printf '%s\t%s\n' "$idx" "$lang"
@@ -1787,7 +1799,7 @@ select_audio_streams_for_conversion() {
     else
       while IFS=$'\t' read -r idx lang def; do
         [[ -z "$idx" ]] && continue
-        if [[ "$lang" == "$orig_lang" || "$lang" == "eng" || "$lang" == "spa" ]]; then
+        if [[ "$lang" == "$orig_lang" || "$lang" == "eng" || "$lang" == "spa" || ( "$is_animated" -eq 1 && ( "$lang" == "jpn" || "$lang" == "ja" ) ) ]]; then
           if [[ -z "${seen[$idx]:-}" ]]; then
             seen["$idx"]=1
             printf '%s\t%s\n' "$idx" "$lang"
@@ -2073,6 +2085,58 @@ extract_profile_subtitle_sidecars() {
   return 0
 }
 
+
+# Post-swap re-probe (2026-08-11 fix).
+# Before this, a swap left media_files.mtime/size and probe_streams describing the
+# PRE-conversion file. The incremental audit skips files whose stored mtime matches
+# disk, so those stale probes were never refreshed and the nightly plan kept marking
+# already-converted files as eligible (853 phantom rows accumulated since May).
+# Re-probing here keeps the DB honest and makes a bad conversion visible instead of
+# silently hidden behind status='swapped'.
+reprobe_after_swap() {
+  local media_id="$1" path="$2"
+  [[ -f "$path" ]] || { log "warn" "reprobe_after_swap: file missing: $path"; return 0; }
+
+  local sz mt cont
+  sz="$(stat -c '%s' "$path" 2>/dev/null || echo 0)"
+  mt="$(stat -c '%Y' "$path" 2>/dev/null || echo 0)"
+  cont="${path##*.}"
+  cont="$(printf '%s' "$cont" | tr '[:upper:]' '[:lower:]')"
+  db "UPDATE media_files SET size_bytes=$sz, mtime=$mt, container='$(sql_quote "$cont")', updated_at=CURRENT_TIMESTAMP WHERE id=$media_id;" || true
+
+  local tmp_json
+  tmp_json="$(mktemp)"
+  if ! ffprobe -v error -print_format json -show_streams -show_format "$path" >"$tmp_json" 2>/dev/null </dev/null; then
+    clear_probe_streams "$media_id"
+    log "warn" "reprobe_after_swap: ffprobe failed media_id=$media_id (probes cleared; audit will retry)"
+    rm -f "$tmp_json"
+    return 0
+  fi
+  clear_probe_streams "$media_id"
+  insert_probe_streams_from_json "$media_id" "$tmp_json"
+  upsert_audit_status "$media_id" 1 1 ""
+  rm -f "$tmp_json"
+
+  # Re-evaluate compliance from the FRESH probes (same rule as plan_cmd).
+  local h264_v total_v good_a total_a
+  IFS=$'\t' read -r h264_v total_v good_a total_a < <(
+    db -separator $'\t' "SELECT
+      COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' AND pix_fmt='yuv420p' THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='audio' AND codec IN ('aac','ac3') AND channels<=2 THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0)
+    FROM probe_streams WHERE media_id=$media_id;"
+  )
+  if [[ "${total_v:-0}" -gt 0 && "$h264_v" -eq "$total_v" && "${total_a:-0}" -gt 0 && "$good_a" -eq "$total_a" ]]; then
+    db "UPDATE conversion_plan SET eligible=0, priority=99, reason='', skip_reason='already_compliant', plan_ts=CURRENT_TIMESTAMP WHERE media_id=$media_id;" || true
+    log "info" "Post-swap re-probe OK (compliant) media_id=$media_id"
+  else
+    db "UPDATE conversion_plan SET eligible=1, plan_ts=CURRENT_TIMESTAMP WHERE media_id=$media_id;" || true
+    log "error" "Post-swap re-probe: output STILL non-compliant media_id=$media_id (v_ok=$h264_v/$total_v a_ok=$good_a/$total_a): $path"
+    insert_event "error" "convert" "$media_id" "post-swap output non-compliant" "{\"path\":\"$(sql_quote "$path")\",\"video_ok\":\"$h264_v/$total_v\",\"audio_ok\":\"$good_a/$total_a\"}"
+  fi
+}
+
 run_convert_for_media() {
   local run_id="$1" media_id="$2" attempt_no="$3"
   local src container media_type_val bazarr_ref_id_val
@@ -2235,6 +2299,7 @@ INSERT INTO artifacts(media_id,new_path,backup_path,verify_hash_old,verify_hash_
 VALUES($media_id,'$(sql_quote "$src")','$(sql_quote "$backup_path")','$(sql_quote "$old_hash")','$(sql_quote "$new_hash")',1,CURRENT_TIMESTAMP);
 SQL
       insert_event "info" "convert" "$media_id" "swap completed" "{\"src\":\"$(sql_quote "$src")\",\"backup\":\"$(sql_quote "$backup_path")\"}"
+      reprobe_after_swap "$media_id" "$src" || log "warn" "reprobe_after_swap failed for media_id=$media_id (non-fatal)"
       emby_refresh_item "$src" || log "warn" "Emby refresh failed for media_id=$media_id (non-fatal)"
       arr_rescan_for_media "$media_type_ref" "$bazarr_ref_id_ref" || log "warn" "Arr rescan failed for media_id=$media_id (non-fatal)"
       bazarr_rescan_for_media "$media_type_ref" "$bazarr_ref_id_ref" || log "warn" "Bazarr rescan failed for media_id=$media_id (non-fatal)"
