@@ -3,10 +3,10 @@
 # Red de seguridad para el worker del 3090 (tanda3090.py --auto): si berentendo se
 # apaga a mitad de una conversion, la fila queda con claimed_by='gpu3090@<epoch>' y
 # el cron de mubuntu la ignora para siempre (su query solo acepta NULL o 'mubuntu').
-# Aqui se liberan los claims de mas de 6 h para que mubuntu retome el trabajo.
+# Aqui se liberan los claims de mas de 2 h para que mubuntu retome el trabajo.
 set -euo pipefail
 DB="${CODEC_DB:-/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db}"
-MAX_AGE_SEC="${CLAIM_MAX_AGE_SEC:-21600}"
+MAX_AGE_SEC="${CLAIM_MAX_AGE_SEC:-7200}"
 [ -f "$DB" ] || exit 0
 n="$(sqlite3 -cmd '.timeout 20000' "$DB" "
 UPDATE conversion_plan SET claimed_by=NULL
