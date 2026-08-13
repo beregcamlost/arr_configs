@@ -1340,6 +1340,7 @@ LEFT JOIN (
   FROM probe_streams
   GROUP BY media_id
 ) ps_agg ON ps_agg.media_id=m.id
+WHERE m.deleted_at IS NULL
 ORDER BY m.path${where_limit};
 " | while IFS=$'\t' read -r media_id path container exists_flag probe_ok max_w max_h has_hdr compliant_v total_v good_a total_a; do
 
@@ -2171,6 +2172,11 @@ run_convert_for_media() {
   esac
 
   db "INSERT INTO conversion_runs(run_id,media_id,start_ts,status,attempt) VALUES('$(sql_quote "$run_id")',$media_id,CURRENT_TIMESTAMP,'running',${attempt_no:-1});"
+  # Claim la fila para mubuntu apenas arranca: el worker del 3090 solo toma filas con
+  # claimed_by IS NULL, asi que esto cierra la ventana en la que ambos agarran el mismo
+  # archivo (auto.log 2026-08-11 22:19 'el remoto cambio durante la conversion').
+  # El plan nocturno hace DELETE FROM conversion_plan, asi que el claim no se acumula.
+  db "UPDATE conversion_plan SET claimed_by='mubuntu' WHERE media_id=$media_id AND claimed_by IS NULL;"
 
   # Capture pre-conversion metadata for Discord notification and transcode CSV log
   local _tc_src_codec _tc_duration_sec _tc_size_before _tc_conv_start
@@ -2428,7 +2434,12 @@ LEFT JOIN (
 LEFT JOIN conversion_runs cr ON cr.id=rmax.max_id
 WHERE cp.eligible=1
   AND mf.deleted_at IS NULL
-  AND COALESCE(cr.status,'') NOT IN ('swapped','running','attempt_limit_reached')
+  AND COALESCE(cr.status,'') NOT IN ('running','attempt_limit_reached')
+  -- 'swapped' solo bloquea si el plan es ANTERIOR al swap. Si el plan se reconstruyo
+  -- DESPUES (probes frescos) y la fila sigue eligible, el archivo de verdad necesita
+  -- trabajo (ej: .avi que nunca se remuxeo). Antes quedaba invisible para siempre y el
+  -- worker devolvia processed=0 con 148 archivos pendientes. (2026-08-12)
+  AND NOT (COALESCE(cr.status,'')='swapped' AND COALESCE(cr.end_ts,'') >= cp.plan_ts)
   AND (cp.claimed_by IS NULL OR cp.claimed_by = 'mubuntu')
 ORDER BY
   CASE WHEN cp.priority = 0 THEN 0 ELSE 1 END,            -- import-hook (brand-new) absolute top
