@@ -40,6 +40,13 @@ enqueue_codec() {
   timeout 600 "$CODEC_MGR" "${args[@]}" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     log "ENQUEUE ok ($mtype ref=${ref:-none}): $FINAL_FILE"
+    # Identificacion de idioma: si la pista de audio entro sin etiquetar, se
+    # encola aqui para que el worker del 3090 la resuelva. Es idempotente
+    # (INSERT OR IGNORE) y no bloquea el import: si el 3090 esta apagado, espera.
+    local lang_sh="$(dirname "$CODEC_MGR")/lang_id.sh"
+    if [ -x "$lang_sh" ]; then
+      STATE_DIR="$CODEC_STATE_DIR" timeout 120 bash "$lang_sh" enqueue >/dev/null 2>&1 \n        && log "LANGID encolado" || log "WARN: langid enqueue fallo (no fatal)"
+    fi
   else
     log "WARN: enqueue-import failed rc=$rc (non-fatal): $FINAL_FILE"
   fi
