@@ -17,6 +17,12 @@
 #             inyecta la etiqueta en ese mismo paso (sin I/O extra).
 set -uo pipefail
 
+# .env trae EMBY_INTERNAL_BASE (y demas credenciales). Se carga aqui para que los
+# cron jobs, que no heredan nada, tengan lo mismo que una sesion interactiva.
+if [[ -r /config/berenstuff/.env ]]; then
+  set -a; . /config/berenstuff/.env; set +a
+fi
+
 STATE_DIR="${STATE_DIR:-/APPBOX_DATA/storage/.transcode-state-media}"
 DB="${CODEC_DB:-$STATE_DIR/library_codec_state.db}"
 SAMPLE_DIR="${LANGID_SAMPLE_DIR:-$STATE_DIR/langid-samples}"
@@ -121,6 +127,8 @@ cmd_apply() {
   local limit_sql=""
   [[ "$limit" -gt 0 ]] && limit_sql="LIMIT $limit"
   local applied=0 failed=0 skipped=0
+  local touched
+  touched="$(mktemp)"
 
   while IFS=$'\t' read -r media_id stream_index lang prob path container; do
     [[ -n "$media_id" ]] || continue
@@ -159,6 +167,7 @@ cmd_apply() {
         dbq "
 UPDATE audio_lang_detect SET status='applied', applied_at=CURRENT_TIMESTAMP WHERE media_id=$media_id AND stream_index=$stream_index;
 UPDATE probe_streams SET language='$lang' WHERE media_id=$media_id AND stream_index=$stream_index;"
+        printf '%s\n' "$path" >> "$touched"
         applied=$((applied + 1))
       else
         dbq "UPDATE audio_lang_detect SET status='failed', error='verify_mismatch_got_${now:-empty}' WHERE media_id=$media_id AND stream_index=$stream_index;"
@@ -175,8 +184,72 @@ WHERE d.status='detected' AND d.lang IS NOT NULL AND d.prob >= $MIN_PROB
   AND mf.deleted_at IS NULL
 ORDER BY d.media_id $limit_sql;")
 
+  # Sin este aviso el trabajo queda a medias: la etiqueta esta en el archivo pero el
+  # filtro de Emby sigue mostrando el valor viejo hasta el proximo escaneo completo.
+  emby_notify "$touched"
+  rm -f "$touched"
+
   log "info" "apply: aplicados=$applied fallidos=$failed diferidos=$skipped"
   echo "applied=$applied failed=$failed deferred=$skipped"
+}
+
+# Avisa a Emby de los archivos recien etiquetados.
+#
+# POR QUE HACE FALTA: Emby cachea el media info en su propia DB. Verificado el
+# 2026-08-13: tras escribir la etiqueta en el archivo, Emby seguia reportando
+# Language='und' hasta que se le pidio refresh; entonces paso a 'eng'.
+#
+# POR QUE POR ID Y NO POR RUTA: /Library/Media/Updated devuelve HTTP 400 aqui.
+# El que funciona es POST /Items/<Id>/Refresh (HTTP 204). Como solo tenemos la ruta,
+# se baja UNA vez el indice de Emby con Fields=Path y se mapea ruta -> Id.
+#
+# BASE INTERNA: por el proxy publico los POST dan 400; hay que pegarle a Emby por su
+# direccion privada (misma leccion ya documentada en bin/emby-refresh.sh). La direccion
+# vive en .env como EMBY_INTERNAL_BASE — no se hardcodea (el hook pre-commit lo veta).
+emby_notify() {
+  local paths_file="$1"
+  [[ -s "$paths_file" ]] || return 0
+  local base="${EMBY_INTERNAL_BASE:-}"
+  if [[ -z "$base" ]]; then
+    log "warn" "emby_notify: falta EMBY_INTERNAL_BASE en .env, se salta el refresh"
+    return 0
+  fi
+  local key
+  key="$(sqlite3 /APPBOX_DATA/apps/emby.vhscave.appboxes.co/data/authentication.db \
+        "SELECT AccessToken FROM Tokens_2 WHERE AppName='ccc' AND IsActive=1 LIMIT 1" 2>/dev/null)"
+  [[ -n "$key" ]] || { log "warn" "emby_notify: sin API key, se salta"; return 0; }
+
+  local index="$STATE_DIR/.emby_index.json"
+  curl -sS --max-time 120 -H "X-Emby-Token: $key" \
+    "$base/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path&Limit=100000" \
+    -o "$index" 2>/dev/null || { log "warn" "emby_notify: no se pudo bajar el indice"; return 0; }
+
+  local ids
+  ids="$(python3 - "$index" "$paths_file" <<'PY'
+import json, sys
+index, paths_file = sys.argv[1], sys.argv[2]
+try:
+    items = json.load(open(index)).get("Items", [])
+except Exception:
+    sys.exit(0)
+by_path = {i.get("Path"): i.get("Id") for i in items if i.get("Path")}
+out = []
+for line in open(paths_file, encoding="utf-8"):
+    p = line.rstrip("\n")
+    if p in by_path:
+        out.append(str(by_path[p]))
+print("\n".join(out))
+PY
+)"
+  local n=0
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    curl -sS --max-time 30 -H "X-Emby-Token: $key" -X POST \
+      "$base/Items/$id/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=false" \
+      -o /dev/null 2>/dev/null && n=$((n + 1))
+  done <<< "$ids"
+  rm -f "$index"
+  log "info" "emby_notify: $n items refrescados"
 }
 
 cmd_status() {
