@@ -120,6 +120,18 @@ cmd_extract() {
   return 1
 }
 
+# ISO 639-2 tiene DOS codigos para varios idiomas: el terminologico (/T, el que usa
+# whisper via nuestro mapa: zho, deu, fra) y el bibliografico (/B: chi, ger, fre).
+# mkvpropedit y MP4Box normalizan al bibliografico, asi que una verificacion literal
+# marcaba como fallo etiquetas que en realidad SI se escribieron bien: 13 episodios de
+# "4 Cut Hero" dieron verify_mismatch_got_chi habiendo quedado correctos (2026-08-13).
+lang_equivalente() {
+  local a="$1" b="$2"
+  [[ -n "$a" && -n "$b" ]] || return 1
+  local pares=" zho:chi deu:ger fra:fre ces:cze ell:gre isl:ice nld:dut ron:rum slk:slo sqi:alb hye:arm eus:baq mya:bur kat:geo cym:wel fas:per bod:tib mkd:mac mri:mao msa:may hrv:scr srp:scc "
+  [[ "$pares" == *" ${a}:${b} "* || "$pares" == *" ${b}:${a} "* ]]
+}
+
 # Aplica la etiqueta detectada al contenedor, IN-PLACE.
 cmd_apply() {
   init_schema
@@ -143,13 +155,15 @@ cmd_apply() {
         # mkvpropedit numera las pistas por tipo y desde 1: a1 = primera de audio.
         local a_ord
         a_ord="$(dbq "SELECT COUNT(*) FROM probe_streams WHERE media_id=$media_id AND stream_type='audio' AND stream_index <= $stream_index;")"
-        mkvpropedit "$path" --edit track:a${a_ord} --set language="$lang" >/dev/null 2>&1 && rc=0
+        timeout 120 mkvpropedit "$path" --edit track:a${a_ord} --set language="$lang" >/dev/null 2>&1 && rc=0
         ;;
       mp4|m4v)
         # MP4Box numera 1..N sobre TODAS las pistas (video incluido), de ahi el +1.
         local t_ord
         t_ord="$(dbq "SELECT COUNT(*) FROM probe_streams WHERE media_id=$media_id AND stream_index <= $stream_index AND stream_type IN ('video','audio','subtitle');")"
-        MP4Box -lang "${t_ord}=${lang}" "$path" >/dev/null 2>&1 && rc=0
+        # timeout: MP4Box se colgo indefinidamente sobre "The Dead Lands (2014)" y
+        # freno toda la cola (2026-08-13). Un archivo raro no puede bloquear al resto.
+        timeout 120 MP4Box -lang "${t_ord}=${lang}" "$path" >/dev/null 2>&1 && rc=0
         ;;
       *)
         # avi/ts/otros: no hay herramienta de etiquetado in-place. NO se cambia el
@@ -163,7 +177,7 @@ cmd_apply() {
       # Verificacion real: releer del archivo, no confiar en el codigo de salida.
       local now
       now="$(ffprobe -v error -select_streams "$stream_index" -show_entries stream_tags=language -of csv=p=0 "$path" 2>/dev/null | head -1)"
-      if [[ "$now" == "$lang" ]]; then
+      if [[ "$now" == "$lang" ]] || lang_equivalente "$lang" "$now"; then
         dbq "
 UPDATE audio_lang_detect SET status='applied', applied_at=CURRENT_TIMESTAMP WHERE media_id=$media_id AND stream_index=$stream_index;
 UPDATE probe_streams SET language='$lang' WHERE media_id=$media_id AND stream_index=$stream_index;"
