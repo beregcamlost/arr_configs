@@ -1273,6 +1273,37 @@ audit_cmd() {
   done <"$sources_tmp"
   rm -f "$sources_tmp"
 
+  # --- Barrido de huerfanos (2026-08-12) ---------------------------------------
+  # El audit recorre la lista de fuentes de Bazarr, NO media_files: cuando Sonarr o
+  # Radarr reemplaza un release, el path viejo nunca se vuelve a visitar y la fila
+  # queda con deleted_at NULL + probes rancios para siempre. plan_cmd la volvia a
+  # marcar eligible cada noche y el worklist la ignoraba => cola inflada de fantasmas
+  # (201 filas el 2026-08-12). Aqui se retiran las filas sin archivo en disco.
+  # Guard: si desapareciera mas del ORPHAN_SWEEP_MAX_PCT% se aborta (montaje caido).
+  local sweep_total sweep_dead sweep_pct sweep_max_pct sweep_ids_tmp sweep_ids
+  sweep_max_pct="${ORPHAN_SWEEP_MAX_PCT:-20}"
+  sweep_total="$(db "SELECT COUNT(*) FROM media_files WHERE deleted_at IS NULL;")"
+  if [[ "${sweep_total:-0}" -gt 0 ]]; then
+    sweep_ids_tmp="$(mktemp)"
+    while IFS=$'\t' read -r sw_id sw_path; do
+      [[ -n "$sw_path" ]] || continue
+      [[ -f "$sw_path" ]] || printf '%s\n' "$sw_id" >>"$sweep_ids_tmp"
+    done < <(db -separator $'\t' "SELECT id, path FROM media_files WHERE deleted_at IS NULL;")
+    sweep_dead="$(wc -l <"$sweep_ids_tmp")"
+    sweep_pct=$(( sweep_dead * 100 / sweep_total ))
+    if [[ "$sweep_dead" -eq 0 ]]; then
+      log "info" "Orphan sweep: nada que retirar ($sweep_total vivos)"
+    elif [[ "$sweep_pct" -gt "$sweep_max_pct" ]]; then
+      log "error" "Orphan sweep ABORTADO: $sweep_dead/$sweep_total (${sweep_pct}%) sin archivo, sobre el tope de ${sweep_max_pct}% - montaje caido?"
+    else
+      sweep_ids="$(paste -sd, "$sweep_ids_tmp")"
+      db "UPDATE media_files SET deleted_at=CURRENT_TIMESTAMP WHERE id IN ($sweep_ids) AND deleted_at IS NULL;"
+      db "UPDATE conversion_plan SET eligible=0, skip_reason='missing_file' WHERE media_id IN ($sweep_ids);"
+      log "info" "Orphan sweep: $sweep_dead filas retiradas de $sweep_total (${sweep_pct}%)"
+    fi
+    rm -f "$sweep_ids_tmp"
+  fi
+
   log "info" "Audit completed. processed=$total probe_ok=$ok skipped=$skipped missing=$missing_cnt probe_fail=$probe_fail"
   end_ts="$(date +%s)"
   elapsed="$((end_ts - start_ts))"
