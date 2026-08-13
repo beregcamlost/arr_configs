@@ -132,6 +132,57 @@ lang_equivalente() {
   [[ "$pares" == *" ${a}:${b} "* || "$pares" == *" ${b}:${a} "* ]]
 }
 
+# Plan B para los mp4 que MP4Box no puede tocar: remux con ffmpeg (-c copy, sin
+# recodificar) escribiendo la etiqueta, a un temporal, y recien se reemplaza si el
+# resultado VERIFICA (misma duracion +-2s y misma cantidad de streams). Nunca se pisa
+# el original a ciegas.
+remux_con_etiqueta() {
+  local path="$1" stream_index="$2" lang="$3"
+  local dir tmp dur_old dur_new ns_old ns_new
+
+  # PUERTA DE SALUD. Varios de los mp4 que MP4Box rechaza no tienen solo basura al
+  # final: tienen el bitstream H.264 roto ("Invalid NAL unit size", "missing picture
+  # in access unit") — p.ej. toda la temporada de "Rainbow (2010)". Remuxear un
+  # archivo asi puede perder contenido sin que la duracion cambie, asi que NO se toca:
+  # se marca y se reporta. Etiquetar un idioma no justifica reescribir media dañada.
+  local errs
+  errs="$(timeout 120 ffmpeg -nostdin -v error -i "$path" -t 90 -f null - 2>&1 | head -5)"
+  if [[ -n "$errs" ]]; then
+    log "warn" "fuente dañada, NO se remuxea: $(basename "$path") :: ${errs%%$'\n'*}"
+    return 2
+  fi
+
+  dir="$(dirname "$path")"
+  tmp="$dir/.langid-$$-$(basename "$path")"
+
+  dur_old="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$path" 2>/dev/null)"
+  ns_old="$(ffprobe -v error -show_entries format=nb_streams -of csv=p=0 "$path" 2>/dev/null)"
+
+  if ! timeout 1800 ffmpeg -nostdin -v error -y -i "$path" \
+        -map 0 -c copy -metadata:s:"$stream_index" "language=$lang" \
+        -movflags +faststart "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 1
+  fi
+  [[ -s "$tmp" ]] || { rm -f "$tmp"; return 1; }
+
+  dur_new="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$tmp" 2>/dev/null)"
+  ns_new="$(ffprobe -v error -show_entries format=nb_streams -of csv=p=0 "$tmp" 2>/dev/null)"
+  if [[ -z "$dur_new" || "$ns_new" != "$ns_old" ]]; then
+    log "warn" "remux rechazado (streams $ns_old->$ns_new): $path"
+    rm -f "$tmp"; return 1
+  fi
+  local diff
+  diff="$(awk -v a="${dur_old:-0}" -v b="${dur_new:-0}" 'BEGIN{d=a-b; if(d<0)d=-d; printf "%d", d}')"
+  if [[ "${diff:-99}" -gt 2 ]]; then
+    log "warn" "remux rechazado (duracion ${dur_old} -> ${dur_new}): $path"
+    rm -f "$tmp"; return 1
+  fi
+
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+  log "info" "remux con etiqueta OK (MP4Box no pudo): $(basename "$path")"
+  return 0
+}
+
 # Aplica la etiqueta detectada al contenedor, IN-PLACE.
 cmd_apply() {
   init_schema
@@ -164,6 +215,18 @@ cmd_apply() {
         # timeout: MP4Box se colgo indefinidamente sobre "The Dead Lands (2014)" y
         # freno toda la cola (2026-08-13). Un archivo raro no puede bloquear al resto.
         timeout 120 MP4Box -lang "${t_ord}=${lang}" "$path" >/dev/null 2>&1 && rc=0
+        # PLAN B: varios mp4 traen basura pegada despues de la ultima caja valida
+        # (MP4Box: "Unknown top-level box ... Incomplete box size 3104153225"). ffprobe
+        # la tolera pero MP4Box se atasca. Ahi se remuxea con ffmpeg, que ademas deja
+        # el archivo limpio. Es -c copy: los streams salen bit a bit iguales.
+        if [[ "$rc" -ne 0 ]]; then
+          remux_con_etiqueta "$path" "$stream_index" "$lang"
+          case "$?" in
+            0) rc=0 ;;
+            2) dbq "UPDATE audio_lang_detect SET status='source_damaged', error='bitstream roto: ni MP4Box ni remux' WHERE media_id=$media_id AND stream_index=$stream_index;"
+               skipped=$((skipped + 1)); continue ;;
+          esac
+        fi
         ;;
       *)
         # avi/ts/otros: no hay herramienta de etiquetado in-place. NO se cambia el
