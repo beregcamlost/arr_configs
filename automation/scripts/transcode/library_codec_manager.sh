@@ -798,6 +798,20 @@ resolve_profile_langs_by_id() {
       JOIN table_languages_profiles lp ON lp.profileId = s.profileId
       WHERE e.sonarrEpisodeId = $ref_id LIMIT 1;
     " 2>/dev/null)" || true
+    # REF-ID FALLBACK (2026-08-14): el fast-path de import (arr_remux_on_import.sh pasa
+    # --ref-id, documentado como "sonarrSeriesId or radarrId") guarda el sonarrSeriesId,
+    # mientras que esta consulta espera un sonarrEpisodeId. Sin este fallback el perfil
+    # sale VACIO para todo episodio recien importado, y con perfil vacio
+    # extract_profile_subtitle_sidecars() hace return 0 sin extraer nada: la conversion
+    # descartaria los subs de texto SIN dejar sidecar. Casos reales: HELL MODE S02E07 y
+    # From Old Country Bumpkin S02E06 (21 pistas subrip, cero sidecars en disco).
+    if [[ -z "$items" ]]; then
+      items="$(sqlite3 -cmd ".timeout 5000" "$bazarr_db" "
+        SELECT lp.items FROM table_shows s
+        JOIN table_languages_profiles lp ON lp.profileId = s.profileId
+        WHERE s.sonarrSeriesId = $ref_id LIMIT 1;
+      " 2>/dev/null)" || true
+    fi
   else
     items="$(sqlite3 -cmd ".timeout 5000" "$bazarr_db" "
       SELECT lp.items FROM table_movies m
@@ -1224,6 +1238,14 @@ audit_cmd() {
       mtime=0
     fi
 
+    # INCREMENTAL-AUDIT FIX (2026-08-14): el mtime guardado hay que leerlo ANTES del upsert.
+    # upsert_media_file hace mtime=excluded.mtime, asi que la comparacion de mas abajo
+    # terminaba comparando el mtime del disco contra si mismo -> siempre iguales -> el
+    # ffprobe se saltaba SIEMPRE. Por eso probe_streams quedo congelado en mayo para
+    # 2830 de 3948 archivos y el planner planificaba sobre datos de hace tres meses.
+    local prev_mtime=""
+    prev_mtime="$(db "SELECT mtime FROM media_files WHERE path='$(sql_quote "$path")' LIMIT 1;" 2>/dev/null || true)"
+
     upsert_media_file "$media_type" "$ref_id" "$path" "$size_bytes" "$mtime" "$container"
     media_id="$(media_id_for_path "$path")"
 
@@ -1235,12 +1257,11 @@ audit_cmd() {
       continue
     fi
 
-    # Incremental: skip ffprobe if mtime unchanged and probe data already exists
-    local stored_mtime has_probes
-    IFS=$'\t' read -r stored_mtime has_probes < <(
-      db -separator $'\t' "SELECT m.mtime, EXISTS(SELECT 1 FROM probe_streams WHERE media_id=$media_id LIMIT 1) FROM media_files m WHERE m.id=$media_id LIMIT 1;" 2>/dev/null
-    )
-    if [[ "$stored_mtime" == "$mtime" && -n "$stored_mtime" && "$has_probes" == "1" ]]; then
+    # Incremental: skip ffprobe if mtime unchanged and probe data already exists.
+    # Se compara contra prev_mtime (capturado ANTES del upsert), no contra m.mtime.
+    local has_probes
+    has_probes="$(db "SELECT EXISTS(SELECT 1 FROM probe_streams WHERE media_id=$media_id LIMIT 1);" 2>/dev/null || echo 0)"
+    if [[ "$prev_mtime" == "$mtime" && -n "$prev_mtime" && "$has_probes" == "1" ]]; then
       skipped=$((skipped + 1))
       ok=$((ok + 1))
       if (( total % 500 == 0 )); then
@@ -1397,6 +1418,20 @@ ORDER BY m.path${where_limit};
       skip_reason="streaming_candidate"
     elif is_stale_candidate_inline "$path"; then
       skip_reason="stale_candidate"
+    elif [[ "$container_ok" -eq 0 && "$total_v" -gt 0 && "$compliant_v" -eq "$total_v" \
+            && "$total_a" -gt 0 && "$good_a" -eq "$total_a" ]]; then
+      # LOOP-BREAKER (2026-08-15) — bucle de reconversion infinita.
+      # Un .avi/.m4v/.ts nunca puede ser "already_compliant" porque container_ok=0, asi que
+      # caia siempre en eligible=1 con reason="audio_only". Pero la conversion escribe el
+      # resultado con tmp_ext="$container" (el contenedor ORIGEN, no target_container), asi
+      # que el archivo se re-escribia como .avi y volvia a la cola la noche siguiente.
+      # Evidencia: Stargate Atlantis S05E06 convertido 4 veces (2026-05-15, 08-13 x2, 08-14)
+      # con video h264 + audio aac 2ch 48000 YA correctos en cada pasada; 143 archivos por
+      # noche (126 avi + 10 ts + 7 m4v), 278 corridas en 10 dias, todas para nada.
+      # Aqui se corta: si el CONTENIDO ya cumple y lo unico fuera de norma es el contenedor,
+      # no se reconvierte. Cambiar de contenedor exige renombrar el archivo y avisar a
+      # Sonarr/Radarr/Bazarr/Emby — decision aparte, no un efecto colateral del cron.
+      skip_reason="container_only_mismatch"
     elif [[ "$container" == "mkv" && "$max_w" -ge 1920 ]]; then
       # Micro-encode detection: 1080p MKV files with extremely low bits-per-pixel-per-frame.
       # Converting a low-quality source wastes resources and produces garbage output.
@@ -1505,6 +1540,19 @@ ORDER BY m.path${where_limit};
           priority=10
         fi
       fi
+    fi
+
+    # CONTAINER-HYGIENE (2026-08-14): un archivo "compliant" en codecs pero con subs de
+    # texto embebidos sigue estando fuera del estandar. Se marca elegible con prioridad 2
+    # (debajo de audio_only=1, encima del transcode completo=10): la conversion hara
+    # -c:v copy -c:a copy y solo re-empaqueta, extrayendo los sidecars y dejando el audio
+    # dentro de perfil. Ver container_has_embedded_text_subs().
+    if [[ "$skip_reason" == "already_compliant" ]] && container_has_embedded_text_subs "$media_id" "$path"; then
+      skip_reason=""
+      eligible=1
+      reason="deembed_only"
+      priority=2
+      log "info" "container-hygiene: subs de texto embebidos -> elegible (remux): $path"
     fi
 
     db <<SQL
@@ -2046,6 +2094,47 @@ UPDATE media_files
 SQL
   log "info" "Emby watch-stats synced: ${n} items; watch popularity from ${nusers} user(s)"
   rm -f "$dates" "$watch" "$wcounts" "$agg"
+}
+
+# CONTAINER-HYGIENE (2026-08-14) — por que existe esta funcion:
+# El planner decidia "already_compliant" mirando SOLO codecs (container + video + audio).
+# Pero el de-embed de subs a sidecar y el filtrado de idiomas de audio viven DENTRO de la
+# ruta de conversion, y esa ruta solo corre sobre filas eligible=1. Resultado: un archivo
+# con codecs correctos pero con el .ass pegado o con audio turco de default entraba como
+# "compliant" y NUNCA se limpiaba. Casos reales: Napoleon (2023) con audio tur de default
+# durante meses; HELL MODE S02E07 con el ass embebido.
+# Senal usada: subtitulos de TEXTO embebidos. Es objetiva, no necesita perfiles ni HTTP, y
+# cubre a todos los infractores observados (los que traen audio basura tambien los tienen).
+# Una vez elegible, la ruta de conversion arregla ademas los idiomas, gratis.
+#
+# Filtro barato desde probe_streams; si la DB dice "sucio" se CONFIRMA con ffprobe en vivo
+# antes de decidir, porque probe_streams arrastra datos viejos y un falso positivo aqui
+# cuesta un remux de varios GB. Cuando la DB miente se re-probea y se corrige la fila, asi
+# la siguiente corrida ya no paga ese ffprobe.
+#   $1 = media_id   $2 = path
+# Devuelve 0 si el contenedor necesita limpieza, 1 si esta limpio.
+container_has_embedded_text_subs() {
+  local media_id="$1" path="$2"
+  local n live tmp_json
+
+  n="$(db "SELECT COUNT(*) FROM probe_streams WHERE media_id=$media_id AND stream_type='subtitle' AND codec IN ('subrip','ass','ssa','mov_text','webvtt','text');" 2>/dev/null || echo 0)"
+  [[ "${n:-0}" -gt 0 ]] || return 1
+  [[ -f "$path" ]] || return 1
+
+  live="$(ffprobe -v error -select_streams s -show_entries stream=codec_name -of csv=p=0 "$path" 2>/dev/null | grep -cE '^(subrip|ass|ssa|mov_text|webvtt|text)$' || true)"
+  if [[ "${live:-0}" -gt 0 ]]; then
+    return 0
+  fi
+
+  # La DB mentia: refrescar la fila para no repetir este ffprobe cada noche.
+  tmp_json="$(mktemp)"
+  if ffprobe -v error -print_format json -show_streams -show_format "$path" >"$tmp_json" 2>/dev/null; then
+    clear_probe_streams "$media_id"
+    insert_probe_streams_from_json "$media_id" "$tmp_json"
+    log "debug" "container-hygiene: probe_streams refrescado (estaba stale) media_id=$media_id"
+  fi
+  rm -f "$tmp_json"
+  return 1
 }
 
 # Sidecar subtitle standard (decision 4): extract embedded TEXT subtitles to external
