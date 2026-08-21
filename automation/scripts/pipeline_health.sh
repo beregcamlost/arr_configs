@@ -90,6 +90,85 @@ record() {
 # ---------------------------------------------------------------------------
 # Check 1: Orchestrator freshness
 # ---------------------------------------------------------------------------
+check_planner_freshness() {
+    # El planner y el audit escriben su resultado en manager.log, NO en los cron-*.log
+    # (esos solo capturan stderr, por eso llevan meses vacios y parecian muertos).
+    # Aqui se mira la fuente real: si el audit o el plan llevan mas de 36 h sin
+    # completar, la cola dejo de alimentarse y nadie se entera.
+    local mlog="/APPBOX_DATA/storage/.transcode-state-media/manager.log"
+    if [[ ! -f "$mlog" ]]; then
+        record "WARN" "Planner: manager.log no existe en ${mlog}"
+        return
+    fi
+    local now_epoch stage line ts age_h
+    now_epoch="$(date +%s)"
+    for stage in "Audit completed" "Plan completed"; do
+        line="$(grep -a "\[info\] ${stage}" "$mlog" | tail -1 || true)"
+        if [[ -z "$line" ]]; then
+            record "WARN" "Planner: nunca se vio '${stage}' en manager.log"
+            continue
+        fi
+        ts="$(printf '%s' "$line" | awk '{print $1" "$2}')"
+        local ts_epoch
+        ts_epoch="$(date -d "$ts" +%s 2>/dev/null || echo 0)"
+        if [[ "$ts_epoch" -eq 0 ]]; then
+            record "WARN" "Planner: no pude interpretar la fecha de '${stage}': ${ts}"
+            continue
+        fi
+        age_h=$(( (now_epoch - ts_epoch) / 3600 ))
+        if [[ "$age_h" -gt 36 ]]; then
+            record "ALARM" "Planner: '${stage}' hace ${age_h} h (ultimo: ${ts}) — la cola no se esta alimentando"
+        else
+            record "OK" "Planner: '${stage}' hace ${age_h} h"
+        fi
+    done
+}
+
+check_sqlite_backups() {
+    # El backup corre cada 3 dias. Durante mucho tiempo NO respaldo nada por un doble
+    # flock sobre el mismo lockfile y el log solo decia "Already running", asi que la
+    # unica senal fiable es la fecha del .bkp en disco, no el log.
+    local cur="/config/berenstuff/arr-backups/current"
+    if [[ ! -d "$cur" ]]; then
+        record "ALARM" "Backups: no existe ${cur} — nunca se ha respaldado"
+        return
+    fi
+    local newest age_h count
+    newest="$(find "$cur" -name '*.bkp' -printf '%T@
+' 2>/dev/null | sort -rn | head -1)"
+    count="$(find "$cur" -name '*.bkp' 2>/dev/null | wc -l)"
+    if [[ -z "$newest" ]]; then
+        record "ALARM" "Backups: no hay ningun .bkp en ${cur}"
+        return
+    fi
+    age_h=$(( ( $(date +%s) - ${newest%.*} ) / 3600 ))
+    if [[ "$age_h" -gt 96 ]]; then
+        record "ALARM" "Backups: el mas reciente tiene ${age_h} h (el cron corre cada 72 h)"
+    else
+        record "OK" "Backups: ${count} DBs, el mas reciente hace ${age_h} h"
+    fi
+}
+
+check_conversion_queue() {
+    # Una cola que no baja es tan mala senal como un job muerto: avisa cuando el item
+    # mas viejo lleva demasiado esperando, que es lo que un usuario notaria en Emby.
+    local db="/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db"
+    [[ -f "$db" ]] || { record "WARN" "Cola: no existe ${db}"; return; }
+    local pending oldest_h
+    pending="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1;" 2>/dev/null || echo "")"
+    [[ -z "$pending" ]] && { record "WARN" "Cola: no pude leer conversion_plan"; return; }
+    if [[ "$pending" -eq 0 ]]; then
+        record "OK" "Cola de conversion vacia"
+        return
+    fi
+    oldest_h="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT CAST((julianday('now') - julianday(MIN(plan_ts))) * 24 AS INTEGER) FROM conversion_plan WHERE eligible=1;" 2>/dev/null || echo 0)"
+    if [[ "${oldest_h:-0}" -gt 48 ]]; then
+        record "ALARM" "Cola: ${pending} pendientes, el mas viejo lleva ${oldest_h} h sin procesarse"
+    else
+        record "OK" "Cola: ${pending} pendientes, el mas viejo lleva ${oldest_h:-0} h"
+    fi
+}
+
 check_orchestrator_freshness() {
     # 2026-06-17: pipeline_state went vestigial after the flock-lane refactor
     # (last write 2026-05-01). Freshness is now derived from media_pipeline.log,
@@ -153,11 +232,37 @@ check_state_dbs() {
 # ---------------------------------------------------------------------------
 # Check 3: Ollama endpoints
 # ---------------------------------------------------------------------------
-check_ollama_endpoints() {
-    local wsl_url="${OLLAMA_BASE_URL:-}"
-    local debian_url="${DEBIAN_OLLAMA_URL:-}"
+check_gpu3090_activity() {
+    # La 3090 vive en berentendo, que se apaga y a veces esta ocupada jugando. Que no
+    # este disponible NO es una falla — lo es que haya trabajo pesado esperandola desde
+    # hace dias sin que nadie lo note. Se mide por claims, que es como participa de
+    # verdad en el pipeline (claimed_by='gpu3090@<epoch>').
+    local db="/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db"
+    [[ -f "$db" ]] || { record "WARN" "3090: no existe ${db}"; return; }
+    local claimed heavy
+    claimed="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT COUNT(*) FROM conversion_plan WHERE claimed_by LIKE 'gpu3090@%';" 2>/dev/null || echo "")"
+    heavy="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT COUNT(*) FROM conversion_plan WHERE eligible=1 AND priority>=10 AND (claimed_by IS NULL OR claimed_by='');" 2>/dev/null || echo "")"
+    if [[ -z "$claimed" || -z "$heavy" ]]; then
+        record "WARN" "3090: no pude leer conversion_plan"
+        return
+    fi
+    if [[ "$heavy" -gt 0 && "$claimed" -eq 0 ]]; then
+        record "WARN" "3090: ${heavy} transcodes pesados esperando y ningun claim activo — berentendo lleva rato apagada"
+    else
+        record "OK" "3090: ${claimed} en proceso, ${heavy} transcodes pesados en espera"
+    fi
+}
 
-    for pair in "WSL-GPU:${wsl_url}" "Debian-CPU:${debian_url}"; do
+check_ollama_endpoints() {
+    # OJO (2026-08-21): antes este bucle chequeaba "WSL-GPU" y "Debian-CPU" como si
+    # fueran dos servicios, pero OLLAMA_BASE_URL y DEBIAN_OLLAMA_URL apuntan a LA MISMA
+    # maquina (la de debian). El "OK: Ollama WSL-GPU UP" que se reporto durante
+    # meses era el shim de debian respondiendo dos veces. La 3090 no es alcanzable por
+    # HTTP desde mubuntu — es ella quien viene a buscar trabajo — asi que su salud se
+    # mide por actividad de claims en check_gpu3090_activity, no por un ping.
+    local debian_url="${DEBIAN_OLLAMA_URL:-${OLLAMA_BASE_URL:-}}"
+
+    for pair in "Debian-CPU:${debian_url}"; do
         local label="${pair%%:*}"
         local url="${pair#*:}"
         if [[ -z "$url" ]]; then
@@ -318,8 +423,12 @@ main() {
     _health_run_id="$(metrics_run_start "health" 2>/dev/null)" || _health_run_id=""
 
     check_orchestrator_freshness
+    check_planner_freshness
+    check_sqlite_backups
+    check_conversion_queue
     check_state_dbs
     check_ollama_endpoints
+    check_gpu3090_activity
     check_stale_flocks
     check_log_sizes
     check_disk_space

@@ -6,7 +6,12 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly LOCK_FILE="/tmp/sqlite_backup.lock"
+# El cron ya toma /tmp/sqlite_backup.lock con flock -n antes de invocar este
+# script. Si el lock interno usara ESE MISMO archivo, se autodetectaria como
+# "ya corriendo" y saldria sin respaldar nada — que es justo lo que paso desde
+# siempre (114/114 corridas). El lock interno usa su propio archivo para que el
+# script siga siendo seguro al ejecutarlo a mano.
+readonly LOCK_FILE="/tmp/sqlite_backup.internal.lock"
 readonly LOG_FILE="/config/berenstuff/automation/logs/sqlite_backup.log"
 readonly BACKUP_ROOT="/config/berenstuff/arr-backups"
 readonly CURRENT_DIR="${BACKUP_ROOT}/current"
@@ -23,14 +28,14 @@ readonly DB_PATHS=(
     "/APPBOX_DATA/storage/.streaming-checker-state/streaming_state.db"
     "/APPBOX_DATA/storage/.translation-state/translation_state.db"
     "/APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db"
-    "/APPBOX_DATA/storage/.subtitle-dedupe-state/subtitle_dedupe.db"
+    "/APPBOX_DATA/storage/pipeline.db"
 )
 readonly DB_NAMES=(
     "codec_state"
     "streaming_state"
     "translation_state"
     "subtitle_quality_state"
-    "subtitle_dedupe_state"
+    "pipeline"
 )
 
 # ---------------------------------------------------------------------------
@@ -119,6 +124,15 @@ rotate_archives() {
 # Git commit and push — non-fatal on failure
 # ---------------------------------------------------------------------------
 git_push() {
+    # Push desactivado por defecto (2026-08-21). BACKUP_ROOT vive DENTRO del repo
+    # berenstuff, asi que este bloque commitea y empuja el arbol entero — incluido
+    # trabajo en curso — sin que nadie lo pida. Se activa a proposito con
+    # SQLITE_BACKUP_GIT=1 cuando se quiera versionar los .bkp.
+    if [[ "${SQLITE_BACKUP_GIT:-0}" != "1" ]]; then
+        log "git: desactivado (exporta SQLITE_BACKUP_GIT=1 para versionar los backups)"
+        return 0
+    fi
+
     local today_str
     today_str="$(today)"
     local commit_msg="backup: ${today_str}"
