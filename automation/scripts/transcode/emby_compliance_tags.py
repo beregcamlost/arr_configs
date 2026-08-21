@@ -119,8 +119,6 @@ class Emby:
     def set_policy(self, uid, policy):
         return self._call("/Users/%s/Policy" % uid, policy)[0]
 
-    def refresh_library(self):
-        return self._call("/Library/Refresh", {})[0]
 
 
 def connect_db():
@@ -232,8 +230,11 @@ def cmd_sync(args):
             log("  ERROR del %s en %s: %s" % (tag, path, st))
     con.commit()
 
-    if hechos:
-        emby.refresh_library()
+    # NO se llama a /Library/Refresh. Verificado en vivo el 2026-08-21: el tag surte
+    # efecto INMEDIATO — BlockedTags es un filtro en tiempo de consulta, no algo que
+    # Emby precalcule. Un refresh completo aqui escaneaba los 3703 items en cada cambio
+    # de etiqueta, sobre 2 vCPU, para nada. Etiquetar tampoco reimporta: el item conserva
+    # su Id y su DateCreated (comprobado con el 224766 antes y despues de convertirlo).
     log("sync: %d operaciones aplicadas" % hechos)
     return 0
 
@@ -259,7 +260,6 @@ def cmd_failsafe(args):
         else:
             log("FAILSAFE ERROR al destapar %s: %s" % (r["path"], st))
     con.commit()
-    emby.refresh_library()
     log("failsafe: %d items destapados - REVISAR por que se quedaron colgados" % len(rows))
     return 1
 
