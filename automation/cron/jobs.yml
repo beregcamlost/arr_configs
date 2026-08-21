@@ -537,3 +537,71 @@ jobs:
     on_failure: solo log; el siguiente run reintenta (firma mtime:size por archivo)
     depends_on: scan2_lib.py, keep_local.json (build_keep_local.py en berentendo lo empuja)
     safe_to_disable: yes (solo se pierde el rechazo automatico de subs malos nuevos)
+
+  - id: emby_compliance_sync
+    schedule: "*/5 * * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/emby_compliance_sync.lock
+      /bin/bash -c 'set -a; . /config/berenstuff/.env; set +a;
+      exec python3 /config/berenstuff/automation/scripts/transcode/emby_compliance_tags.py sync'
+    log: /config/berenstuff/automation/logs/emby_compliance_tags.log
+    purpose: >-
+      FASE 3 del plan "Estandar o Invisible" (2026-08-21). Lee la vista
+      compliance_state y hace que Emby refleje el estado, por TIPO DE TRABAJO
+      (decision de Beren): trabajo corto -c copy (deembed_only, audio_only) se
+      etiqueta ARREGLANDO y queda OCULTO para las 33 cuentas no-admin via
+      Policy.BlockedTags; transcode real se etiqueta PENDIENTE y se VE, marcado.
+      Lo fallido se marca pero nunca se oculta. Al terminar la conversion el
+      archivo pasa a conforme y este mismo sync le quita el tag: eso cierra el
+      3.4 sin codigo extra. La cuenta admin nunca se bloquea.
+      OJO: el inventario de lo etiquetado se saca con /Items?Tags=<tag>, NO de
+      Fields=TagItems — Emby no puebla TagItems en respuestas de lista, y
+      confiar en eso hacia que el sync nunca quitara un tag (del=0 siempre).
+    runtime_typical: 5-15s
+    timeout_hard: none (flock previene solape)
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db (tabla emby_tag_state)
+    lock: /tmp/emby_compliance_sync.lock
+    on_failure: solo log; el siguiente run reconcilia (es idempotente)
+    depends_on: EMBY_URL, EMBY_API_KEY, vista compliance_state (compliance.sh init)
+    safe_to_disable: yes (se congela el etiquetado; el failsafe destapa a las 6 h)
+
+  - id: emby_compliance_failsafe
+    schedule: "*/30 * * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/emby_compliance_failsafe.lock
+      /bin/bash -c 'set -a; . /config/berenstuff/.env; set +a;
+      exec python3 /config/berenstuff/automation/scripts/transcode/emby_compliance_tags.py failsafe --horas 6'
+    log: /config/berenstuff/automation/logs/emby_compliance_tags.log
+    purpose: >-
+      Paso 3.5: nada se queda invisible porque un script murio. Cualquier item
+      con ARREGLANDO desde hace mas de 6 h se destapa solo y se registra para
+      revision. pipeline_health vigila a este freno (check_emby_compliance_tags):
+      si aparece algo vencido, es que ESTE cron no esta corriendo.
+    runtime_typical: 2-5s
+    timeout_hard: none (flock previene solape)
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db (tabla emby_tag_state)
+    lock: /tmp/emby_compliance_failsafe.lock
+    on_failure: sale 1 y deja FAILSAFE en el log; pipeline_health lo eleva a CRIT
+    depends_on: EMBY_URL, EMBY_API_KEY
+    safe_to_disable: NO (es la unica red que impide contenido oculto para siempre)
+
+  - id: compliance_calibrate
+    schedule: "20 4 * * 1"
+    command: >-
+      /usr/bin/flock -n /tmp/compliance_calibrate.lock
+      /config/berenstuff/automation/scripts/transcode/compliance.sh calibrate
+    log: /config/berenstuff/automation/logs/emby_compliance_tags.log
+    purpose: >-
+      Paso 2.2: recalcula la ETA de compliance_state contra el historico real de
+      conversion_runs (ventana de 45 dias). Como conversion_plan.reason se
+      resetea al terminar, no se puede saber a posteriori si una corrida vieja
+      fue copy-only o transcode: se usa la distribucion de min/GB, el cuartil
+      rapido para 'rapido' y la mediana para 'largo'. Medido 2026-08-21 sobre
+      694 corridas: rapido 1.93 min/GB, largo 2.41 min/GB.
+    runtime_typical: 2-4s
+    timeout_hard: none
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db (tabla compliance_calib)
+    lock: /tmp/compliance_calibrate.lock
+    on_failure: solo log; la vista cae a los valores por defecto (4 min/GB)
+    depends_on: conversion_runs con al menos 10 corridas exitosas en 45 dias
+    safe_to_disable: yes (la ETA se queda con la ultima calibracion)

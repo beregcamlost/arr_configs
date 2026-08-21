@@ -253,6 +253,36 @@ check_gpu3090_activity() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# FASE 3: nada se queda invisible en Emby sin que nos enteremos.
+# El freno de 6 h vive en emby_compliance_tags.py failsafe (cron cada 30 min). Este
+# check es el que vigila AL freno: si algo lleva mas de 6 h con el tag ARREGLANDO,
+# el failsafe no esta corriendo y hay contenido oculto para las 33 cuentas.
+# ---------------------------------------------------------------------------
+check_emby_compliance_tags() {
+    local db="/APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db"
+    [[ -f "$db" ]] || { record "WARN" "Conformidad: no existe ${db}"; return; }
+    local existe
+    existe="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT COUNT(*) FROM sqlite_master WHERE name='emby_tag_state';" 2>/dev/null || echo 0)"
+    if [[ "${existe:-0}" -ne 1 ]]; then
+        record "OK" "Conformidad: etiquetado de Emby no instalado todavia"
+        return
+    fi
+    local ocultos marcados viejos
+    ocultos="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT COUNT(*) FROM emby_tag_state WHERE tag='ARREGLANDO';" 2>/dev/null || echo "")"
+    marcados="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT COUNT(*) FROM emby_tag_state WHERE tag='PENDIENTE';" 2>/dev/null || echo "")"
+    viejos="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT COUNT(*) FROM emby_tag_state WHERE tag='ARREGLANDO' AND (julianday('now')-julianday(tagged_ts))*24.0 > 6;" 2>/dev/null || echo "")"
+    if [[ -z "$ocultos" || -z "$viejos" ]]; then
+        record "WARN" "Conformidad: no pude leer emby_tag_state"
+        return
+    fi
+    if [[ "$viejos" -gt 0 ]]; then
+        record "CRIT" "Conformidad: ${viejos} items ocultos hace mas de 6 h — el failsafe no esta corriendo"
+    else
+        record "OK" "Conformidad Emby: ${ocultos} ocultos, ${marcados} marcados, ninguno vencido"
+    fi
+}
+
 check_ollama_endpoints() {
     # OJO (2026-08-21): antes este bucle chequeaba "WSL-GPU" y "Debian-CPU" como si
     # fueran dos servicios, pero OLLAMA_BASE_URL y DEBIAN_OLLAMA_URL apuntan a LA MISMA
@@ -426,6 +456,7 @@ main() {
     check_planner_freshness
     check_sqlite_backups
     check_conversion_queue
+    check_emby_compliance_tags
     check_state_dbs
     check_ollama_endpoints
     check_gpu3090_activity
