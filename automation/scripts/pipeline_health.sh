@@ -246,10 +246,32 @@ check_gpu3090_activity() {
         record "WARN" "3090: no pude leer conversion_plan"
         return
     fi
-    if [[ "$heavy" -gt 0 && "$claimed" -eq 0 ]]; then
-        record "WARN" "3090: ${heavy} transcodes pesados esperando y ningun claim activo — berentendo lleva rato apagada"
+    # FASE 4 (2026-08-21): con el latido ya se puede distinguir "apagada" de "mirando y
+    # sin trabajo". Antes, cero claims significaba las dos cosas a la vez y el WARN salia
+    # igual estuviera la maquina encendida o no.
+    local hb_h hb_estado
+    hb_h="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT ROUND((julianday('now')-julianday(last_seen))*24.0,1) FROM worker_heartbeat WHERE worker='gpu3090';" 2>/dev/null || echo "")"
+    hb_estado="$(sqlite3 -cmd '.timeout 5000' "file:${db}?mode=ro"         "SELECT estado FROM worker_heartbeat WHERE worker='gpu3090';" 2>/dev/null || echo "")"
+
+    if [[ -z "$hb_h" ]]; then
+        if [[ "$heavy" -gt 0 ]]; then
+            record "WARN" "3090: ${heavy} transcodes esperando y nunca ha reportado latido"
+        else
+            record "OK" "3090: sin trabajo pesado en espera (sin latido todavia)"
+        fi
+        return
+    fi
+
+    if [[ "$heavy" -eq 0 ]]; then
+        record "OK" "3090: vista hace ${hb_h} h (${hb_estado}), nada pesado en espera"
+    elif awk -v h="$hb_h" 'BEGIN{exit (h > 72) ? 0 : 1}'; then
+        record "CRIT" "3090: ${heavy} transcodes esperando y la maquina no reporta hace ${hb_h} h — llevan dias acumulandose"
+    elif awk -v h="$hb_h" 'BEGIN{exit (h > 24) ? 0 : 1}'; then
+        record "WARN" "3090: ${heavy} transcodes esperando y la maquina no reporta hace ${hb_h} h"
+    elif [[ "$hb_estado" == "gpu_ocupada" && "$claimed" -eq 0 ]]; then
+        record "WARN" "3090: encendida pero con la GPU ocupada; ${heavy} transcodes esperando turno"
     else
-        record "OK" "3090: ${claimed} en proceso, ${heavy} transcodes pesados en espera"
+        record "OK" "3090: ${claimed} en proceso, ${heavy} en espera, vista hace ${hb_h} h (${hb_estado})"
     fi
 }
 

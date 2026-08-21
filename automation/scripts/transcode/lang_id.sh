@@ -184,12 +184,23 @@ remux_con_etiqueta() {
 }
 
 # Aplica la etiqueta detectada al contenedor, IN-PLACE.
+# Un archivo exento permanente (FASE 2, tabla compliance_exempt) nunca va a cambiar de
+# contenedor, asi que no tiene sentido reintentar su etiquetado cada media hora.
+# Si la tabla no existe todavia, no exime a nadie y el comportamiento es el de antes.
+es_exento_permanente() {
+  local mid="$1" n
+  n="$(dbq "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='compliance_exempt';" 2>/dev/null || echo 0)"
+  [[ "${n:-0}" -eq 1 ]] || return 1
+  n="$(dbq "SELECT COUNT(*) FROM compliance_exempt WHERE media_id=$mid;" 2>/dev/null || echo 0)"
+  [[ "${n:-0}" -gt 0 ]]
+}
+
 cmd_apply() {
   init_schema
   local limit="${1:-0}"
   local limit_sql=""
   [[ "$limit" -gt 0 ]] && limit_sql="LIMIT $limit"
-  local applied=0 failed=0 skipped=0
+  local applied=0 failed=0 skipped=0 exentos=0
   local touched
   touched="$(mktemp)"
 
@@ -229,10 +240,22 @@ cmd_apply() {
         fi
         ;;
       *)
-        # avi/ts/otros: no hay herramienta de etiquetado in-place. NO se cambia el
-        # status a proposito: el pipeline de codecs los remuxea a mp4 tarde o temprano
-        # y entonces esta misma pasada los agarra. Marcarlos aqui los congelaria.
-        skipped=$((skipped + 1)); continue
+        # avi/ts/otros: no hay herramienta de etiquetado in-place. La idea original era
+        # dejarlos en 'detected' porque el pipeline de codecs los remuxearia a mp4 tarde
+        # o temprano y esta misma pasada los agarraria.
+        #
+        # ESO YA NO PASA (2026-08-21). Beren declaro exentos permanentes los 142 de
+        # contenedor viejo: nunca se van a remuxear. Los 127 .avi/.ts que quedaban aqui
+        # se reintentaban cada 30 min, para siempre, sin poder avanzar jamas. Si el
+        # archivo esta exento se le pone un estado terminal y sale de la cola; si NO
+        # lo esta, se mantiene el comportamiento viejo (espera al remux).
+        if es_exento_permanente "$media_id"; then
+          dbq "UPDATE audio_lang_detect SET status='exento_contenedor', error='contenedor sin etiquetado in-place y archivo exento permanente' WHERE media_id=$media_id AND stream_index=$stream_index;"
+          exentos=$((exentos + 1))
+        else
+          skipped=$((skipped + 1))
+        fi
+        continue
         ;;
     esac
 
@@ -266,8 +289,8 @@ ORDER BY d.media_id $limit_sql;")
   emby_notify "$touched"
   rm -f "$touched"
 
-  log "info" "apply: aplicados=$applied fallidos=$failed diferidos=$skipped"
-  echo "applied=$applied failed=$failed deferred=$skipped"
+  log "info" "apply: aplicados=$applied fallidos=$failed diferidos=$skipped exentos=$exentos"
+  echo "applied=$applied failed=$failed deferred=$skipped exempt=$exentos"
 }
 
 # Avisa a Emby de los archivos recien etiquetados.

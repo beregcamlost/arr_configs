@@ -112,3 +112,16 @@ CREATE TABLE IF NOT EXISTS emby_tag_state (
   tagged_ts  TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_emby_tag_state_tag ON emby_tag_state(tag);
+
+-- FASE 4: latido del worker de la 3090. Lo escribe tanda3090.py desde WSL en cada
+-- corrida --auto. mubuntu no puede alcanzar a berentendo por HTTP (es la 3090 la que
+-- viene a buscar trabajo), asi que sin esto "lleva tres dias apagada" y "mira cada hora
+-- y no hay nada que hacer" se ven identicos desde aqui: cero claims en ambos casos.
+CREATE TABLE IF NOT EXISTS worker_heartbeat (
+  worker      TEXT PRIMARY KEY,
+  last_seen   TEXT,
+  estado      TEXT,        -- libre | trabajando | gpu_ocupada
+  gpu_util    INTEGER,
+  gpu_mem_mb  INTEGER,
+  nota        TEXT
+);
