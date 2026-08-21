@@ -45,7 +45,8 @@ enqueue_codec() {
     # (INSERT OR IGNORE) y no bloquea el import: si el 3090 esta apagado, espera.
     local lang_sh="$(dirname "$CODEC_MGR")/lang_id.sh"
     if [ -x "$lang_sh" ]; then
-      STATE_DIR="$CODEC_STATE_DIR" timeout 120 bash "$lang_sh" enqueue >/dev/null 2>&1 \n        && log "LANGID encolado" || log "WARN: langid enqueue fallo (no fatal)"
+      STATE_DIR="$CODEC_STATE_DIR" timeout 120 bash "$lang_sh" enqueue >/dev/null 2>&1 \
+        && log "LANGID encolado" || log "WARN: langid enqueue fallo (no fatal)"
     fi
   else
     log "WARN: enqueue-import failed rc=$rc (non-fatal): $FINAL_FILE"
@@ -54,24 +55,14 @@ enqueue_codec() {
 }
 trap 'enqueue_codec' EXIT
 
-LOCK_FILE="/tmp/arr_remux_on_import.lock"
-exec 9>"$LOCK_FILE"
-flock -n 9 || exit 0
-
-[[ "$FILE" != *.mkv ]] && { log "SKIP(not-mkv): $FILE"; exit 0; }
+# --- 2. Basic gates (antes de cualquier lock: son solo lecturas) ---
 [ ! -f "$FILE" ] && { log "SKIP(missing): $FILE"; exit 0; }
+[[ "$FILE" != *.mkv ]] && { log "SKIP(not-mkv): $FILE"; exit 0; }
 
-# --- 2. Release group filter ---
-if [ ! -f "$PATTERNS_FILE" ]; then
-  log "WARN: patterns file missing at $PATTERNS_FILE — skipping all"
-  exit 0
-fi
-if ! grep -iF -f "$PATTERNS_FILE" <<< "$(basename "$FILE")" > /dev/null; then
-  log "SKIP(no-pattern-match): $FILE"
-  exit 0
-fi
-
-# --- 3. Safety gates ---
+# --- 3. Safety gates: aplican a la extraccion de sidecars Y al remux ---
+# Subs de imagen (PGS/VOBSUB) y ASS/SSA con estilos no pueden volverse .srt sin perder
+# informacion; los archivos con attachments (fuentes de ASS) tampoco se tocan. Salen
+# aqui: el trap EXIT ya los encolo y el planner decide que hacer con ellos.
 SUBS=$(ffprobe -v error -select_streams s -show_entries stream=codec_name -of csv=p=0 "$FILE" 2>/dev/null || true)
 if echo "$SUBS" | grep -qE 'hdmv_pgs|dvd_subtitle|dvdsub|pgssub|ass|ssa'; then
   log "SKIP(unsafe-subs: $SUBS): $FILE"
@@ -84,35 +75,72 @@ if [ "$ATTACH" -gt 0 ]; then
   exit 0
 fi
 
-VCODEC=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$FILE" 2>/dev/null || echo "")
-if [ "$VCODEC" = "av1" ]; then
-  log "SKIP(av1): $FILE"
+# --- 3.5 FASE 1.1: extraer subs de texto a sidecars en TODO import ---
+# Antes esto vivia despues del filtro de release-group, asi que un import que no
+# matcheaba patron se quedaba sin sidecars hasta que el carril lento lo agarrara.
+# Lock propio (NO el del remux): la extraccion demuxea el archivo entero, asi que un
+# season pack de 10 episodios en paralelo asfixiaria las 2 vCPU de mubuntu. Espera
+# hasta 60 s; si no hay turno se deja para la cola de codecs (que ahora marca estos
+# archivos como deembed_only al instante) en vez de bloquear a Sonarr.
+STEM="${FILE%.mkv}"
+SUB_COUNT=$(ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 "$FILE" 2>/dev/null | grep -c . || true)
+SUBS_SIDECARED=1
+if [ "${SUB_COUNT:-0}" -gt 0 ]; then
+  exec 8>"/tmp/arr_remux_extract.lock"
+  if flock -w 60 8; then
+    si=0
+    while [ "$si" -lt "$SUB_COUNT" ]; do
+      SLANG=$(ffprobe -v error -select_streams "s:$si" -show_entries stream_tags=language -of csv=p=0 "$FILE" 2>/dev/null || true)
+      [ -z "$SLANG" ] && SLANG="und"
+      SFORCED=$(ffprobe -v error -select_streams "s:$si" -show_entries stream_disposition=forced -of csv=p=0 "$FILE" 2>/dev/null || echo 0)
+      if [ "$SFORCED" = "1" ]; then SIDE="${STEM}.${SLANG}.forced.srt"; else SIDE="${STEM}.${SLANG}.srt"; fi
+      if [ -f "$SIDE" ]; then
+        log "KEEP existing sidecar (no clobber): $(basename "$SIDE")"
+      elif nice -n 10 ionice -c3 ffmpeg -hide_banner -loglevel error -y -i "$FILE" -map "0:s:$si" -c:s srt "$SIDE" </dev/null 2>>"$LOG" && [ -s "$SIDE" ]; then
+        log "EXTRACTED sub s:$si ($SLANG forced=$SFORCED) -> $(basename "$SIDE")"
+      else
+        rm -f "$SIDE"
+        SUBS_SIDECARED=0
+        log "WARN: extract sub s:$si failed"
+      fi
+      si=$((si + 1))
+    done
+    flock -u 8
+  else
+    SUBS_SIDECARED=0
+    log "WARN: extract lock ocupado >60s, sidecars quedan a la cola: $FILE"
+  fi
+fi
+
+# --- 3.6 Filtro de release-group: ahora SOLO decide el remux, ya no la extraccion ---
+if [ ! -f "$PATTERNS_FILE" ]; then
+  log "WARN: patterns file missing at $PATTERNS_FILE - no remux"
+  exit 0
+fi
+if ! grep -iF -f "$PATTERNS_FILE" <<< "$(basename "$FILE")" > /dev/null; then
+  log "SKIP-REMUX(no-pattern-match, sidecars ya hechos): $FILE"
   exit 0
 fi
 
-# --- 3.5 Extract embedded text subs to external sidecars (sidecar = standard) ---
-# Sidecars load instantly in Emby Web; embedded text subs force a slow on-the-fly
-# ffmpeg extraction at playback. Image/styled subs were already excluded by the gate
-# above, so every subtitle stream here is text and extracts cleanly to .srt.
-STEM="${FILE%.mkv}"
-SUB_COUNT=$(ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 "$FILE" 2>/dev/null | grep -c . || true)
-if [ "${SUB_COUNT:-0}" -gt 0 ]; then
-  si=0
-  while [ "$si" -lt "$SUB_COUNT" ]; do
-    SLANG=$(ffprobe -v error -select_streams "s:$si" -show_entries stream_tags=language -of csv=p=0 "$FILE" 2>/dev/null || true)
-    [ -z "$SLANG" ] && SLANG="und"
-    SFORCED=$(ffprobe -v error -select_streams "s:$si" -show_entries stream_disposition=forced -of csv=p=0 "$FILE" 2>/dev/null || echo 0)
-    if [ "$SFORCED" = "1" ]; then SIDE="${STEM}.${SLANG}.forced.srt"; else SIDE="${STEM}.${SLANG}.srt"; fi
-    if [ -f "$SIDE" ]; then
-      log "KEEP existing sidecar (no clobber): $(basename "$SIDE")"
-    elif ffmpeg -hide_banner -loglevel error -y -i "$FILE" -map "0:s:$si" -c:s srt "$SIDE" </dev/null 2>>"$LOG" && [ -s "$SIDE" ]; then
-      log "EXTRACTED sub s:$si ($SLANG forced=$SFORCED) -> $(basename "$SIDE")"
-    else
-      rm -f "$SIDE"; log "WARN: extract sub s:$si failed (non-fatal)"
-    fi
-    si=$((si + 1))
-  done
+VCODEC=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$FILE" 2>/dev/null || echo "")
+if [ "$VCODEC" = "av1" ]; then
+  log "SKIP-REMUX(av1, sidecars ya hechos): $FILE"
+  exit 0
 fi
+
+# GUARDA DE PERDIDA DE DATOS: el remux mapea solo 0:v y 0:a, o sea que TIRA los subs.
+# Si la extraccion no dejo todos los sidecars, remuxear seria perder subtitulos para
+# siempre. Entonces no se remuxea: queda en mkv y la cola (deembed_only) lo resuelve.
+if [ "${SUB_COUNT:-0}" -gt 0 ] && [ "$SUBS_SIDECARED" -ne 1 ]; then
+  log "SKIP-REMUX(sidecars incompletos, no tiro subs): $FILE"
+  exit 0
+fi
+
+# --- 3.7 Lock del remux: la parte cara. Si esta ocupado el archivo ya salio con sus
+# sidecars, y la cola de codecs se encarga del contenedor. ---
+LOCK_FILE="/tmp/arr_remux_on_import.lock"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { log "SKIP-REMUX(lock ocupado, sidecars ya hechos): $FILE"; exit 0; }
 
 # --- 4. Remux (video+audio only; subs are now sidecars, never embedded) ---
 MP4="${FILE%.mkv}.mp4"

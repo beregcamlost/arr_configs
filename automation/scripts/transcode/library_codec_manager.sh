@@ -1412,7 +1412,14 @@ ORDER BY m.path${where_limit};
       skip_reason="missing_file"
     elif [[ "$probe_ok" -ne 1 ]]; then
       skip_reason="probe_failed"
-    elif [[ "$total_a" -ge 2 && "${spa_a:-0}" -ge 1 ]]; then
+    elif [[ "${spa_a:-0}" -ge 1 ]]; then
+      # AUDIO EN ESPANOL PROTEGIDO. Ampliado el 2026-08-21 por orden de Beren:
+      # "no toques nada que tenga esp latino de ninguna forma". Antes la condicion
+      # exigia total_a>=2, asi que 213 archivos con UNA sola pista en espanol
+      # quedaban expuestos a un transcode que los habria bajado a estereo.
+      if [[ "$total_a" -lt 2 ]]; then
+        skip_reason="audio_es_protegido"
+      else
       # DUAL LATINO PROTEGIDO (2026-08-21, regla de Beren: "nada que sea dual audio
       # que tenga latino se toca"). La conversion re-encodea el audio con -c:a aac -ac 2,
       # o sea DOWNMIX FORZADO A ESTEREO: un dual con pista latina en AC3 5.1 sale en
@@ -1420,7 +1427,8 @@ ORDER BY m.path${where_limit};
       # Stargate Atlantis o Black Widows costo mucho conseguirlo y no se re-descarga.
       # Se evalua ANTES que los demas motivos para que quede como decision explicita
       # y no como deuda pendiente.
-      skip_reason="dual_latino_protegido"
+        skip_reason="dual_latino_protegido"
+      fi
     elif [[ "$has_hdr" -eq 1 ]]; then
       skip_reason="hdr_skipped"
     elif [[ "$max_w" -ge 3840 || "$max_h" -ge 2160 ]]; then
@@ -2835,10 +2843,15 @@ enqueue_import_cmd() {
     target_container="$DEFAULT_TARGET_CONTAINER"
   fi
 
-  if [[ "$total_a" -ge 2 && "${spa_a:-0}" -ge 1 ]]; then
+  if [[ "${spa_a:-0}" -ge 1 ]]; then
     # DUAL LATINO PROTEGIDO — ver la nota extensa en plan_cmd. Un import nuevo con
     # pista latina no entra a la cola: la conversion haria downmix a estereo.
-    skip_reason="dual_latino_protegido"
+    if [[ "$total_a" -ge 2 ]]; then
+      skip_reason="dual_latino_protegido"
+    else
+      # Ampliado 2026-08-21: una sola pista en espanol tambien se protege.
+      skip_reason="audio_es_protegido"
+    fi
     log "info" "enqueue-import: dual latino protegido, no se toca: $path"
   elif [[ "$has_hdr" -eq 1 ]]; then
     skip_reason="hdr_skipped"
@@ -2862,6 +2875,19 @@ enqueue_import_cmd() {
     else
       reason="needs_transcode"
     fi
+  fi
+
+  # CONTAINER-HYGIENE EN EL CARRIL RAPIDO (FASE 1.1b, 2026-08-21). plan_cmd ya hacia
+  # esta comprobacion pero enqueue-import no, asi que un import nuevo con subs de texto
+  # embebidos se marcaba already_compliant y esperaba al audit de las 03:00 + plan de
+  # las 03:45: hasta ~9 h fuera del estandar. Caso real que lo destapo: HELL MODE S02E08,
+  # importado 2026-08-21 17:52 con pista ASS embebida y plan already_compliant.
+  if [[ "$skip_reason" == "already_compliant" ]] && container_has_embedded_text_subs "$media_id" "$path"; then
+    skip_reason=""
+    eligible=1
+    reason="deembed_only"
+    priority=0
+    log "info" "enqueue-import: subs de texto embebidos -> elegible (deembed): $path"
   fi
 
   # Check if already has a conversion_plan row
