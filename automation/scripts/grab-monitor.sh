@@ -185,7 +185,7 @@ process_app() {
 
   # Fetch grabbed history — pre-load to file to avoid stdin consumption in loops
   if ! curl -sS \
-      "${base_url}/api/v3/history?eventType=1&pageSize=50&sortKey=date&sortDirection=descending&apikey=${api_key}" \
+      "${base_url}/api/v3/history?eventType=1&pageSize=200&sortKey=date&sortDirection=descending&apikey=${api_key}" \
       -o "$_TMP_RESPONSE" </dev/null; then
     log "[$app] history fetch failed"
     return 0
@@ -219,8 +219,8 @@ process_app() {
 
   local rec_count
   rec_count="$(jq '.records | length' "$_TMP_RESPONSE" 2>/dev/null || echo 0)"
-  if [[ "$rec_count" -ge 50 ]]; then
-    log "[$app] WARNING: hit pageSize=50 limit — some recent grabs may have been missed"
+  if [[ "$rec_count" -ge 200 ]]; then
+    log "[$app] WARNING: hit pageSize=200 limit — some recent grabs may have been missed"
   fi
 
   if [[ "$count" -eq 0 ]]; then

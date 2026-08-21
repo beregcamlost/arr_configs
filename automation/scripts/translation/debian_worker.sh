@@ -67,11 +67,13 @@ SELECT path FROM (
   FROM table_episodes
   WHERE missing_subtitles LIKE '%es%'
     AND path IS NOT NULL AND path != ''
+    AND path LIKE '%.mkv'
   UNION ALL
   SELECT path, audio_language, missing_subtitles
   FROM table_movies
   WHERE missing_subtitles LIKE '%es%'
     AND path IS NOT NULL AND path != ''
+    AND path LIKE '%.mkv'
 ) combined
 ORDER BY RANDOM()
 LIMIT ${limit};"
