@@ -605,3 +605,26 @@ jobs:
     on_failure: solo log; la vista cae a los valores por defecto (4 min/GB)
     depends_on: conversion_runs con al menos 10 corridas exitosas en 45 dias
     safe_to_disable: yes (la ETA se queda con la ultima calibracion)
+
+  - id: compliance_daily_report
+    schedule: "30 12 * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/compliance_daily_report.lock
+      /bin/bash -c 'set -a; . /config/berenstuff/.env; set +a;
+      exec python3 /config/berenstuff/automation/scripts/transcode/compliance_daily_report.py'
+    log: /config/berenstuff/automation/logs/compliance_daily_report.log
+    purpose: >-
+      FASE 5: correo diario a Beren con lo que entro en 24 h, lo que se ajusto
+      solo, lo que esta oculto AHORA y hace cuanto, lo que fallo, y el ultimo
+      latido de la 3090. Lee de la vista compliance_state y de conversion_runs;
+      no mantiene estado propio. HTML via sendmail.py --html.
+      HORARIO: 12:30 UTC = 08:30 de Beren (berentendo va en UTC-4, mubuntu en
+      UTC). A esa hora el audit de las 03:00, el plan de las 03:45 y los backups
+      de las 03:09 ya cerraron, asi que el informe cubre la noche completa.
+    runtime_typical: 3-8s
+    timeout_hard: none (flock previene solape)
+    state_db: /APPBOX_DATA/storage/.transcode-state-media/library_codec_state.db (solo lectura)
+    lock: /tmp/compliance_daily_report.lock
+    on_failure: rc distinto de 0 y linea ERROR en el log; no reintenta hasta el dia siguiente
+    depends_on: GMAIL_USER/GMAIL_APP_PASSWORD en .env, vista compliance_state, sendmail.py
+    safe_to_disable: yes (solo se pierde el informe; nada del pipeline depende de el)
