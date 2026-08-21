@@ -1377,7 +1377,8 @@ SELECT m.id,m.path,m.container,
        COALESCE(ps_agg.compliant_v,0),
        COALESCE(ps_agg.total_v,0),
        COALESCE(ps_agg.good_a,0),
-       COALESCE(ps_agg.total_a,0)
+       COALESCE(ps_agg.total_a,0),
+       COALESCE(ps_agg.spa_a,0)
 FROM media_files m
 LEFT JOIN audit_status a ON a.media_id=m.id
 LEFT JOIN (
@@ -1388,13 +1389,14 @@ LEFT JOIN (
          SUM(CASE WHEN stream_type='video' AND codec IN ($codec_list_sql) AND pix_fmt='yuv420p' THEN 1 ELSE 0 END) AS compliant_v,
          SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END) AS total_v,
          SUM(CASE WHEN stream_type='audio' AND codec IN ('aac','ac3') AND channels<=2 THEN 1 ELSE 0 END) AS good_a,
-         SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END) AS total_a
+         SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END) AS total_a,
+         SUM(CASE WHEN stream_type='audio' AND LOWER(language) IN ('spa','es','lat','esp','es-la','spa-la','la','lat-am') THEN 1 ELSE 0 END) AS spa_a
   FROM probe_streams
   GROUP BY media_id
 ) ps_agg ON ps_agg.media_id=m.id
 WHERE m.deleted_at IS NULL
 ORDER BY m.path${where_limit};
-" | while IFS=$'\t' read -r media_id path container exists_flag probe_ok max_w max_h has_hdr compliant_v total_v good_a total_a; do
+" | while IFS=$'\t' read -r media_id path container exists_flag probe_ok max_w max_h has_hdr compliant_v total_v good_a total_a spa_a; do
 
     local eligible=0 reason="" skip_reason=""
     local target_container="$container"
@@ -1410,6 +1412,15 @@ ORDER BY m.path${where_limit};
       skip_reason="missing_file"
     elif [[ "$probe_ok" -ne 1 ]]; then
       skip_reason="probe_failed"
+    elif [[ "$total_a" -ge 2 && "${spa_a:-0}" -ge 1 ]]; then
+      # DUAL LATINO PROTEGIDO (2026-08-21, regla de Beren: "nada que sea dual audio
+      # que tenga latino se toca"). La conversion re-encodea el audio con -c:a aac -ac 2,
+      # o sea DOWNMIX FORZADO A ESTEREO: un dual con pista latina en AC3 5.1 sale en
+      # estereo y el surround no vuelve salvo por el backup. Material como El Pueblo,
+      # Stargate Atlantis o Black Widows costo mucho conseguirlo y no se re-descarga.
+      # Se evalua ANTES que los demas motivos para que quede como decision explicita
+      # y no como deuda pendiente.
+      skip_reason="dual_latino_protegido"
     elif [[ "$has_hdr" -eq 1 ]]; then
       skip_reason="hdr_skipped"
     elif [[ "$max_w" -ge 3840 || "$max_h" -ge 2160 ]]; then
@@ -1671,8 +1682,41 @@ verify_transcoded_file() {
   if awk -v d="$dur_delta" 'BEGIN{exit (d<=2.5)?0:1}'; then
     :
   else
-    echo "duration_delta_too_high:$dur_delta"
-    return 1
+    # FALLBACK (2026-08-15) - cabeceras de duracion mentirosas en rips viejos.
+    # Algunos SDTV/avi declaran en format=duration un valor que NO corresponde al
+    # contenido real. Visto en Slayers S01E01: header dice 1354.220s, pero el conteo
+    # real da 32232 paquetes @ 24000/1001 fps = 1344.4s -> 9.86s de mentira.
+    # El remux escribe la duracion CORRECTA; el guard la comparaba contra la
+    # INCORRECTA y descartaba un resultado bueno, 30 veces por archivo.
+    # Coste medido: 153 de ~214 conversiones en 24h (71% del worker) quemadas en
+    # 6 episodios condenados de antemano.
+    # Aqui se pide una segunda opinion: recontar los paquetes del ORIGEN, que es la
+    # fuente de verdad. La tolerancia de 2.5s NO se toca - solo se corrige CONTRA QUE
+    # se compara. Si el destino de verdad quedo truncado, el reconteo tambien falla
+    # y se rechaza igual que antes, asi que no se pierde la proteccion.
+    # El -count_packets demuxea el archivo entero, por eso vive SOLO en esta rama:
+    # se paga nada mas cuando la comparacion barata ya fallo.
+    local src_fps_raw src_pkts src_pkt_dur pkt_delta
+    src_fps_raw="$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate       -of default=nw=1:nk=1 "$src" </dev/null 2>/dev/null | head -1)"
+    src_pkts="$(ffprobe -v error -select_streams v:0 -count_packets       -show_entries stream=nb_read_packets -of default=nw=1:nk=1 "$src" </dev/null 2>/dev/null | head -1)"
+    src_pkt_dur="$(awk -v fr="$src_fps_raw" -v n="$src_pkts" 'BEGIN{
+      split(fr, p, "/");
+      den = (p[2] == "" ? 1 : p[2]);
+      if (p[1] + 0 <= 0 || den + 0 <= 0 || n + 0 <= 0) { print ""; exit }
+      printf "%.3f", n * den / p[1]
+    }')"
+
+    pkt_delta=""
+    if [[ -n "$src_pkt_dur" ]]; then
+      pkt_delta="$(awk -v a="$src_pkt_dur" -v b="$dst_dur" 'BEGIN{d=a-b; if(d<0)d=-d; printf "%.3f", d}')"
+    fi
+
+    if [[ -n "$pkt_delta" ]] && awk -v d="$pkt_delta" 'BEGIN{exit (d<=2.5)?0:1}'; then
+      log "info" "duration header unreliable (header_delta=${dur_delta}s, pkt_delta=${pkt_delta}s, src_pkt_dur=${src_pkt_dur}s) - accepting: $src"
+    else
+      echo "duration_delta_too_high:$dur_delta"
+      return 1
+    fi
   fi
 
   [[ "$v_ok" -eq 1 ]] || { echo "video_codec_validation_failed"; return 1; }
@@ -2146,7 +2190,15 @@ container_has_embedded_text_subs() {
 # No-clobber (never overwrites an existing sidecar). Non-fatal: always returns 0.
 extract_profile_subtitle_sidecars() {
   local src="$1" profile_set="$2"
-  [[ -z "$profile_set" || ! -f "$src" ]] && return 0
+  [[ ! -f "$src" ]] && return 0
+  # FAIL-SAFE (2026-08-16): antes, un profile_set VACIO hacia return 0 sin extraer nada,
+  # pero la conversion descarta igual los subs de texto -> PERDIDA DE DATOS silenciosa.
+  # Danos medidos: 40 archivos (Slayers S01 x20, Those Who Hunt Elves S01 x12,
+  # Fog Hill x7, Lucky S01E06) se quedaron sin subs Y sin sidecar. Evidencia en el log:
+  # "Profile langs media_id=2777 type=series ref=4732 profile=" (vacio).
+  # Ahora: si no sabemos el perfil, se extrae TODO sub de texto. No saber nunca puede
+  # significar tirar datos. Esta funcion solo CREA sidecars (no-clobber) y nunca borra,
+  # asi que el peor caso es un sidecar de mas, no uno de menos.
   command -v ffprobe >/dev/null 2>&1 || return 0
 
   local dir stem
@@ -2171,8 +2223,11 @@ extract_profile_subtitle_sidecars() {
   while IFS=$'\t' read -r idx codec lang forced hi; do
     [[ -z "$idx" ]] && continue
     [[ "$text_codecs" == *" $codec "* ]] || continue          # text codecs only
-    lang_in_set_inline "$lang" "$profile_set" || continue     # profile languages only
-    [[ "$lang" == "und" ]] && continue
+    if [[ -n "$profile_set" ]]; then
+      lang_in_set_inline "$lang" "$profile_set" || continue   # profile languages only
+      [[ "$lang" == "und" ]] && continue
+    fi
+    # Sin perfil conocido no se filtra por idioma: preservar gana a ser selectivo.
 
     # Normalize 3-letter ISO to the 2-letter code Bazarr/Emby use for sidecar discovery.
     local lang2="$lang"
@@ -2757,8 +2812,8 @@ enqueue_import_cmd() {
   rm -f "$tmp_json" "$tmp_err"
 
   # Evaluate plan eligibility (same logic as plan_cmd, single row)
-  local max_w max_h has_hdr h264_v total_v good_a total_a
-  IFS=$'\t' read -r max_w max_h has_hdr h264_v total_v good_a total_a < <(
+  local max_w max_h has_hdr h264_v total_v good_a total_a spa_a
+  IFS=$'\t' read -r max_w max_h has_hdr h264_v total_v good_a total_a spa_a < <(
     db -separator $'\t' "SELECT
       COALESCE(MAX(CASE WHEN stream_type='video' THEN width ELSE 0 END),0),
       COALESCE(MAX(CASE WHEN stream_type='video' THEN height ELSE 0 END),0),
@@ -2766,7 +2821,8 @@ enqueue_import_cmd() {
       COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' AND pix_fmt='yuv420p' THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='audio' AND codec IN ('aac','ac3') AND channels<=2 THEN 1 ELSE 0 END),0),
-      COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0)
+      COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='audio' AND LOWER(language) IN ('spa','es','lat','esp','es-la','spa-la','la','lat-am') THEN 1 ELSE 0 END),0)
     FROM probe_streams WHERE media_id=$media_id;"
   )
 
@@ -2779,7 +2835,12 @@ enqueue_import_cmd() {
     target_container="$DEFAULT_TARGET_CONTAINER"
   fi
 
-  if [[ "$has_hdr" -eq 1 ]]; then
+  if [[ "$total_a" -ge 2 && "${spa_a:-0}" -ge 1 ]]; then
+    # DUAL LATINO PROTEGIDO — ver la nota extensa en plan_cmd. Un import nuevo con
+    # pista latina no entra a la cola: la conversion haria downmix a estereo.
+    skip_reason="dual_latino_protegido"
+    log "info" "enqueue-import: dual latino protegido, no se toca: $path"
+  elif [[ "$has_hdr" -eq 1 ]]; then
     skip_reason="hdr_skipped"
   elif [[ "$max_w" -ge 3840 || "$max_h" -ge 2160 ]]; then
     skip_reason="uhd_skipped"
