@@ -59,6 +59,16 @@ def emby(path, **params):
         return json.loads(raw) if raw else None
 
 
+def emby_post(path, **params):
+    """Emby's Refresh endpoints only answer to POST; a GET returns 404."""
+    params["api_key"] = os.environ["EMBY_API_KEY"]
+    url = "%s%s?%s" % (os.environ["EMBY_URL"], path, urllib.parse.urlencode(params))
+    req = urllib.request.Request(url, method="POST", data=b"",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return r.status
+
+
 def playing_now():
     """Paths currently being watched - those are left alone."""
     busy = set()
@@ -113,6 +123,8 @@ def move_one(t):
 def wait_for_scan(timeout=1800):
     """Emby re-indexes in the background; the watch state has nowhere to land
     until it has finished, so wait for the task instead of guessing a sleep."""
+    time.sleep(15)          # Emby tarda un momento en registrar la tarea:
+                            # preguntar de inmediato responde "ya no hay nada"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -156,7 +168,7 @@ def apply_moves(targets, dry_run=True):
             log("  [FALLO] %s: %s" % (t["title"], e))
 
     if moved:
-        emby("/Library/Refresh")
+        emby_post("/Library/Refresh")
         wait_for_scan()
         applied, missing = eud.restore(os.environ["EMBY_URL"], os.environ["EMBY_API_KEY"],
                                        before, LIB_IDS, report=log)
