@@ -23,6 +23,7 @@ from streaming.arr_client import (
     fetch_series,
 )
 from streaming.config import load_config
+from streaming.media_shelf import classify as classify_shelf, shelf_path
 from streaming.discord import GREEN, ORANGE, send_embed
 from streaming.streaming_api_client import search_catalog
 
@@ -36,14 +37,8 @@ ANIMATED_GENRES = {"animation", "anime"}
 TRENDING_SERVICES = ["apple", "paramount", "hbo"]
 
 # Root folders and quality profiles
-RADARR_ROOTS = {
-    "movies": "/APPBOX_DATA/storage/media/movies",
-    "moviesanimated": "/APPBOX_DATA/storage/media/moviesanimated",
-}
-SONARR_ROOTS = {
-    "tv": "/APPBOX_DATA/storage/media/tv",
-    "tvanimated": "/APPBOX_DATA/storage/media/tvanimated",
-}
+# Root folders come from media_shelf.classify() — the same rule the nightly
+# librarian uses, so a title lands where the librarian would put it anyway.
 RADARR_QUALITY_PROFILE = 1  # HD-1080p
 SONARR_QUALITY_PROFILE = 4  # HD-1080p
 
@@ -52,8 +47,7 @@ _TYPE_CONFIG = {
     "movie": {
         "add_fn": add_movie,
         "quality_profile": RADARR_QUALITY_PROFILE,
-        "roots": RADARR_ROOTS,
-        "root_keys": ("moviesanimated", "movies"),
+        "kind": "movie",
         "url_attr": "radarr_url",
         "key_attr": "radarr_key",
         "tag_key": "radarr",
@@ -61,13 +55,20 @@ _TYPE_CONFIG = {
     "series": {
         "add_fn": add_series,
         "quality_profile": SONARR_QUALITY_PROFILE,
-        "roots": SONARR_ROOTS,
-        "root_keys": ("tvanimated", "tv"),
+        "kind": "tv",
         "url_attr": "sonarr_url",
         "key_attr": "sonarr_key",
         "tag_key": "sonarr",
     },
 }
+
+
+def _ensure_shelf(root):
+    """Create the shelf folder the first time a new category shows up."""
+    path = Path(root)
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=True)
+        log.info("Created new shelf folder: %s", root)
 
 
 def _is_animated(genres):
@@ -149,8 +150,7 @@ def _add_items(cfg, items, show_type, seen_ids, tag_ids, dry_run):
     tc = _TYPE_CONFIG[show_type]
     add_fn = tc["add_fn"]
     quality_profile = tc["quality_profile"]
-    roots = tc["roots"]
-    animated_key, normal_key = tc["root_keys"]
+    kind = tc["kind"]
     arr_url = getattr(cfg, tc["url_attr"])
     arr_key = getattr(cfg, tc["key_attr"])
     tag_id = tag_ids.get(tc["tag_key"], 0)
@@ -172,9 +172,10 @@ def _add_items(cfg, items, show_type, seen_ids, tag_ids, dry_run):
             skipped.append(item)
             continue
 
-        animated = _is_animated(item.get("genres", []))
-        root = roots[animated_key if animated else normal_key]
-        label = "animated " if animated else ""
+        shelf, why = classify_shelf(kind, tmdb_id, genre_names=item.get("genres", []))
+        root = shelf_path(shelf)
+        _ensure_shelf(root)
+        label = f"{shelf} ({why}) "
 
         if dry_run:
             log.info("[DRY RUN] Would add %s%s: %s (%s) → %s", label, show_type, title, year, root)
@@ -227,7 +228,7 @@ def _notify_results(cfg, all_added, all_skipped, all_failed, services, dry_run,
     if all_added:
         lines = []
         for item in all_added[:20]:
-            animated = "🎌 " if _is_animated(item.get("genres", [])) else ""
+            animated = "🎌 " if _is_animated(item.get("genres", [])) else ""  # noqa: E501
             typ = "🎬" if item.get("show_type") == "movie" else "📺"
             lines.append(f"{typ} {animated}`{item['title']}` ({item.get('year', '?')})")
         if len(all_added) > 20:

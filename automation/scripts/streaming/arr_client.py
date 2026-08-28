@@ -15,14 +15,12 @@ def _detect_library(path, media_type):
     """Detect library name from file path."""
     if not path:
         return media_type
-    if media_type == "movie":
-        if "/moviesanimated/" in path:
-            return "moviesanimated"
-        return "movies"
-    else:
-        if "/tvanimated/" in path:
-            return "tvanimated"
-        return "tv"
+    # The library is the folder right under /media/ (movies, moviesanime,
+    # tvdonghua, ...), so new shelves need no code change here.
+    marker = "/media/"
+    if marker in path:
+        return path.split(marker, 1)[1].split("/", 1)[0]
+    return "movies" if media_type == "movie" else "tv"
 
 
 def fetch_movies(radarr_url, api_key):

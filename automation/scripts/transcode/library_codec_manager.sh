@@ -640,7 +640,7 @@ _load_candidate_paths() {
 # Resolve a media file path to its series/movie directory (pure bash, no subprocess).
 _resolve_match_dir() {
   local filepath="$1"
-  if [[ "$filepath" == *"/tv/"* || "$filepath" == *"/tvanimated/"* ]]; then
+  if [[ "$filepath" == *"/tv/"* || "$filepath" == */tv[a-z]*/* ]]; then
     if [[ "$filepath" == *"/Season "* ]]; then
       printf '%s' "${filepath%%/Season [0-9]*}"
     else
@@ -1846,7 +1846,7 @@ select_audio_streams_for_conversion() {
   # ANIME-JPN-GUARD (2026-07-28): in animated libraries the Japanese original
   # audio must never be dropped and should be the default track.
   local is_animated=0
-  case "$src" in */tvanimated/*|*/moviesanimated/*) is_animated=1 ;; esac
+  case "$src" in */tv[a-z]*/*|*/movies[a-z]*/*) is_animated=1 ;; esac
 
   rows="$(ffprobe -v error -show_entries stream=index,codec_type:stream_tags=language:stream_disposition=default -of json "$src" 2>/dev/null \
     | jq -r '
@@ -2001,7 +2001,7 @@ add_keeplocal_tag() {
   local tag_id media_id
 
   case "$src" in
-    */media/tv/*|*/media/tvanimated/*)
+    */media/tv/*|*/media/tv[a-z]*/*)
       local sonarr_db="/config/.config/Sonarr/sonarr.db"
       local sonarr_key
       sonarr_key=$(grep -oP "(?<=<ApiKey>)[^<]+" /config/.config/Sonarr/config.xml 2>/dev/null) || return 0
@@ -2027,7 +2027,7 @@ print(json.load(sys.stdin).get('id', ''))
         -d "{\"seriesIds\":[$media_id],\"tags\":[$tag_id],\"applyTags\":\"add\"}" \
         >/dev/null 2>&1 || true
       ;;
-    */media/movies/*|*/media/moviesanimated/*)
+    */media/movies/*|*/media/movies[a-z]*/*)
       local radarr_db radarr_config radarr_key
       radarr_db=$(find /config -name "radarr.db" -maxdepth 6 2>/dev/null | head -1)
       [ -z "$radarr_db" ] && return 0

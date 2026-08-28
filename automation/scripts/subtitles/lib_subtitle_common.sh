@@ -99,13 +99,13 @@ sql_escape() {
 # Returns 0 (true) if the path is a TV series path
 is_tv_path() {
   local p="$1"
-  [[ "$p" == *"/tv/"* || "$p" == *"/tvanimated/"* ]]
+  [[ "$p" == *"/tv/"* || "$p" == */tv[a-z]*/* ]]
 }
 
 # Returns 0 (true) if the path is a movie path
 is_movie_path() {
   local p="$1"
-  [[ "$p" == *"/movies/"* || "$p" == *"/moviesanimated/"* ]]
+  [[ "$p" == *"/movies/"* || "$p" == */movies[a-z]*/* ]]
 }
 
 # ---------------------------------------------------------------------------

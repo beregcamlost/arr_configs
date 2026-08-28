@@ -117,10 +117,10 @@ resolve_profile_langs_by_path() {
   local path="$1" pid="" items="" q
   q="$(sql_quote "$path")"
   case "$path" in
-    */tv/*|*/tvanimated/*)
+    */tv/*|*/tv[a-z]*/*)
       pid="$(sqlite3 -cmd '.timeout 5000' "$BAZARR_DB" \
         "SELECT s.profileId FROM table_episodes e JOIN table_shows s ON s.sonarrSeriesId=e.sonarrSeriesId WHERE e.path='$q' LIMIT 1;" 2>/dev/null)" ;;
-    */movies/*|*/moviesanimated/*)
+    */movies/*|*/movies[a-z]*/*)
       pid="$(sqlite3 -cmd '.timeout 5000' "$BAZARR_DB" \
         "SELECT profileId FROM table_movies WHERE path='$q' LIMIT 1;" 2>/dev/null)" ;;
   esac
