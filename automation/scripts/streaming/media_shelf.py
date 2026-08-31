@@ -10,11 +10,17 @@ Shelves, per media kind:
     moviesdonghua / tvdonghua   Chinese animation
     moviesaeni / tvaeni         Korean animation
 
-The asian split is by ORIGINAL LANGUAGE, not production country: a Japanese
+The split is by ORIGINAL LANGUAGE, not production country: a Japanese
 co-production credit does not make a French film anime (The Red Turtle), and a
 Ghibli distribution deal does not either. For series only, the broadcasting
 country breaks the tie when the language does not — an anime commissioned in
 English still airs on TV Tokyo (Lazarus).
+
+Spanish is deliberately NOT here. "Animation in Spanish" is almost always
+animation *dubbed* into Spanish, which is an availability, not a category: the
+same film has to keep living on Anime or Animación for everyone who watches it
+in Japanese. That axis is served by the virtual shelves in es_shelf.py, which
+cut across every folder without moving a file.
 """
 import json, os, pathlib, time, urllib.request
 
