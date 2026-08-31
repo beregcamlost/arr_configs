@@ -16,8 +16,9 @@ de ENLACES SIMBÓLICOS fuera de /media, publicado como biblioteca aparte.
     sentidos, también episodio por episodio.
   * ExcludeFromSearch evita que la copia salga doble al buscar.
   * MediaSources sigue en 1, así que el reproductor no ofrece dos versiones.
-  * Sin CollectionType la biblioteca es MIXTA: Emby detecta solo qué carpeta es
-    película y cuál es serie. Un estante por idea, no uno por tipo.
+  * Beren prefiere películas y series en estantes distintos, así que cada
+    combinación lleva su CollectionType. Emby soporta bibliotecas mixtas
+    (probado), y si algún día quiere la mitad de tiles, es cambiar SHELVES.
 
 Nada de esto toca /APPBOX_DATA/storage/media, que es lo único que miran el
 librarian, Radarr/Sonarr, Bazarr y los cron de transcode.
@@ -35,14 +36,21 @@ ANIMATED_SHELVES = {"moviesanimated", "moviesanime", "moviesdonghua", "moviesaen
                     "tvanimated", "tvanime", "tvdonghua", "tvaeni"}
 
 SHELVES = {
-    "es":      {"name": "En Español"},
-    "es-anim": {"name": "Animación en Español"},
+    "es-movies":      {"name": "Películas en Español",       "kind": "Movie",
+                       "type": "movies",  "animated": False},
+    "es-movies-anim": {"name": "Animación en Español",        "kind": "Movie",
+                       "type": "movies",  "animated": True},
+    "es-tv":          {"name": "Series en Español",           "kind": "Episode",
+                       "type": "tvshows", "animated": False},
+    "es-tv-anim":     {"name": "Series Animadas en Español",  "kind": "Episode",
+                       "type": "tvshows", "animated": True},
 }
 
 # Por debajo de esto un estante no se gana un tile propio: lo que hay se
-# encuentra igual en el estante de arriba, y doce carpetas en el home cuestan
-# mas de lo que valen tres titulos.
-MIN_TITLES = 12
+# encuentra igual en el estante de arriba, y una fila larga de carpetas en el
+# home cuesta mas de lo que valen unos pocos titulos. Es la unica palanca que
+# frena el crecimiento cuando cada idea se abre en pelicula y serie.
+MIN_TITLES = 8
 
 U = os.environ["EMBY_URL"].rstrip("/")
 K = os.environ["EMBY_API_KEY"]
@@ -85,6 +93,7 @@ def title_dir(path):
 def wanted(uid):
     """{clave de estante: {carpeta: ruta}} para todo lo que tiene audio en espanol."""
     out = {k: {} for k in SHELVES}
+    index = {(s["kind"], s["animated"]): k for k, s in SHELVES.items()}
     for kind in ("Movie", "Episode"):
         items = api("GET", f"/Users/{uid}/Items", Recursive="true", IncludeItemTypes=kind,
                     Fields="MediaStreams,Path", Limit=50000)["Items"]
@@ -94,7 +103,7 @@ def wanted(uid):
             d, shelf = title_dir(it.get("Path"))
             if not d:
                 continue
-            out["es-anim" if shelf in ANIMATED_SHELVES else "es"][d.name] = d
+            out[index[(kind, shelf in ANIMATED_SHELVES)]][d.name] = d
     return out
 
 
@@ -122,14 +131,15 @@ def library(name):
     return next((v for v in api("GET", "/Library/VirtualFolders") if v["Name"] == name), None)
 
 
-def ensure_library(sub, name):
-    """Crea la biblioteca mixta si falta y deja ExcludeFromSearch puesto."""
-    cur = library(name)
+def ensure_library(sub, spec):
+    """Crea la biblioteca si falta y deja ExcludeFromSearch puesto."""
+    cur = library(spec["name"])
     created = False
     if cur is None:
-        api("POST", "/Library/VirtualFolders", None, Name=name,
-            Paths=str(VIRTUAL_ROOT / sub), RefreshLibrary="false")
-        cur = library(name)
+        api("POST", "/Library/VirtualFolders", None, Name=spec["name"],
+            CollectionType=spec["type"], Paths=str(VIRTUAL_ROOT / sub),
+            RefreshLibrary="false")
+        cur = library(spec["name"])
         created = True
     opts = dict(cur["LibraryOptions"])
     if not opts.get("ExcludeFromSearch"):
@@ -161,7 +171,7 @@ def main():
                   f"{', estante retirado' if gone else ', sin estante'}")
             continue
         added, removed = sync_links(sub, want)
-        lib_id, created = ensure_library(sub, spec["name"])
+        lib_id, created = ensure_library(sub, spec)
         changed = changed or bool(added or removed or created)
         print(f"{spec['name']:24} {len(want):4} titulos  (+{added} -{removed})"
               f"{'  [estante creado]' if created else ''}")
