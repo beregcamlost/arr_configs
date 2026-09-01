@@ -44,6 +44,12 @@ ESTANTES = [
 ]
 CATCH_ALL = ("Películas", "Series")
 
+# Estantes que NO llevan tile aunque pasen el minimo, por decision y no por tamaño
+# (31-ago-2026: "el home sigue siendo mucho"). Su contenido ya esta dentro del padre
+# como una ruta mas, asi que no se pierde nada: la animacion occidental se ve entrando
+# a Peliculas. El anime si conserva tile, que es lo que mas se abre.
+SIEMPRE_DENTRO = {"Animación": "Películas"}
+
 
 def api(base, key, ruta, cuerpo=None, metodo=None):
     url = base.rstrip("/") + ruta + ("&" if "?" in ruta else "?") + "api_key=" + key
@@ -75,7 +81,8 @@ def main():
     libs = {v["Name"]: v for v in api(base, key, "/Library/VirtualFolders")}
 
     conteo = {nombre: cuenta_titulos(carpeta) for nombre, carpeta, _ in ESTANTES}
-    visible = {nombre: n >= args.min for nombre, n in conteo.items()}
+    visible = {nombre: n >= args.min and nombre not in SIEMPRE_DENTRO
+               for nombre, n in conteo.items()}
     for nombre in CATCH_ALL:
         visible[nombre] = True
 
@@ -115,13 +122,17 @@ def main():
     usuarios = api(base, key, "/Users")
     ocultar = {c[1]["Guid"] for c in cambios if c[0] == "tile" and c[2] is False}
     mostrar = {c[1]["Guid"] for c in cambios if c[0] == "tile" and c[2] is True}
+    # Las filas de "Novedades" van con los tiles: una biblioteca que no se ve tampoco
+    # tiene por que empujar su propia fila en el home. Lo que entra sigue apareciendo,
+    # porque la biblioteca ancha contiene a la estrecha.
     por_usuario = []
     for u in usuarios:
         cfg = u.get("Configuration", {})
         ex = list(cfg.get("MyMediaExcludes") or [])
         nuevo = [g for g in ex if g not in mostrar]
         nuevo += [g for g in ocultar if g not in nuevo]
-        if sorted(nuevo) != sorted(ex):
+        latest = list(cfg.get("LatestItemsExcludes") or [])
+        if sorted(nuevo) != sorted(ex) or sorted(latest) != sorted(nuevo):
             por_usuario.append((u, cfg, nuevo))
 
     rutas = [c for c in cambios if c[0] in ("quitar-ruta", "añadir-ruta")]
@@ -143,6 +154,7 @@ def main():
     for u, cfg, nuevo in por_usuario:
         cfg = dict(cfg)
         cfg["MyMediaExcludes"] = nuevo
+        cfg["LatestItemsExcludes"] = list(nuevo)
         api(base, key, "/Users/%s/Configuration" % u["Id"], cfg)
     if rutas:
         api(base, key, "/Library/Refresh", {})

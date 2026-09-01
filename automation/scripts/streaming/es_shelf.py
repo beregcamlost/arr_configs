@@ -32,19 +32,20 @@ MEDIA_ROOT = "/APPBOX_DATA/storage/media"
 ES_LANGS = {"spa", "es", "esp", "es-es", "es-419", "es-mx", "es-la",
             "spanish", "castilian", "lat", "latin"}
 
-ANIMATED_SHELVES = {"moviesanimated", "moviesanime", "moviesdonghua", "moviesaeni",
-                    "tvanimated", "tvanime", "tvdonghua", "tvaeni"}
-
 SHELVES = {
-    "es-movies":      {"name": "Películas en Español",       "kind": "Movie",
-                       "type": "movies",  "animated": False},
-    "es-movies-anim": {"name": "Animación en Español",        "kind": "Movie",
-                       "type": "movies",  "animated": True},
-    "es-tv":          {"name": "Series en Español",           "kind": "Episode",
-                       "type": "tvshows", "animated": False},
-    "es-tv-anim":     {"name": "Series Animadas en Español",  "kind": "Episode",
-                       "type": "tvshows", "animated": True},
+    "es-movies": {"name": "Películas en Español", "kind": "Movie",   "type": "movies"},
+    "es-tv":     {"name": "Series en Español",    "kind": "Episode", "type": "tvshows"},
 }
+
+# Estantes que existieron y se fusionaron en el de arriba (31-ago-2026, decision de
+# Beren al ver el home: "sigue siendo mucho"). Separar animacion de imagen real DENTRO
+# del eje de idioma abria cuatro tiles para responder una sola pregunta -- "¿que puedo
+# ver en español?" -- y la respuesta no cambia por si el dibujo es animado. El eje de
+# categoria sigue intacto en /media, que es donde importa.
+# Se listan para que el script converja solo: si la biblioteca vieja sigue publicada, la
+# retira, y limpia su arbol de enlaces.
+RETIRADOS = {"Animación en Español": "es-movies-anim",
+             "Series Animadas en Español": "es-tv-anim"}
 
 # Por debajo de esto un estante no se gana un tile propio: lo que hay se
 # encuentra igual en el estante de arriba, y una fila larga de carpetas en el
@@ -93,17 +94,17 @@ def title_dir(path):
 def wanted(uid):
     """{clave de estante: {carpeta: ruta}} para todo lo que tiene audio en espanol."""
     out = {k: {} for k in SHELVES}
-    index = {(s["kind"], s["animated"]): k for k, s in SHELVES.items()}
+    index = {s["kind"]: k for k, s in SHELVES.items()}
     for kind in ("Movie", "Episode"):
         items = api("GET", f"/Users/{uid}/Items", Recursive="true", IncludeItemTypes=kind,
                     Fields="MediaStreams,Path", Limit=50000)["Items"]
         for it in items:
             if not has_es_audio(it):
                 continue
-            d, shelf = title_dir(it.get("Path"))
+            d, _shelf = title_dir(it.get("Path"))
             if not d:
                 continue
-            out[index[(kind, shelf in ANIMATED_SHELVES)]][d.name] = d
+            out[index[kind]][d.name] = d
     return out
 
 
@@ -161,6 +162,11 @@ def main():
     uid = admin_id()
     targets = wanted(uid)
     changed = False
+    for nombre, sub in RETIRADOS.items():
+        if drop_library(nombre):
+            changed = True
+            print(f"{nombre:24}      fusionado en el estante de arriba, biblioteca retirada")
+        sync_links(sub, {})
     for sub, spec in SHELVES.items():
         want = targets[sub]
         if len(want) < MIN_TITLES:
