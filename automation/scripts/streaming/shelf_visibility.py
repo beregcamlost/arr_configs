@@ -30,6 +30,7 @@ import sys
 import urllib.request
 
 MEDIA_ROOT = "/APPBOX_DATA/storage/media"
+VIRTUAL_ROOT = "/APPBOX_DATA/storage/virtual"
 MIN_TITULOS = 20
 
 # (tile en Emby, carpeta en /media, donde se cuelga cuando es flaco)
@@ -79,6 +80,15 @@ def main():
     base = os.environ["EMBY_URL"]
     key = os.environ["EMBY_API_KEY"]
     libs = {v["Name"]: v for v in api(base, key, "/Library/VirtualFolders")}
+
+    # Los estantes de idioma son symlinks (/storage/virtual) hacia los mismos archivos:
+    # path distinto = item distinto en Emby, asi que su fila en "Novedades" repite la del
+    # catalogo (Beren, 2026-09-06 y otra vez el 08 cuando este script piso el arreglo).
+    # El tile debe seguir visible, asi que van fuera de Novedades SIEMPRE, sin tocar
+    # MyMediaExcludes. Se deduce de la ruta: una library nueva basada en symlinks queda
+    # cubierta sin que nadie tenga que acordarse.
+    sin_novedades = {v["Guid"] for v in libs.values()
+                     if any(l.startswith(VIRTUAL_ROOT) for l in (v.get("Locations") or []))}
 
     conteo = {nombre: cuenta_titulos(carpeta) for nombre, carpeta, _ in ESTANTES}
     visible = {nombre: n >= args.min and nombre not in SIEMPRE_DENTRO
@@ -132,8 +142,9 @@ def main():
         nuevo = [g for g in ex if g not in mostrar]
         nuevo += [g for g in ocultar if g not in nuevo]
         latest = list(cfg.get("LatestItemsExcludes") or [])
-        if sorted(nuevo) != sorted(ex) or sorted(latest) != sorted(nuevo):
-            por_usuario.append((u, cfg, nuevo))
+        latest_nuevo = nuevo + [g for g in sin_novedades if g not in nuevo]
+        if sorted(nuevo) != sorted(ex) or sorted(latest) != sorted(latest_nuevo):
+            por_usuario.append((u, cfg, nuevo, latest_nuevo))
 
     rutas = [c for c in cambios if c[0] in ("quitar-ruta", "añadir-ruta")]
     print("\nrutas a mover: %d   usuarios a actualizar: %d" % (len(rutas), len(por_usuario)))
@@ -151,10 +162,10 @@ def main():
         else:
             api(base, key, "/Library/VirtualFolders/Paths/Delete",
                 {"Id": lib["Id"], "Path": ruta, "RefreshLibrary": False})
-    for u, cfg, nuevo in por_usuario:
+    for u, cfg, nuevo, latest_nuevo in por_usuario:
         cfg = dict(cfg)
         cfg["MyMediaExcludes"] = nuevo
-        cfg["LatestItemsExcludes"] = list(nuevo)
+        cfg["LatestItemsExcludes"] = latest_nuevo
         api(base, key, "/Users/%s/Configuration" % u["Id"], cfg)
     if rutas:
         api(base, key, "/Library/Refresh", {})
