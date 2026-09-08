@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Estantes de idioma: vistas transversales que no mueven un solo archivo.
+"""Estantes de idioma: una colección, no una copia.
 
 El catálogo (Películas, Animación, Anime, Donghua) es una taxonomía: carpetas
 físicas y disjuntas, un título vive en una sola. El idioma en que PUEDES verlo
@@ -8,50 +8,50 @@ no es una categoría sino una disponibilidad, y corta a través de todas: una
 película japonesa doblada al latino tiene que seguir viviendo en Anime para
 quien la ve en japonés.
 
-La solución, medida en vivo contra la biblioteca real el 31-ago-2026: un árbol
-de ENLACES SIMBÓLICOS fuera de /media, publicado como biblioteca aparte.
+HASTA EL 8-SEP-2026 ESTO SE RESOLVÍA CON ENLACES SIMBÓLICOS: un árbol fuera de
+/media publicado como biblioteca aparte. Funcionaba, pero Emby le da un ItemId
+propio al enlace, y ese ítem duplicado se asomaba una y otra vez por sitios
+distintos: primero en "Novedades" (arreglado a mano el 6-sep, y pisado al día
+siguiente por shelf_visibility.py), después en la lista de reproducidos. Cada
+superficie nueva de la interfaz era un parche nuevo. Beren, viendo Your Name
+repetida: "mata los symlinks, que los tiles no dupliquen nada".
 
-  * Emby le da un ItemId propio al enlace, pero sincroniza el UserData con el
-    original por provider id: el "visto" y el minuto exacto viajan en los dos
-    sentidos, también episodio por episodio.
-  * ExcludeFromSearch evita que la copia salga doble al buscar.
-  * MediaSources sigue en 1, así que el reproductor no ofrece dos versiones.
-  * Beren prefiere películas y series en estantes distintos, así que cada
-    combinación lleva su CollectionType. Emby soporta bibliotecas mixtas
-    (probado), y si algún día quiere la mitad de tiles, es cambiar SHELVES.
+AHORA EL ESTANTE ES UNA COLECCIÓN. Una colección referencia el MISMO ítem, así
+que no hay nada que deduplicar, en ninguna pantalla, ni ahora ni cuando Emby
+añada una pantalla más. Se paga con la puerta de entrada: una colección no da
+tile propio en el home, se abre desde dentro de Películas / Series (las 48
+colecciones de saga ya viven ahí). El tile no se puede tener sin duplicar: en
+Emby un tile ES una biblioteca, y una biblioteca necesita rutas propias.
+
+El "visto" no se perdió al migrar: Emby sincronizaba el UserData de la copia
+con el del original por provider id. Auditado antes de borrar sobre los 34
+usuarios y los 1049 ítems enlazados: 0 casos de estado que viviera sólo en la
+copia (/tmp/es_riesgo.json, 8-sep-2026).
 
 Nada de esto toca /APPBOX_DATA/storage/media, que es lo único que miran el
 librarian, Radarr/Sonarr, Bazarr y los cron de transcode.
 """
-import json, os, pathlib, sys, urllib.parse, urllib.request
+import json, os, shutil, sys, urllib.parse, urllib.request
 
-VIRTUAL_ROOT = pathlib.Path("/APPBOX_DATA/storage/virtual")
 MEDIA_ROOT = "/APPBOX_DATA/storage/media"
+VIRTUAL_ROOT = "/APPBOX_DATA/storage/virtual"
 
 # Emby etiqueta el audio latino de varias formas segun de donde vino el archivo.
 ES_LANGS = {"spa", "es", "esp", "es-es", "es-419", "es-mx", "es-la",
             "spanish", "castilian", "lat", "latin"}
 
+# El estante mira EPISODIOS pero agrupa por SERIE: una serie entra si algun
+# episodio suyo tiene audio en español (es como se buscaba con los enlaces, que
+# tambien enlazaban la carpeta de la serie entera).
 SHELVES = {
-    "es-movies": {"name": "Películas en Español", "kind": "Movie",   "type": "movies"},
-    "es-tv":     {"name": "Series en Español",    "kind": "Episode", "type": "tvshows"},
+    "Películas en Español": {"kind": "Movie"},
+    "Series en Español": {"kind": "Episode"},
 }
 
-# Estantes que existieron y se fusionaron en el de arriba (31-ago-2026, decision de
-# Beren al ver el home: "sigue siendo mucho"). Separar animacion de imagen real DENTRO
-# del eje de idioma abria cuatro tiles para responder una sola pregunta -- "¿que puedo
-# ver en español?" -- y la respuesta no cambia por si el dibujo es animado. El eje de
-# categoria sigue intacto en /media, que es donde importa.
-# Se listan para que el script converja solo: si la biblioteca vieja sigue publicada, la
-# retira, y limpia su arbol de enlaces.
-RETIRADOS = {"Animación en Español": "es-movies-anim",
-             "Series Animadas en Español": "es-tv-anim"}
-
-# Por debajo de esto un estante no se gana un tile propio: lo que hay se
-# encuentra igual en el estante de arriba, y una fila larga de carpetas en el
-# home cuesta mas de lo que valen unos pocos titulos. Es la unica palanca que
-# frena el crecimiento cuando cada idea se abre en pelicula y serie.
-MIN_TITLES = 8
+# Las bibliotecas de enlaces que sustituye este script. Se listan para que la
+# migracion converja sola: mientras alguna siga publicada, se retira.
+SYMLINK_LIBS = ["Películas en Español", "Series en Español",
+                "Animación en Español", "Series Animadas en Español"]
 
 U = os.environ["EMBY_URL"].rstrip("/")
 K = os.environ["EMBY_API_KEY"]
@@ -81,110 +81,73 @@ def has_es_audio(item):
                for s in (item.get("MediaStreams") or []))
 
 
-def title_dir(path):
-    """La carpeta del titulo y el estante donde vive, leidos de su ruta."""
-    if not path or not path.startswith(MEDIA_ROOT + "/"):
-        return None, None
-    rest = path[len(MEDIA_ROOT) + 1:].split("/")
-    if len(rest) < 2:
-        return None, None
-    return pathlib.Path(MEDIA_ROOT, rest[0], rest[1]), rest[0]
-
-
 def wanted(uid):
-    """{clave de estante: {carpeta: ruta}} para todo lo que tiene audio en espanol."""
-    out = {k: {} for k in SHELVES}
-    index = {s["kind"]: k for k, s in SHELVES.items()}
-    for kind in ("Movie", "Episode"):
-        items = api("GET", f"/Users/{uid}/Items", Recursive="true", IncludeItemTypes=kind,
-                    Fields="MediaStreams,Path", Limit=50000)["Items"]
+    """{nombre de estante: {item_id}} para todo lo que tiene audio en español."""
+    out = {}
+    for nombre, spec in SHELVES.items():
+        items = api("GET", f"/Users/{uid}/Items", Recursive="true",
+                    IncludeItemTypes=spec["kind"], Fields="MediaStreams,Path",
+                    Limit=50000)["Items"]
+        ids = set()
         for it in items:
+            # Los enlaces viejos siguen indexados hasta que se retire su
+            # biblioteca: nunca son el ítem que va a la colección.
+            if (it.get("Path") or "").startswith(VIRTUAL_ROOT):
+                continue
             if not has_es_audio(it):
                 continue
-            d, _shelf = title_dir(it.get("Path"))
-            if not d:
-                continue
-            out[index[kind]][d.name] = d
+            ids.add(it["SeriesId"] if spec["kind"] == "Episode" else it["Id"])
+        out[nombre] = ids
     return out
 
 
-def sync_links(sub, targets):
-    root = VIRTUAL_ROOT / sub
-    root.mkdir(parents=True, exist_ok=True)
-    have = {p.name: p for p in root.iterdir()}
-    added = removed = 0
-    for name, dest in targets.items():
-        link = root / name
-        if name in have and link.is_symlink() and os.readlink(link) == str(dest):
-            continue
-        if name in have:
-            link.unlink()
-        link.symlink_to(dest)
-        added += 1
-    for name, link in have.items():
-        if name not in targets and link.is_symlink():
-            link.unlink()
-            removed += 1
-    return added, removed
+def collection(nombre):
+    r = api("GET", "/Items", IncludeItemTypes="BoxSet", Recursive="true", Limit=1000)
+    return next((b for b in r["Items"] if b["Name"] == nombre), None)
 
 
-def library(name):
-    return next((v for v in api("GET", "/Library/VirtualFolders") if v["Name"] == name), None)
-
-
-def ensure_library(sub, spec):
-    """Crea la biblioteca si falta y deja ExcludeFromSearch puesto."""
-    cur = library(spec["name"])
-    created = False
-    if cur is None:
-        api("POST", "/Library/VirtualFolders", None, Name=spec["name"],
-            CollectionType=spec["type"], Paths=str(VIRTUAL_ROOT / sub),
-            RefreshLibrary="false")
-        cur = library(spec["name"])
-        created = True
-    opts = dict(cur["LibraryOptions"])
-    if not opts.get("ExcludeFromSearch"):
-        opts["ExcludeFromSearch"] = True
-        api("POST", "/Library/VirtualFolders/LibraryOptions",
-            {"Id": cur["Id"], "LibraryOptions": opts})
-    return cur["Id"], created
-
-
-def drop_library(name):
-    cur = library(name)
-    if cur:
-        api("POST", "/Library/VirtualFolders/Delete", {"Id": cur["Id"], "RefreshLibrary": False})
+def sync_collection(nombre, quiere):
+    col = collection(nombre)
+    if col is None:
+        col = api("POST", "/Collections", None, Name=nombre,
+                  Ids=",".join(sorted(quiere)), IsLocked="false")
+        print(f"{nombre:24} {len(quiere):4} títulos  [colección creada]")
         return True
-    return False
+    cid = col["Id"]
+    tiene = {c["Id"] for c in api("GET", "/Items", ParentId=cid, Limit=10000)["Items"]}
+    faltan, sobran = quiere - tiene, tiene - quiere
+    for lote, ruta in ((faltan, f"/Collections/{cid}/Items"),
+                       (sobran, f"/Collections/{cid}/Items/Delete")):
+        ids = sorted(lote)
+        for i in range(0, len(ids), 100):
+            api("POST", ruta, None, Ids=",".join(ids[i:i + 100]))
+    print(f"{nombre:24} {len(quiere):4} títulos  (+{len(faltan)} -{len(sobran)})")
+    return bool(faltan or sobran)
+
+
+def retirar_symlinks():
+    """Borra las bibliotecas de enlaces y su árbol. Idempotente."""
+    libs = {v["Name"]: v for v in api("GET", "/Library/VirtualFolders")
+            if any(l.startswith(VIRTUAL_ROOT) for l in (v.get("Locations") or []))}
+    for nombre in SYMLINK_LIBS:
+        lib = libs.get(nombre)
+        if lib:
+            api("POST", "/Library/VirtualFolders/Delete",
+                {"Id": lib["Id"], "RefreshLibrary": False})
+            print(f"{nombre:24}      biblioteca de enlaces retirada")
+    if os.path.isdir(VIRTUAL_ROOT):
+        for sub in sorted(os.listdir(VIRTUAL_ROOT)):
+            shutil.rmtree(os.path.join(VIRTUAL_ROOT, sub))
+            print(f"{'':24}      árbol de enlaces borrado: {sub}")
 
 
 def main():
     uid = admin_id()
-    targets = wanted(uid)
-    changed = False
-    for nombre, sub in RETIRADOS.items():
-        if drop_library(nombre):
-            changed = True
-            print(f"{nombre:24}      fusionado en el estante de arriba, biblioteca retirada")
-        sync_links(sub, {})
-    for sub, spec in SHELVES.items():
-        want = targets[sub]
-        if len(want) < MIN_TITLES:
-            gone = drop_library(spec["name"])
-            changed = changed or gone
-            sync_links(sub, {})
-            print(f"{spec['name']:24} {len(want):4} titulos  -> bajo el minimo de {MIN_TITLES}"
-                  f"{', estante retirado' if gone else ', sin estante'}")
-            continue
-        added, removed = sync_links(sub, want)
-        lib_id, created = ensure_library(sub, spec)
-        changed = changed or bool(added or removed or created)
-        print(f"{spec['name']:24} {len(want):4} titulos  (+{added} -{removed})"
-              f"{'  [estante creado]' if created else ''}")
-        if added or removed or created:
-            api("POST", f"/Items/{lib_id}/Refresh", None, Recursive="true",
-                ImageRefreshMode="Default", MetadataRefreshMode="Default")
-    print("escaneo lanzado" if changed else "sin cambios")
+    quiere = wanted(uid)
+    for nombre in SHELVES:
+        sync_collection(nombre, quiere[nombre])
+    retirar_symlinks()
+    return 0
 
 
 if __name__ == "__main__":
