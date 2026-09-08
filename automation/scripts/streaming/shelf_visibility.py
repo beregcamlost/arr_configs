@@ -45,11 +45,12 @@ ESTANTES = [
 ]
 CATCH_ALL = ("Películas", "Series")
 
-# Estantes que NO llevan tile aunque pasen el minimo, por decision y no por tamaño
-# (31-ago-2026: "el home sigue siendo mucho"). Su contenido ya esta dentro del padre
-# como una ruta mas, asi que no se pierde nada: la animacion occidental se ve entrando
-# a Peliculas. El anime si conserva tile, que es lo que mas se abre.
-SIEMPRE_DENTRO = {"Animación": "Películas"}
+# Estantes que NUNCA llevan tile, por decision y no por tamaño (8-sep-2026, despues de
+# ver los ocho): "quitemos los tiles de animacion, lo animado va en peliculas o series
+# [...] asi es mas facil para mis usuarios". La animacion occidental no es una pregunta
+# que el espectador se haga -- busca una pelicula --, mientras que el anime si se abre
+# solo. Su carpeta se cuelga del padre, asi que no se pierde: entra por Peliculas.
+SIEMPRE_DENTRO = {"Animación", "Series Animadas"}
 
 
 def api(base, key, ruta, cuerpo=None, metodo=None):
@@ -91,7 +92,7 @@ def main():
                      if any(l.startswith(VIRTUAL_ROOT) for l in (v.get("Locations") or []))}
 
     conteo = {nombre: cuenta_titulos(carpeta) for nombre, carpeta, _ in ESTANTES}
-    visible = {nombre: n >= args.min and nombre not in SIEMPRE_DENTRO
+    visible = {nombre: nombre not in SIEMPRE_DENTRO and n >= args.min
                for nombre, n in conteo.items()}
     for nombre in CATCH_ALL:
         visible[nombre] = True
@@ -116,9 +117,14 @@ def main():
             nombre, conteo[nombre], "si" if visible[nombre] else "NO",
             "" if visible[nombre] else "  -> dentro de " + str(dest)))
 
-        # 1) la carpeta cuelga del padre solo mientras el estante este oculto
+        # 1) la carpeta cuelga del padre SOLO mientras el estante este oculto. En cuanto
+        #    tiene tile propio, se la quitamos a todos los demas: Beren los quiere
+        #    disjuntos ("y que esos tiles no se mezclen por amor a cristo", 8-sep-2026),
+        #    o sea que Peliculas ya no es el cajon que contiene tambien animacion y anime.
+        #    Esto RE-CREA los items con otro ItemId, asi que el "visto" se salva antes con
+        #    userdata_dump.py y se devuelve con userdata_restore.py, indexado por ruta.
         for otro_nombre, otro in libs.items():
-            if otro_nombre in (nombre,) or otro_nombre in CATCH_ALL:
+            if otro_nombre == nombre:
                 continue
             tiene = ruta in otro["Locations"]
             debe = (not visible[nombre]) and otro_nombre == dest
