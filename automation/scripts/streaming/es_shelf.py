@@ -67,11 +67,13 @@ MIN_TITLES = 8
 # Categorias EXCLUSIVAS: no prestan titulos al estante de idioma. Beren, al recuperar
 # el tile de Animacion (8-sep-2026): "la idea es que no se repita, lo que va en
 # animacion es solo de animacion, ya no deberia salir ni en peliculas ni en peliculas
-# en español". Para el resto el estante de idioma sigue siendo un ATAJO, que es como
-# el mismo lo decidio horas antes: una peli live-action en español esta en Peliculas
-# Y en Peliculas en Español, porque "tener audio español" es disponibilidad y no
-# categoria. Aqui van las carpetas de /media cuyo tile manda sobre esa regla.
-EXCLUSIVAS = {"moviesanimated"}
+# en español". Poco despues extendio la misma regla al anime ("saca esos 4 tambien"),
+# que eran los ultimos titulos que se veian por partida doble. Para el resto el estante
+# de idioma sigue siendo un ATAJO, que es como el mismo lo decidio horas antes: una peli
+# live-action en español esta en Peliculas Y en Peliculas en Español, porque "tener audio
+# español" es disponibilidad y no categoria. Aqui van las carpetas de /media cuyo tile
+# manda sobre esa regla; en la practica, todas las que tienen tile menos el catch-all.
+EXCLUSIVAS = {"moviesanimated", "moviesanime", "moviesdonghua"}
 
 U = os.environ["EMBY_URL"].rstrip("/")
 K = os.environ["EMBY_API_KEY"]
