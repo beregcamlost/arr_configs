@@ -45,12 +45,13 @@ ESTANTES = [
 ]
 CATCH_ALL = ("Películas", "Series")
 
-# Estantes que NUNCA llevan tile, por decision y no por tamaño (8-sep-2026, despues de
-# ver los ocho): "quitemos los tiles de animacion, lo animado va en peliculas o series
-# [...] asi es mas facil para mis usuarios". La animacion occidental no es una pregunta
-# que el espectador se haga -- busca una pelicula --, mientras que el anime si se abre
-# solo. Su carpeta se cuelga del padre, asi que no se pierde: entra por Peliculas.
-SIEMPRE_DENTRO = {"Animación", "Series Animadas"}
+# Estantes que NUNCA llevan tile, por decision y no por tamaño. Su carpeta se cuelga
+# del padre, asi que no se pierde nada: se entra por el estante de arriba.
+# 8-sep-2026, en dos pasos: primero cayeron los dos de animacion ("quitemos los tiles
+# de animacion, lo animado va en peliculas o series"), y al verlo Beren recupero el de
+# peliculas: "dame el tile para animacion pero solo para peliculas, no quiero las
+# series". Cinco series animadas no llenan un estante; 45 peliculas si.
+SIEMPRE_DENTRO = {"Series Animadas"}
 
 
 def api(base, key, ruta, cuerpo=None, metodo=None):

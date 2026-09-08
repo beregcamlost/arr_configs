@@ -64,6 +64,15 @@ RETIRADOS = {"Animación en Español": "es-movies-anim",
 # frena el crecimiento cuando cada idea se abre en pelicula y serie.
 MIN_TITLES = 8
 
+# Categorias EXCLUSIVAS: no prestan titulos al estante de idioma. Beren, al recuperar
+# el tile de Animacion (8-sep-2026): "la idea es que no se repita, lo que va en
+# animacion es solo de animacion, ya no deberia salir ni en peliculas ni en peliculas
+# en español". Para el resto el estante de idioma sigue siendo un ATAJO, que es como
+# el mismo lo decidio horas antes: una peli live-action en español esta en Peliculas
+# Y en Peliculas en Español, porque "tener audio español" es disponibilidad y no
+# categoria. Aqui van las carpetas de /media cuyo tile manda sobre esa regla.
+EXCLUSIVAS = {"moviesanimated"}
+
 U = os.environ["EMBY_URL"].rstrip("/")
 K = os.environ["EMBY_API_KEY"]
 
@@ -112,8 +121,8 @@ def wanted(uid):
         for it in items:
             if not has_es_audio(it):
                 continue
-            d, _shelf = title_dir(it.get("Path"))
-            if not d:
+            d, shelf = title_dir(it.get("Path"))
+            if not d or shelf in EXCLUSIVAS:
                 continue
             out[index[kind]][d.name] = d
     return out
