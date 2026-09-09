@@ -73,7 +73,12 @@ MIN_TITLES = 8
 # live-action en español esta en Peliculas Y en Peliculas en Español, porque "tener audio
 # español" es disponibilidad y no categoria. Aqui van las carpetas de /media cuyo tile
 # manda sobre esa regla; en la practica, todas las que tienen tile menos el catch-all.
-EXCLUSIVAS = {"moviesanimated", "moviesanime", "moviesdonghua"}
+EXCLUSIVAS = {"moviesanimated", "moviesanime", "moviesdonghua", "moviesaeni",
+              "tvanimated", "tvanime", "tvdonghua", "tvaeni"}
+# 9-sep-2026: la regla estaba escrita para las dos mitades pero solo aplicada a
+# las carpetas de peliculas, asi que Series en Español seguia mostrando anime
+# (Beren: "por que series en español tiene animes?"). Ahora presta solo el
+# catch-all de cada mitad: movies y tv.
 
 U = os.environ["EMBY_URL"].rstrip("/")
 K = os.environ["EMBY_API_KEY"]
