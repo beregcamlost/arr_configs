@@ -36,14 +36,14 @@ MIN_TITULOS = 20
 # (tile en Emby, carpeta en /media, donde se cuelga cuando es flaco)
 # La cadena sube hasta encontrar un padre visible; el catch-all nunca se oculta.
 ESTANTES = [
-    ("Donghua", "moviesdonghua", "Anime"),
-    ("Anime", "moviesanime", "Animación"),
-    ("Animación", "moviesanimated", "Películas"),
-    ("Series Donghua", "tvdonghua", "Series Anime"),
-    ("Series Anime", "tvanime", "Series Animadas"),
-    ("Series Animadas", "tvanimated", "Series"),
+    ("Donghua Movies", "moviesdonghua", "Anime Movies"),
+    ("Anime Movies", "moviesanime", "Animation Movies"),
+    ("Animation Movies", "moviesanimated", "Movies"),
+    ("Donghua Series", "tvdonghua", "Anime Series"),
+    ("Anime Series", "tvanime", "Animated Series"),
+    ("Animated Series", "tvanimated", "Series"),
 ]
-CATCH_ALL = ("Películas", "Series")
+CATCH_ALL = ("Movies", "Series")
 
 # Estantes que NUNCA llevan tile, por decision y no por tamaño. Su carpeta se cuelga
 # del padre, asi que no se pierde nada: se entra por el estante de arriba.
@@ -51,7 +51,7 @@ CATCH_ALL = ("Películas", "Series")
 # de animacion, lo animado va en peliculas o series"), y al verlo Beren recupero el de
 # peliculas: "dame el tile para animacion pero solo para peliculas, no quiero las
 # series". Cinco series animadas no llenan un estante; 45 peliculas si.
-SIEMPRE_DENTRO = {"Series Animadas"}
+SIEMPRE_DENTRO = {"Animated Series"}
 
 
 def api(base, key, ruta, cuerpo=None, metodo=None):

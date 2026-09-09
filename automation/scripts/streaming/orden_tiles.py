@@ -13,8 +13,8 @@ import json, os, sys, urllib.parse, urllib.request
 
 U = os.environ["EMBY_URL"].rstrip("/"); K = os.environ["EMBY_API_KEY"]
 APLICAR = "--apply" in sys.argv
-ORDEN = ["Películas", "Películas en Español", "Animación", "Anime",
-         "Series", "Series en Español", "Series Anime"]
+ORDEN = ["Movies", "Películas en Español", "Animation Movies", "Anime Movies",
+         "Series", "Series en Español", "Anime Series"]
 
 def api(path, cuerpo=None, **q):
     q["api_key"] = K
