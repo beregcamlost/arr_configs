@@ -31,6 +31,23 @@ buscar (ExcludeFromSearch, aquí abajo) ni en Novedades (shelf_visibility.py exc
 sola cualquier biblioteca montada sobre /virtual, así que ese arreglo ya no se
 puede volver a pisar como pasó el 6-sep).
 
+EL 9-SEP-2026 EL ESTANTE DE IDIOMA PASÓ DE ATAJO A EXCLUSIVO. Beren volvió a ver
+*Moana* dos veces seguidas en la misma fila del home ("veo moana repetida de nuevo,
+está en dos tiles, ¿qué pasó pues?") y eligió la salida de fondo: si una película tiene
+audio español, vive en *Películas en Español* y NO en *Películas*. Es la misma regla que
+ya gobernaba animación y anime (EXCLUSIVAS, aquí abajo), aplicada ahora al catch-all.
+
+Se hace SIN mover un archivo, con el árbol simétrico al de idioma: *Películas* deja de
+publicarse sobre /media/movies y pasa a publicarse sobre /virtual/movies-rest, que son
+los enlaces de lo que NO tiene audio español. Así las dos bibliotecas son disjuntas por
+construcción -- no hay fila, cliente ni sección donde el título pueda salir dos veces --
+y /media sigue intacto para Radarr, Bazarr, el librarian y los cron de transcode, que es
+lo que hace este arreglo reversible con una llamada.
+
+El precio, aceptado al elegirlo: cambiar la raíz de una biblioteca re-crea sus ItemId, o
+sea que el "visto" de los 34 usuarios se salva antes con userdata_rel.py (indexa por ruta
+RELATIVA, la única identidad que sobrevive al cambio de árbol) y se devuelve después.
+
 Nada de esto toca /APPBOX_DATA/storage/media, que es lo único que miran el
 librarian, Radarr/Sonarr, Bazarr y los cron de transcode.
 """
@@ -79,6 +96,15 @@ EXCLUSIVAS = {"moviesanimated", "moviesanime", "moviesdonghua", "moviesaeni",
 # las carpetas de peliculas, asi que Series en Español seguia mostrando anime
 # (Beren: "por que series en español tiene animes?"). Ahora presta solo el
 # catch-all de cada mitad: movies y tv.
+
+# El complemento del catch-all: lo que NO se fue al estante de idioma. La biblioteca
+# ancha se publica sobre este arbol en vez de sobre /media, que es lo que hace que las
+# dos sean disjuntas. Si el estante de idioma no llega a MIN_TITLES no hay nada que
+# restar y la biblioteca vuelve sola a /media (convergencia, no estado a mano).
+RESTO = {
+    "movies-rest": {"lib": "Movies", "carpeta": "movies", "shelf": "es-movies"},
+    "tv-rest":     {"lib": "Series", "carpeta": "tv",     "shelf": "es-tv"},
+}
 
 U = os.environ["EMBY_URL"].rstrip("/")
 K = os.environ["EMBY_API_KEY"]
@@ -185,6 +211,62 @@ def drop_library(name):
     return False
 
 
+def folders_de(carpeta):
+    """Las carpetas de titulo que hay hoy en /media/<carpeta>."""
+    raiz = pathlib.Path(MEDIA_ROOT, carpeta)
+    if not raiz.is_dir():
+        return {}
+    return {d.name: d for d in raiz.iterdir() if d.is_dir()}
+
+
+def set_root(lib, poner, quitar):
+    """Deja la biblioteca publicada sobre `poner` y le retira `quitar`.
+
+    Se añade antes de quitar y sin escanear en medio: entre las dos llamadas la
+    biblioteca tiene las dos raices, pero como nadie escanea todavia no llega a
+    duplicar nada. Al reves -- quitar primero -- la dejaria un instante sin rutas.
+    """
+    loc = list(lib["Locations"])
+    cambio = False
+    if poner not in loc:
+        api("POST", "/Library/VirtualFolders/Paths",
+            {"Id": lib["Id"], "PathInfo": {"Path": poner}, "RefreshLibrary": False})
+        cambio = True
+    if quitar in loc:
+        api("POST", "/Library/VirtualFolders/Paths/Delete",
+            {"Id": lib["Id"], "Path": quitar, "RefreshLibrary": False})
+        cambio = True
+    return cambio
+
+
+def sync_resto(sub, spec, en_idioma):
+    """Publica la biblioteca ancha sobre el complemento del estante de idioma.
+
+    en_idioma vacio (estante bajo el minimo o retirado) significa que no hay nada que
+    restar: la biblioteca vuelve a /media y el arbol de enlaces se vacia. Asi el script
+    converge solo en los dos sentidos y nunca deja una biblioteca a medio mudar.
+    """
+    lib = library(spec["lib"])
+    if lib is None:
+        print(f"{spec['lib']:24}      AVISO: no existe la biblioteca en Emby")
+        return False
+    media = str(pathlib.Path(MEDIA_ROOT, spec["carpeta"]))
+    virtual = str(VIRTUAL_ROOT / sub)
+    if not en_idioma:
+        added, removed = sync_links(sub, {})
+        movida = set_root(lib, poner=media, quitar=virtual)
+        if movida:
+            print(f"{spec['lib']:24}      sin estante de idioma que restar -> vuelve a /media")
+        return bool(added or removed or movida)
+    resto = {n: d for n, d in folders_de(spec["carpeta"]).items() if n not in en_idioma}
+    added, removed = sync_links(sub, resto)
+    movida = set_root(lib, poner=virtual, quitar=media)
+    print(f"{spec['lib']:24} {len(resto):4} titulos  (+{added} -{removed})"
+          f"  = {spec['carpeta']} menos los {len(en_idioma)} del estante de idioma"
+          f"{'  [biblioteca mudada al complemento]' if movida else ''}")
+    return bool(added or removed or movida)
+
+
 def main():
     uid = admin_id()
     targets = wanted(uid)
@@ -211,6 +293,17 @@ def main():
         if added or removed or created:
             api("POST", f"/Items/{lib_id}/Refresh", None, Recursive="true",
                 ImageRefreshMode="Default", MetadataRefreshMode="Default")
+    # El complemento va DESPUES de los estantes de idioma: resta lo que aquellos se
+    # acaban de llevar, asi que leerlo antes lo dejaria un dia por detras.
+    raiz_movida = False
+    for sub, spec in RESTO.items():
+        vivo = library(SHELVES[spec["shelf"]]["name"]) is not None
+        raiz_movida = sync_resto(sub, spec, targets[spec["shelf"]] if vivo else {}) or raiz_movida
+    changed = changed or raiz_movida
+    if raiz_movida:
+        # Cambiar la RAIZ de una biblioteca re-crea sus items: el escaneo va sobre toda
+        # la biblioteca, no sobre un item, y el "visto" se devuelve con userdata_rel.py.
+        api("POST", "/Library/Refresh", {})
     print("escaneo lanzado" if changed else "sin cambios")
 
 
