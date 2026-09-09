@@ -17,7 +17,7 @@ usan OrderedViews (el orden del home) y MyMediaExcludes en los 34 usuarios. Ocul
 MyMediaExcludes deja el Guid intacto: el dia que el estante crece vuelve a su sitio en el
 orden, sin rehacer nada. Ademas es reversible con una llamada.
 
-NO TOCA LOS ESTANTES DE IDIOMA (Peliculas en Español y compañia). Esos los gobierna
+NO TOCA LOS ESTANTES DE IDIOMA (Películas en Español y compañia). Esos los gobierna
 es_shelf.py con su propio minimo, y existen porque Beren los pidio explicitamente: son
 una busqueda que el hace, no una subdivision del catalogo.
 
@@ -30,7 +30,6 @@ import sys
 import urllib.request
 
 MEDIA_ROOT = "/APPBOX_DATA/storage/media"
-VIRTUAL_ROOT = "/APPBOX_DATA/storage/virtual"
 MIN_TITULOS = 20
 
 # (tile en Emby, carpeta en /media, donde se cuelga cuando es flaco)
@@ -83,14 +82,13 @@ def main():
     key = os.environ["EMBY_API_KEY"]
     libs = {v["Name"]: v for v in api(base, key, "/Library/VirtualFolders")}
 
-    # Los estantes de idioma son symlinks (/storage/virtual) hacia los mismos archivos:
-    # path distinto = item distinto en Emby, asi que su fila en "Novedades" repite la del
-    # catalogo (Beren, 2026-09-06 y otra vez el 08 cuando este script piso el arreglo).
-    # El tile debe seguir visible, asi que van fuera de Novedades SIEMPRE, sin tocar
-    # MyMediaExcludes. Se deduce de la ruta: una library nueva basada en symlinks queda
-    # cubierta sin que nadie tenga que acordarse.
-    sin_novedades = {v["Guid"] for v in libs.values()
-                     if any(l.startswith(VIRTUAL_ROOT) for l in (v.get("Locations") or []))}
+    # Novedades = los mismos tiles que se ven, sin excepciones (Beren, 9-sep-2026:
+    # "no ya no hay un latest peliculas en español y ese es importante igual que series
+    # en español"). Los estantes de idioma estuvieron fuera desde el 8-sep porque su fila
+    # repetia titulos de la fila del catalogo; con el home ya en 7 tiles esa repeticion
+    # es la que uno espera -- la misma pelicula en dos filas distintas, cada una con su
+    # nombre -- y no el duplicado dentro de una sola fila que fue la queja del 6-sep.
+    # Una biblioteca oculta si sigue fuera: no tiene tile, no empuja fila.
 
     conteo = {nombre: cuenta_titulos(carpeta) for nombre, carpeta, _ in ESTANTES}
     visible = {nombre: nombre not in SIEMPRE_DENTRO and n >= args.min
@@ -149,7 +147,7 @@ def main():
         nuevo = [g for g in ex if g not in mostrar]
         nuevo += [g for g in ocultar if g not in nuevo]
         latest = list(cfg.get("LatestItemsExcludes") or [])
-        latest_nuevo = nuevo + [g for g in sin_novedades if g not in nuevo]
+        latest_nuevo = list(nuevo)
         if sorted(nuevo) != sorted(ex) or sorted(latest) != sorted(latest_nuevo):
             por_usuario.append((u, cfg, nuevo, latest_nuevo))
 
