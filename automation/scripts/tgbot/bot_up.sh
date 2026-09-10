@@ -4,7 +4,7 @@
 set -u
 REPO=/config/berenstuff
 PY=/config/.venv-tgbot/bin/python
-BOT=$REPO/automation/scripts/telegram/pipeflix_bot.py
+BOT=$REPO/automation/scripts/tgbot/pipeflix_bot.py
 LOG=$REPO/automation/logs/telegram_bot.log
 PID=/tmp/pipeflix_bot.pid
 
