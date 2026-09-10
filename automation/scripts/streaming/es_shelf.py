@@ -51,7 +51,7 @@ RELATIVA, la única identidad que sobrevive al cambio de árbol) y se devuelve d
 Nada de esto toca /APPBOX_DATA/storage/media, que es lo único que miran el
 librarian, Radarr/Sonarr, Bazarr y los cron de transcode.
 """
-import json, os, pathlib, sys, urllib.parse, urllib.request
+import json, os, pathlib, sys, time, urllib.parse, urllib.request
 
 VIRTUAL_ROOT = pathlib.Path("/APPBOX_DATA/storage/virtual")
 MEDIA_ROOT = "/APPBOX_DATA/storage/media"
@@ -80,6 +80,31 @@ RETIRADOS = {"Animación en Español": "es-movies-anim",
 # home cuesta mas de lo que valen unos pocos titulos. Es la unica palanca que
 # frena el crecimiento cuando cada idea se abre en pelicula y serie.
 MIN_TITLES = 8
+
+# Guardia (10-sep-2026): si un estante VIVO pierde de golpe mas de CAIDA_TITULOS titulos
+# Y mas de CAIDA_FRACCION de ellos, el script no toca NADA y avisa. Una caida brusca es casi
+# siempre que el script dejo de VER los titulos, no que desaparecieran: asi se
+# autodestruyeron los dos estantes de idioma el 10-sep a las 05:50Z (ver title_dir). Y
+# tambien pasa, en pequeño, justo despues de re-crear items: hasta que el escaneo les lee
+# las pistas de audio, has_es_audio() los ve "sin español". El dia normal cambia 1-3
+# titulos. Desmontar re-crea miles de items y borra los intros de Series. Si la caida es
+# real, se aplica a mano con --forzar.
+CAIDA_TITULOS = 5
+CAIDA_FRACCION = 0.10
+
+# Las bibliotecas que crea este script nacen con el estandar de la casa para previews e
+# intros: se generan (Enable*), pero NUNCA durante el escaneo (*DuringLibraryScan). Una
+# biblioteca nueva trae los defaults de Emby, y un escaneo de miles de episodios con
+# deteccion de intros activa fue lo que dejo 42 series sin caratula el 9-sep.
+OPCIONES_CASA = {
+    "ExcludeFromSearch": True,
+    "EnableChapterImageExtraction": True,
+    "ExtractChapterImagesDuringLibraryScan": False,
+    "ThumbnailImagesIntervalSeconds": 10,
+    "SaveLocalThumbnailSets": True,
+    "EnableMarkerDetection": True,
+    "EnableMarkerDetectionDuringLibraryScan": False,
+}
 
 # Categorias EXCLUSIVAS: no prestan titulos al estante de idioma. Beren, al recuperar
 # el tile de Animacion (8-sep-2026): "la idea es que no se repita, lo que va en
@@ -135,7 +160,15 @@ def has_es_audio(item):
 
 
 def title_dir(path):
-    """La carpeta del titulo y el estante donde vive, leidos de su ruta."""
+    """La carpeta del titulo y el estante donde vive, leidos de su ruta REAL.
+
+    Se resuelve el enlace (10-sep-2026). Desde que el estante es exclusivo, las
+    bibliotecas se publican sobre los arboles /virtual y NINGUN item tiene ruta /media:
+    sin realpath esta funcion no reconocia nada, wanted() salia vacio y el cron de las
+    05:50Z retiro los dos estantes de idioma y devolvio las bibliotecas a /media. Al dia
+    siguiente los habria vuelto a crear, y asi en vaiven, re-creando ~2400 items por vuelta.
+    """
+    path = os.path.realpath(path) if path else path
     if not path or not path.startswith(MEDIA_ROOT + "/"):
         return None, None
     rest = path[len(MEDIA_ROOT) + 1:].split("/")
@@ -186,7 +219,7 @@ def library(name):
 
 
 def ensure_library(sub, spec):
-    """Crea la biblioteca si falta y deja ExcludeFromSearch puesto."""
+    """Crea la biblioteca si falta y la deja con OPCIONES_CASA (converge en cada corrida)."""
     cur = library(spec["name"])
     created = False
     if cur is None:
@@ -196,8 +229,8 @@ def ensure_library(sub, spec):
         cur = library(spec["name"])
         created = True
     opts = dict(cur["LibraryOptions"])
-    if not opts.get("ExcludeFromSearch"):
-        opts["ExcludeFromSearch"] = True
+    if any(opts.get(k) != v for k, v in OPCIONES_CASA.items()):
+        opts.update(OPCIONES_CASA)   # objeto COMPLETO: un POST parcial pisa lo ausente
         api("POST", "/Library/VirtualFolders/LibraryOptions",
             {"Id": cur["Id"], "LibraryOptions": opts})
     return cur["Id"], created
@@ -267,9 +300,75 @@ def sync_resto(sub, spec, en_idioma):
     return bool(added or removed or movida)
 
 
+def plan_grande(targets):
+    """True si esta corrida va a crear/retirar un estante o mover la raiz de una biblioteca.
+
+    Esas operaciones re-crean cientos o miles de items de golpe, y el 10-sep dos refrescos
+    concurrentes sobre la misma carpeta (el refresco propio del estante recien creado + el
+    global, y el vigilante de Emby que se disparo en pleno escaneo) crearon cada item DOS
+    veces: misma ruta, mismo guid, dos carpetas padre. Emby no los limpia solo.
+    """
+    for sub, spec in SHELVES.items():
+        if (library(spec["name"]) is not None) != (len(targets[sub]) >= MIN_TITLES):
+            return True
+    for sub, spec in RESTO.items():
+        vivo = len(targets[spec["shelf"]]) >= MIN_TITLES
+        quiere = str(VIRTUAL_ROOT / sub) if vivo else str(pathlib.Path(MEDIA_ROOT, spec["carpeta"]))
+        lib = library(spec["lib"])
+        if lib and quiere not in lib["Locations"]:
+            return True
+    return False
+
+
+def vigilante(on):
+    """Enciende/apaga el monitor en tiempo real de las bibliotecas que toca este script."""
+    for nombre in [s["name"] for s in SHELVES.values()] + [s["lib"] for s in RESTO.values()]:
+        v = library(nombre)
+        if v and v["LibraryOptions"].get("EnableRealtimeMonitor", True) != on:
+            opts = dict(v["LibraryOptions"])
+            opts["EnableRealtimeMonitor"] = on
+            api("POST", "/Library/VirtualFolders/LibraryOptions",
+                {"Id": v["Id"], "LibraryOptions": opts})
+
+
+def escaneo(estado_previo_visto=False, tope_s=3 * 3600):
+    """Espera a que el escaneo global arranque y termine (o al tope)."""
+    t0 = time.time()
+    while time.time() - t0 < tope_s:
+        t = next(x for x in api("GET", "/ScheduledTasks") if x["Name"] == "Scan media library")
+        if t["State"] != "Idle":
+            estado_previo_visto = True
+        elif estado_previo_visto or time.time() - t0 > 120:
+            return True
+        time.sleep(30)
+    return False
+
+
 def main():
     uid = admin_id()
     targets = wanted(uid)
+    forzar = "--forzar" in sys.argv
+    for sub, spec in SHELVES.items():
+        raiz = VIRTUAL_ROOT / sub
+        antes = sum(1 for p in raiz.iterdir() if p.is_symlink()) if raiz.is_dir() else 0
+        ahora = len(targets[sub])
+        if antes >= MIN_TITLES and antes - ahora > max(CAIDA_TITULOS, antes * CAIDA_FRACCION) and not forzar:
+            print(f"AVISO {spec['name']}: {antes} -> {ahora} titulos de golpe. No toco NADA:"
+                  f" casi siempre es que el script dejo de ver los titulos. Si es real: --forzar")
+            return 3
+    grande = plan_grande(targets)
+    if grande:
+        print("corrida grande (estante nuevo/retirado o raiz movida): vigilante OFF y UN solo escaneo")
+        vigilante(False)
+    try:
+        return _aplicar(targets, grande)
+    finally:
+        if grande:
+            vigilante(True)
+            print("vigilante ON")
+
+
+def _aplicar(targets, grande):
     changed = False
     for nombre, sub in RETIRADOS.items():
         if drop_library(nombre):
@@ -287,10 +386,12 @@ def main():
             continue
         added, removed = sync_links(sub, want)
         lib_id, created = ensure_library(sub, spec)
+        if created and grande:
+            vigilante(False)   # un estante recien creado nace con el vigilante de Emby prendido
         changed = changed or bool(added or removed or created)
         print(f"{spec['name']:24} {len(want):4} titulos  (+{added} -{removed})"
               f"{'  [estante creado]' if created else ''}")
-        if added or removed or created:
+        if (added or removed or created) and not grande:
             api("POST", f"/Items/{lib_id}/Refresh", None, Recursive="true",
                 ImageRefreshMode="Default", MetadataRefreshMode="Default")
     # El complemento va DESPUES de los estantes de idioma: resta lo que aquellos se
@@ -300,11 +401,15 @@ def main():
         vivo = library(SHELVES[spec["shelf"]]["name"]) is not None
         raiz_movida = sync_resto(sub, spec, targets[spec["shelf"]] if vivo else {}) or raiz_movida
     changed = changed or raiz_movida
-    if raiz_movida:
-        # Cambiar la RAIZ de una biblioteca re-crea sus items: el escaneo va sobre toda
-        # la biblioteca, no sobre un item, y el "visto" se devuelve con userdata_rel.py.
+    if changed and (grande or raiz_movida):
+        # UN solo escaneo global, y esperamos a que termine antes de devolver el vigilante:
+        # cualquier refresco concurrente sobre las mismas carpetas duplica items.
+        # Cambiar la RAIZ re-crea los items: el "visto" se devuelve con userdata_rel.py.
         api("POST", "/Library/Refresh", {})
-    print("escaneo lanzado" if changed else "sin cambios")
+        print("escaneo unico lanzado; esperando a que termine...", flush=True)
+        print("escaneo terminado" if escaneo() else "AVISO: el escaneo no termino antes del tope")
+    else:
+        print("escaneo lanzado" if changed else "sin cambios")
 
 
 if __name__ == "__main__":
