@@ -29,6 +29,15 @@ readonly DB_PATHS=(
     "/APPBOX_DATA/storage/.translation-state/translation_state.db"
     "/APPBOX_DATA/storage/.subtitle-quality-state/subtitle_quality_state.db"
     "/APPBOX_DATA/storage/pipeline.db"
+    # Emby (10-sep-2026): intros, visto, favoritos, colecciones y playlists de los 34
+    # usuarios viven SOLO en estas bases, y no tenian ningun respaldo: el plugin MBBackup
+    # no tiene destino configurado y "Emby Server Backup" nunca corrio. .backup es la API
+    # en caliente de SQLite: copia consistente con Emby escribiendo (WAL), ~1.6 s en total.
+    "/APPBOX_DATA/apps/emby.vhscave.appboxes.co/data/library.db"
+    "/APPBOX_DATA/apps/emby.vhscave.appboxes.co/data/activitylog.db"
+    "/APPBOX_DATA/apps/emby.vhscave.appboxes.co/data/authentication.db"
+    "/APPBOX_DATA/apps/emby.vhscave.appboxes.co/data/playback_reporting.db"
+    "/APPBOX_DATA/apps/emby.vhscave.appboxes.co/data/users.db"
 )
 readonly DB_NAMES=(
     "codec_state"
@@ -36,6 +45,11 @@ readonly DB_NAMES=(
     "translation_state"
     "subtitle_quality_state"
     "pipeline"
+    "emby_library"
+    "emby_activitylog"
+    "emby_authentication"
+    "emby_playback_reporting"
+    "emby_users"
 )
 
 # ---------------------------------------------------------------------------
