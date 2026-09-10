@@ -373,15 +373,17 @@ jobs:
   # ── Maintenance jobs ───────────────────────────────────────────────────────
 
   - id: sqlite_backup
-    schedule: "0 2 */3 * *"
+    schedule: "0 2 * * *"
     command: >-
       /usr/bin/flock -n /tmp/sqlite_backup.lock
       /bin/bash /config/berenstuff/automation/scripts/backup/sqlite_backup.sh
     log: /config/berenstuff/automation/logs/sqlite_backup.log
     purpose: >-
-      Every 3 days at 02:00 backs up all pipeline state DBs using
-      SQLite online backup API. Rotates old backups to keep storage
-      bounded. May also push backups to git.
+      Daily at 02:00 (every 3 days until 2026-09-10) backs up all pipeline
+      state DBs AND Emby's 5 databases (library, activitylog, authentication,
+      playback_reporting, users: intros, watched state, favorites, collections
+      live only there) using the SQLite online backup API. Keeps 14 daily
+      archives (~1.5 GB). May also push backups to git.
     runtime_typical: 10–60s (depends on DB sizes)
     timeout_hard: none
     state_db: none (operates on all state DBs as source)
@@ -389,6 +391,47 @@ jobs:
     on_failure: Backup not taken; previous backup still valid.
     depends_on: sqlite3, git (for push)
     safe_to_disable: yes (loses backup cadence; no impact on pipeline)
+
+  - id: bif_huerfanos
+    schedule: "45 6 * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/bif_huerfanos.lock
+      /bin/bash -c 'set -a; . /config/berenstuff/.env; set +a; exec python3 /config/berenstuff/automation/scripts/streaming/bif_huerfanos.py --apply'
+    log: /config/berenstuff/automation/logs/bif_huerfanos.log
+    purpose: >-
+      Deletes Emby preview files (.bif) whose video no longer exists (quality
+      upgrades, pipeline temp files such as .subtmp/.collisiontmp). Cross-checks
+      Emby's live items following the /virtual symlinks, 24 h grace, and aborts
+      without deleting anything above 200 candidates. Writes a manifest per run
+      under automation/backups/bif-huerfanos/.
+    runtime_typical: 10–60s
+    timeout_hard: none
+    state_db: none
+    lock: /tmp/bif_huerfanos.lock
+    on_failure: Nothing deleted; orphans wait for the next run.
+    depends_on: EMBY_URL, EMBY_API_KEY
+    safe_to_disable: yes (orphans only accumulate disk space)
+
+  - id: faststart
+    schedule: "15 11 * * *"
+    command: >-
+      /usr/bin/flock -n /tmp/faststart.lock
+      /bin/bash -c 'set -a; . /config/berenstuff/.env; set +a; exec python3 /config/berenstuff/automation/scripts/transcode/faststart.py --apply --max-min 90'
+    log: /config/berenstuff/automation/logs/faststart.log
+    purpose: >-
+      Moves the moov atom of mp4/m4v/mov files to the front (stream copy,
+      +faststart) so HTTP playback starts without fetching the end of the file.
+      Keeps size, permissions and mtime, so Emby (same item, intros, watched
+      state, previews) and the codec pipeline see no change. Skips hardlinked
+      (still seeding), <24 h old, codec-queued and currently playing files;
+      pauses while Emby scans. Backlog on 2026-09-10: 1319 files, 1.66 TB.
+    runtime_typical: up to 90 min (budget inside the script)
+    timeout_hard: --max-min 90
+    state_db: reads library_codec_state.db (read-only); appends logs/faststart_hechos.jsonl
+    lock: /tmp/faststart.lock
+    on_failure: Originals untouched (temp file lives outside the library); 3 straight failures stop the run.
+    depends_on: ffmpeg, ffprobe, EMBY_URL, EMBY_API_KEY
+    safe_to_disable: yes
 
   - id: engram_update
     schedule: "0 3 * * 0"

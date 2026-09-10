@@ -16,7 +16,7 @@ readonly LOG_FILE="/config/berenstuff/automation/logs/sqlite_backup.log"
 readonly BACKUP_ROOT="/config/berenstuff/arr-backups"
 readonly CURRENT_DIR="${BACKUP_ROOT}/current"
 readonly ARCHIVE_DIR="${BACKUP_ROOT}/archive"
-readonly KEEP_ARCHIVES=8
+readonly KEEP_ARCHIVES=14   # diario desde 2026-09-10 (entra Emby): 14 dias, ~1.5 GB
 readonly GIT_REMOTE="origin"
 readonly GIT_BRANCH="main"
 
