@@ -91,8 +91,13 @@ def _emby_get(path, **params):
     return r.json()
 
 
+OPEN_PAGE = os.environ.get("EMBY_OPEN_PAGE", "https://beregcamlost.github.io/emby-open/")
+
+
 def emby_link(item_id):
-    return f"{EMBY_WEB}/web/index.html#!/item?id={item_id}&serverId={_emby_server_id}"
+    # Pagina puente (repo emby-open): salta a la app de Emby en iOS/Android; los ids van
+    # en el fragmento #, que nunca sale del telefono. Telegram no acepta emby:// directo.
+    return f"{OPEN_PAGE}#{_emby_server_id}/{item_id}"
 
 
 def library_ids():
