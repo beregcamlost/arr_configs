@@ -406,7 +406,7 @@ async def post_init(app):
     except Exception:
         log.exception("Emby System/Info")
     PIDFILE.write_text(str(os.getpid()))
-    app.create_task(pending_loop(app))
+    app.bot_data["pending_task"] = asyncio.get_running_loop().create_task(pending_loop(app))
     log.info("listo; autorizados=%s", sorted(ALLOWED) or "NADIE (anade tu id a TELEGRAM_ALLOWED_IDS)")
 
 

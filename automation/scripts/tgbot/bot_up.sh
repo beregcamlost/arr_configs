@@ -19,7 +19,7 @@ start() {
   cd "$REPO/automation/scripts" || return 1
   PYTHONPATH=$REPO/automation/scripts setsid nohup "$PY" "$BOT" >> "$LOG" 2>&1 < /dev/null &
   echo "$(date -Is) arrancando (pid $!)" >> "$LOG"
-  sleep 3
+  for _ in $(seq 1 30); do running && break; sleep 1; done  # Telegram tarda ~20 s en iniciar
   running && echo "arrancado (pid $(cat "$PID"))" || { echo "no arranco, mira $LOG"; tail -5 "$LOG"; return 1; }
 }
 
