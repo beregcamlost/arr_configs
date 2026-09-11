@@ -175,8 +175,9 @@ _YEAR = re.compile(r"(?:^|[\s(])((?:19|20)\d{2})\)?\s*$")
 
 
 def parse_query(text):
-    """'quiero ver la pelicula de barbie' -> ('barbie', None, None);
-    'stranger things temporada 5' -> ('stranger things', None, 5); 'dune 2021' -> ('dune', 2021, None)."""
+    """-> (limpio, ano, temporada, quiere_espanol). 'quiero ver la pelicula de barbie' -> ('barbie', None, None, False);
+    'stranger things temporada 5' -> ('stranger things', None, 5, False); 'dune 2021 en espanol' -> ('dune', 2021, None, True)."""
+    want_es = bool(re.search(r"en espa[nñ]ol|latino|doblad[ao]|castellano|audio espa|en castellano", text, re.I))
     q = re.sub(r"[¿?¡!\"“”«»]+", " ", text).strip()
     q = re.sub(r"\s+", " ", q)
     for _ in range(3):
@@ -197,7 +198,7 @@ def parse_query(text):
         year = int(m.group(1))
         q = q[:m.start()].strip(" -:,(")
     q = re.sub(r"\s+", " ", q).strip(" -:,.")
-    return q or text.strip(), year, season
+    return q or text.strip(), year, season, want_es
 
 
 # ---------------------------------------------------------------- 2. TMDB
@@ -355,6 +356,32 @@ def queue_progress():
     return _queue_cache["map"]
 
 
+LANG_NAMES = {"spa": "Español", "es": "Español", "eng": "Inglés", "en": "Inglés", "jpn": "Japonés", "ja": "Japonés",
+              "kor": "Coreano", "ko": "Coreano", "fra": "Francés", "fre": "Francés", "fr": "Francés", "por": "Portugués",
+              "pt": "Portugués", "ger": "Alemán", "deu": "Alemán", "de": "Alemán", "ita": "Italiano", "it": "Italiano",
+              "chi": "Chino", "zho": "Chino", "zh": "Chino", "hin": "Hindi", "rus": "Ruso", "und": "?"}
+ES_LANGS = {"spa", "es", "esp", "es-es", "es-419", "es-mx", "es-la", "spanish", "castilian", "lat", "latin"}
+
+
+def emby_streams(item_id):
+    """-> {'audio': [nombres], 'subs': [nombres], 'es_audio': bool, 'es_subs': bool} de una pelicula en Emby."""
+    items = _emby_get("Items", Ids=item_id, Fields="MediaStreams").get("Items", [])
+    streams = (items[0].get("MediaStreams") if items else None) or []
+    out = {"audio": [], "subs": [], "es_audio": False, "es_subs": False}
+    for st in streams:
+        lang = (st.get("Language") or "").lower()
+        name = LANG_NAMES.get(lang) or st.get("DisplayLanguage") or lang or "?"
+        if st.get("Type") == "Audio":
+            if name not in out["audio"]:
+                out["audio"].append(name)
+            out["es_audio"] |= lang in ES_LANGS
+        elif st.get("Type") == "Subtitle":
+            if name not in out["subs"]:
+                out["subs"].append(name)
+            out["es_subs"] |= lang in ES_LANGS
+    return out
+
+
 def resolve(kind, tmdb, tvdb=None, title=None, year=None):
     """-> {'status': 'emby'|'downloaded'|'requested'|'missing', 'emby': item, 'lib': info, 'pct': int|None}"""
     idx = emby_index()
@@ -364,7 +391,13 @@ def resolve(kind, tmdb, tvdb=None, title=None, year=None):
     if not item and title:
         item = idx.get((kind, "name", (_fold(title), year)))
     if item:
-        return {"status": "emby", "emby": item, "lib": None, "pct": None}
+        streams = None
+        if kind == "m":
+            try:
+                streams = emby_streams(item["Id"])
+            except Exception:
+                log.exception("streams %s", item["Id"])
+        return {"status": "emby", "emby": item, "lib": None, "pct": None, "streams": streams}
     lib_m, lib_s = library_ids()
     lib = lib_m.get(tmdb) if kind == "m" else (lib_s.get(tmdb) or (tvdb and lib_s.get(("tvdb", tvdb))))
     if lib and lib["has_file"]:
@@ -375,23 +408,23 @@ def resolve(kind, tmdb, tvdb=None, title=None, year=None):
 
 
 def do_search(text):
-    """-> (clean, year, season, results, details_top, status_top, {(kind,tmdb): status_str de alternativas})"""
-    clean, year, season = parse_query(text)
+    """-> (clean, year, season, want_es, results, details_top, status_top, {(kind,tmdb): status_str de alternativas})"""
+    clean, year, season, want_es = parse_query(text)
     f_idx, f_lib = _pool.submit(emby_index), _pool.submit(library_ids)   # calientan cache en paralelo
     results = tmdb_search(clean, year, raw=text)
     f_idx.result()
     f_lib.result()
     if not results:
-        return clean, year, season, [], None, None, {}
+        return clean, year, season, want_es, [], None, None, {}
     top = results[0]
     details = tmdb_details(top["kind"], top["tmdb"])
     status = resolve(top["kind"], top["tmdb"], details.get("tvdb"), details.get("title"), details.get("year"))
     alts = {(r["kind"], r["tmdb"]): resolve(r["kind"], r["tmdb"])["status"] for r in results[1:]}
-    return clean, year, season, results, details, status, alts
+    return clean, year, season, want_es, results, details, status, alts
 
 
 # ---------------------------------------------------------------- 4. tarjeta
-def build_card(details, status, alternatives, alt_status, season_hint=None):
+def build_card(details, status, alternatives, alt_status, season_hint=None, want_es=False):
     """-> (caption HTML, InlineKeyboardMarkup|None, poster_url|None)"""
     d, kind = details, details["kind"]
     ico = "🎬" if kind == "m" else "📺"
@@ -412,6 +445,12 @@ def build_card(details, status, alternatives, alt_status, season_hint=None):
     rows, st = [], status["status"]
     if st == "emby":
         lines.append("\n✅ <b>Ya esta en Emby</b>")
+        sm = status.get("streams")
+        if sm and (sm["audio"] or sm["subs"]):
+            lines.append(f"🔊 {', '.join(sm['audio']) or '?'} · 💬 Subs: {', '.join(sm['subs']) or 'ninguno'}")
+            if want_es and not sm["es_audio"]:
+                lines.append("⚠️ Sin audio en espanol" + ("; si tiene subtitulos en espanol." if sm["es_subs"]
+                             else "; los subtitulos en espanol se generan solos en unas horas."))
         rows.append([InlineKeyboardButton("🍿 Abrir en Emby", url=emby_link(status["emby"]["Id"]))])
     elif st == "downloaded":
         lib = status["lib"]
@@ -435,6 +474,9 @@ def build_card(details, status, alternatives, alt_status, season_hint=None):
             lines.append(f"\n🎟 Se estrena en cines el {d['theatrical']}; puedes dejarla pedida.")
         elif kind == "m" and not d.get("digital") and d.get("theatrical") and d["theatrical"] > (dt.date.today() - dt.timedelta(days=100)).isoformat():
             lines.append("\n🎟 Todavia en cines; se descargara cuando salga en digital.")
+        if want_es:
+            lines.append("\n🗣 Se pide en la mejor calidad; se prefieren copias con audio latino cuando existen, "
+                         "y los subtitulos en espanol se agregan solos.")
         if kind == "m":
             rows.append([InlineKeyboardButton("➕ Pedir pelicula", callback_data=f"add:m:{d['tmdb']}:all")])
         else:
@@ -803,7 +845,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Escribe al menos 2 letras 🙂")
     wait = await update.message.reply_text("🔎 Buscando…")
     try:
-        clean, year, season, results, details, status, alts = await asyncio.to_thread(do_search, text)
+        clean, year, season, want_es, results, details, status, alts = await asyncio.to_thread(do_search, text)
     except Exception as e:
         log.exception("search %r", text)
         return await wait.edit_text(f"💥 Fallo la busqueda: {_h(e)}", parse_mode=ParseMode.HTML)
@@ -815,7 +857,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await wait.edit_text(
             f"🤷 No encontre nada para «{_h(clean)}».\nPrueba con el titulo original (en ingles), sin tildes, o agrega el ano.",
             parse_mode=ParseMode.HTML)
-    caption, markup, poster = build_card(details, status, results[1:], alts, season)
+    caption, markup, poster = build_card(details, status, results[1:], alts, season, want_es)
     try:
         await wait.delete()
     except TelegramError:
