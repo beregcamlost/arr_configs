@@ -416,6 +416,26 @@ check_intake_webhook() {
 # ---------------------------------------------------------------------------
 # Discord notification
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Check: salud de la biblioteca de Emby (12-sep-2026). Lo que Beren detecto a ojo:
+# duplicados, videos en disco que no entran, items sin caratula, recientes sin subs
+# en espanol, fallos de faststart. La logica vive en streaming/emby_salud.py.
+# ---------------------------------------------------------------------------
+check_emby_salud() {
+    local out line
+    if ! out="$(timeout 600 python3 "$SCRIPT_DIR/streaming/emby_salud.py" 2>/dev/null)"; then
+        record "WARN" "Emby salud: emby_salud.py no termino (timeout o error)"
+        return
+    fi
+    while IFS= read -r line; do
+        case "$line" in
+            ALARM:*) record "ALARM" "Emby: ${line#ALARM: }" ;;
+            WARN:*)  record "WARN"  "Emby: ${line#WARN: }" ;;
+            OK:*)    record "OK"    "Emby: ${line#OK: }" ;;
+        esac
+    done <<< "$out"
+}
+
 post_discord() {
     local webhook_url="${DISCORD_WEBHOOK_URL:-}"
     if [[ -z "$webhook_url" ]]; then
@@ -486,6 +506,7 @@ main() {
     check_log_sizes
     check_disk_space
     check_intake_webhook
+    check_emby_salud
 
     log "Overall severity: $OVERALL_SEVERITY"
 

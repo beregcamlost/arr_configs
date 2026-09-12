@@ -12,6 +12,7 @@ Uso:
 import argparse
 import html
 import os
+import json
 import sqlite3
 import subprocess
 import sys
@@ -116,6 +117,15 @@ def recoger():
         d["previews"] = int(r.stdout.strip() or 0)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         d["previews"] = "?"
+
+    # salud de la biblioteca de Emby (emby_salud.py, 12-sep): duplicados, sin entrar,
+    # sin caratula, recientes sin subs en espanol, fallos de faststart
+    try:
+        r = subprocess.run(["python3", "/config/berenstuff/automation/scripts/streaming/emby_salud.py",
+                            "--json"], capture_output=True, text=True, timeout=600)
+        d["emby"] = json.loads(r.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        d["emby"] = None
     return d
 
 
@@ -137,6 +147,19 @@ def construir(d):
     filas = [
         fila("📥", "Entraron en 24 h", d["entraron"]),
         fila("🎞️" if d["previews"] else "✅", "Recientes sin preview", d["previews"]),
+    ]
+    e = d.get("emby")
+    if e:
+        filas += [
+            fila("🔴" if e["duplicados"] else "✅", "Duplicados en Emby", len(e["duplicados"])),
+            fila("🚪" if e["sin_entrar"] else "✅", "En disco sin entrar a Emby", len(e["sin_entrar"])),
+            fila("🖼️" if e["sin_caratula"] else "✅", "Sin caratula", len(e["sin_caratula"])),
+            fila("💬" if e["sin_subs"] else "✅", "Recientes sin subs en espanol", len(e["sin_subs"])),
+            fila("⚡" if e["faststart"] else "✅", "Fallos de faststart (24 h)", e["faststart"]),
+        ]
+    else:
+        filas += [fila("❓", "Salud de Emby", "no se pudo medir")]
+    filas += [
         fila("🔧", "Se ajustaron solos", d["ajustados"]),
         fila("🙈" if n_ocultos else "✅", "Ocultos ahora mismo", n_ocultos),
         fila("🏷️", "Visibles pero marcados", n_marcados),
@@ -157,6 +180,17 @@ def construir(d):
     if d["fallidos"]:
         lineas = ["%s — %s" % (corto(r["path"]), r["motivo"]) for r in d["fallidos"]]
         secciones.append(("🔴 Fallidos", "<br>".join(html.escape(x) for x in lineas)))
+
+    if e:
+        detalle = []
+        for clave, titulo in (("duplicados", "Duplicados"), ("sin_entrar", "Sin entrar a Emby"),
+                              ("sin_caratula", "Sin caratula"), ("sin_subs", "Sin subs en espanol")):
+            for x in e[clave][:5]:
+                detalle.append("%s · %s" % (titulo, x))
+            if len(e[clave]) > 5:
+                detalle.append("%s · ... y %d mas" % (titulo, len(e[clave]) - 5))
+        if detalle:
+            secciones.append(("🩺 Emby: que revisar", "<br>".join(html.escape(x) for x in detalle)))
 
     if d["gpu"]:
         g = d["gpu"]
