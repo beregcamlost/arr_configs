@@ -90,7 +90,11 @@ def probe(p):
                         "stream=codec_type,codec_name:format=duration", "-of", "json", p],
                        capture_output=True, text=True, timeout=300)
     d = json.loads(r.stdout or "{}")
-    return ([(s.get("codec_type"), s.get("codec_name")) for s in d.get("streams", [])],
+    # Solo video/audio/subtitulos: los mp4 de WEBRip traen pistas "data" (bin_data: timecode,
+    # metadatos del muxer) que ffmpeg -c copy no re-empaqueta. Compararlas hacia fallar la
+    # verificacion de 18 archivos por corrida (12-sep-2026) sin que faltara nada reproducible.
+    return ([(s.get("codec_type"), s.get("codec_name")) for s in d.get("streams", [])
+             if s.get("codec_type") in ("video", "audio", "subtitle")],
             float(d.get("format", {}).get("duration") or 0))
 
 
