@@ -121,6 +121,24 @@ def viendo():
     return {os.path.realpath(i["Path"]) for i in items if i.get("Path")}
 
 
+def avisar_emby(p):
+    """POST /Library/Media/Updated (Modified): Emby vuelve a leer el archivo reescrito.
+
+    El indice adelante cambia el tamaño unos bytes y, como se conserva el mtime, Emby no
+    se entera solo: 13 peliculas quedaron con el MediaSource desactualizado el 11-sep.
+    Entra por la cola del vigilante (nunca un refresco de biblioteca en paralelo).
+    """
+    try:
+        body = json.dumps({"Updates": [{"Path": p, "UpdateType": "Modified"}]}).encode()
+        req = urllib.request.Request(
+            os.environ["EMBY_URL"].rstrip("/") + "/emby/Library/Media/Updated", data=body,
+            method="POST", headers={"X-Emby-Token": os.environ["EMBY_API_KEY"],
+                                    "Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=60).read()
+    except Exception as e:   # no fatal: el archivo ya quedo bien en disco
+        log(f"  aviso a Emby fallo (no fatal): {e}")
+
+
 def escaneando():
     return next(t for t in emby("/ScheduledTasks") if t["Name"] == "Scan media library")["State"] != "Idle"
 
@@ -170,6 +188,7 @@ def procesar(p):
         os.chmod(tmp, st.st_mode & 0o7777)
         os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
         os.replace(tmp, p)
+        avisar_emby(p)
         return "ok"
     finally:
         if os.path.exists(tmp):
