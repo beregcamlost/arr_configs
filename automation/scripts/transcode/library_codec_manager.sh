@@ -2236,11 +2236,13 @@ extract_profile_subtitle_sidecars() {
   while IFS=$'\t' read -r idx codec lang forced hi; do
     [[ -z "$idx" ]] && continue
     [[ "$text_codecs" == *" $codec "* ]] || continue          # text codecs only
-    if [[ -n "$profile_set" ]]; then
-      lang_in_set_inline "$lang" "$profile_set" || continue   # profile languages only
-      [[ "$lang" == "und" ]] && continue
-    fi
-    # Sin perfil conocido no se filtra por idioma: preservar gana a ser selectivo.
+    # 12-sep-2026: se extrae TODO sub de texto con idioma, no solo los del perfil. Un sub
+    # en otro idioma es la unica fuente de traduccion cuando no hay ingles: Hell Mode
+    # S02E11 llego solo con fre/ger/pol, se tiraron al re-empaquetar y el episodio quedo
+    # sin subs hasta que se rescato el original del backup. El quality manager usa esos
+    # sidecars como fuente (fase 1.75) y los limpia cuando el perfil esta completo (1.5).
+    # Con perfil conocido solo se omite lo que no trae idioma (und); sin perfil, nada.
+    [[ -n "$profile_set" && "$lang" == "und" ]] && continue
 
     # Normalize 3-letter ISO to the 2-letter code Bazarr/Emby use for sidecar discovery.
     local lang2="$lang"
