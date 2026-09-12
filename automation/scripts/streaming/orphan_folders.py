@@ -57,6 +57,27 @@ def huerfanas():
     return fuera
 
 
+def vacias_con_dueno():
+    """Carpetas que SI tienen dueño en Radarr/Sonarr pero sin ningun archivo (12-sep-2026).
+
+    Radarr deja la carpeta creada al añadir la pelicula aunque nunca baje nada (Greenland,
+    The Benchwarmers: vacias desde febrero/abril, sin monitorear), y como el *arr la
+    reclama no sale en unmappedFolders. Emby las ve por el enlace del estante y muestra
+    el titulo vacio. Borrar la carpeta es inocuo: el *arr la vuelve a crear al importar.
+    """
+    out = []
+    try:
+        for m in arr_get(os.environ["RADARR_URL"], os.environ["RADARR_KEY"], "/api/v3/movie"):
+            if not m.get("hasFile") and m.get("path"):
+                out.append(m["path"])
+        for sr in arr_get(os.environ["SONARR_URL"], os.environ["SONARR_KEY"], "/api/v3/series"):
+            if (sr.get("statistics") or {}).get("episodeFileCount", 0) == 0 and sr.get("path"):
+                out.append(sr["path"])
+    except Exception as e:
+        log("  aviso: no pude listar titulos sin archivo en los *arr: %s" % e)
+    return out
+
+
 def tiene_video(d):
     for r, _, ficheros in os.walk(d):
         for f in ficheros:
@@ -78,7 +99,11 @@ def main():
     args = ap.parse_args()
 
     candidatas, con_video = [], []
-    for p in huerfanas():
+    vistas = set()
+    for p in huerfanas() + vacias_con_dueno():
+        if p in vistas:
+            continue
+        vistas.add(p)
         d = pathlib.Path(p)
         # cinturon: solo dentro de /media, y solo un nivel bajo la raiz del estante
         if not str(d).startswith(MEDIA_ROOT + "/") or len(d.relative_to(MEDIA_ROOT).parts) != 2:
