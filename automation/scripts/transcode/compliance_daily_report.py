@@ -108,6 +108,14 @@ def recoger():
         d["gpu"] = None
 
     con.close()
+
+    # previews (.bif) de lo reciente que siguen pendientes (previews_recientes.py, 12-sep)
+    try:
+        r = subprocess.run(["python3", "/config/berenstuff/automation/scripts/streaming/previews_recientes.py",
+                            "--pendientes"], capture_output=True, text=True, timeout=300)
+        d["previews"] = int(r.stdout.strip() or 0)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        d["previews"] = "?"
     return d
 
 
@@ -128,6 +136,7 @@ def construir(d):
 
     filas = [
         fila("📥", "Entraron en 24 h", d["entraron"]),
+        fila("🎞️" if d["previews"] else "✅", "Recientes sin preview", d["previews"]),
         fila("🔧", "Se ajustaron solos", d["ajustados"]),
         fila("🙈" if n_ocultos else "✅", "Ocultos ahora mismo", n_ocultos),
         fila("🏷️", "Visibles pero marcados", n_marcados),
