@@ -284,8 +284,17 @@ def library(name):
     return next((v for v in api("GET", "/Library/VirtualFolders") if v["Name"] == name), None)
 
 
+# Una biblioteca creada por API nace SIN proveedores de metadatos (TypeOptions vacio, sin
+# idioma ni pais): Emby "refresca" el item en 100 ms sin preguntarle nada a TMDB/TVDB, y el
+# titulo queda sin caratula ni ids salvo que traiga nfo local. Asi quedaron Me Before You y
+# Rock of Ages el 12-sep-2026 (Beren: "dime que si estamos bien sin mentirme"). Los estantes
+# heredan los proveedores de su biblioteca madre (Movies / Series), que si estan a mano.
+HEREDADAS = ("TypeOptions", "PreferredMetadataLanguage", "MetadataCountryCode",
+             "PreferredImageLanguage")
+
+
 def ensure_library(sub, spec):
-    """Crea la biblioteca si falta y la deja con OPCIONES_CASA (converge en cada corrida)."""
+    """Crea la biblioteca si falta y la deja con OPCIONES_CASA + proveedores de la madre."""
     cur = library(spec["name"])
     created = False
     if cur is None:
@@ -294,11 +303,16 @@ def ensure_library(sub, spec):
             RefreshLibrary="false")
         cur = library(spec["name"])
         created = True
+    quiere = dict(OPCIONES_CASA)
+    madre = next((library(r["lib"]) for r in RESTO.values() if r["shelf"] == sub), None)
+    if madre:
+        quiere.update({k: madre["LibraryOptions"].get(k) for k in HEREDADAS})
     opts = dict(cur["LibraryOptions"])
-    if any(opts.get(k) != v for k, v in OPCIONES_CASA.items()):
-        opts.update(OPCIONES_CASA)   # objeto COMPLETO: un POST parcial pisa lo ausente
+    if any(opts.get(k) != v for k, v in quiere.items()):
+        opts.update(quiere)   # objeto COMPLETO: un POST parcial pisa lo ausente
         api("POST", "/Library/VirtualFolders/LibraryOptions",
             {"Id": cur["Id"], "LibraryOptions": opts})
+        print(f"{spec['name']:24}      opciones de la casa aplicadas (proveedores de {madre['Name'] if madre else '-'})")
     return cur["Id"], created
 
 
