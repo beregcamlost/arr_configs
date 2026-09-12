@@ -122,19 +122,32 @@ def viendo():
 
 
 def avisar_emby(p):
-    """POST /Library/Media/Updated (Modified): Emby vuelve a leer el archivo reescrito.
+    """Refresco de validacion del item de Emby que apunta a este archivo.
 
-    El indice adelante cambia el tamaño unos bytes y, como se conserva el mtime, Emby no
-    se entera solo: 13 peliculas quedaron con el MediaSource desactualizado el 11-sep.
-    Entra por la cola del vigilante (nunca un refresco de biblioteca en paralelo).
+    El indice adelante cambia el tamaño unos bytes y, como se conserva el mtime a
+    proposito (si no, la pelicula saltaria a "Novedades"), Emby no se entera solo: 13
+    peliculas quedaron con el MediaSource desactualizado el 11-sep. Library/Media/Updated
+    "Modified" tampoco, ni ValidationOnly (probado 12-sep): solo Items/{id}/Refresh
+    FullRefresh (sin ReplaceAll) relee el archivo; por item, no compite con el vigilante.
+    Los items viven en /virtual (enlaces), asi que se busca por titulo y se compara la
+    ruta real.
     """
     try:
-        body = json.dumps({"Updates": [{"Path": p, "UpdateType": "Modified"}]}).encode()
-        req = urllib.request.Request(
-            os.environ["EMBY_URL"].rstrip("/") + "/emby/Library/Media/Updated", data=body,
-            method="POST", headers={"X-Emby-Token": os.environ["EMBY_API_KEY"],
-                                    "Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=60).read()
+        titulo = os.path.basename(os.path.dirname(p))
+        cab = {"X-Emby-Token": os.environ["EMBY_API_KEY"]}
+        base = os.environ["EMBY_URL"].rstrip("/") + "/emby"
+        q = urllib.parse.urlencode({"SearchTerm": titulo.split(" (")[0], "Recursive": "true",
+                                    "IncludeItemTypes": "Movie,Episode", "Fields": "Path", "Limit": 200})
+        with urllib.request.urlopen(urllib.request.Request(base + "/Items?" + q, headers=cab), timeout=60) as r:
+            items = json.loads(r.read()).get("Items", [])
+        ids = [it["Id"] for it in items if it.get("Path") and os.path.realpath(it["Path"]) == os.path.realpath(p)]
+        for i in ids:
+            req = urllib.request.Request(
+                base + f"/Items/{i}/Refresh?MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=false&ReplaceAllImages=false",
+                method="POST", headers=cab)
+            urllib.request.urlopen(req, timeout=60).read()
+        if not ids:
+            log(f"  aviso a Emby: no encontre el item de {titulo} (lo recogera el escaneo)")
     except Exception as e:   # no fatal: el archivo ya quedo bien en disco
         log(f"  aviso a Emby fallo (no fatal): {e}")
 
