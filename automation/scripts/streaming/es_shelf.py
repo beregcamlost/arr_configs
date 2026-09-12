@@ -50,8 +50,18 @@ RELATIVA, la única identidad que sobrevive al cambio de árbol) y se devuelve d
 
 Nada de esto toca /APPBOX_DATA/storage/media, que es lo único que miran el
 librarian, Radarr/Sonarr, Bazarr y los cron de transcode.
+
+EL 12-SEP-2026 LO RECIÉN IMPORTADO ENTRA AL INSTANTE. Con las bibliotecas publicadas
+sobre /virtual, una carpeta nueva en /media/movies no existe para Emby hasta que este
+script la enlaza, y wanted() solo veía lo que Emby ya conocía: una película bajada a las
+15:00 no aparecía hasta el cron de las 05:50Z, y si traía audio español salía primero en
+*Películas* y al día siguiente se mudaba (re-creando el ítem). Beren: "hay películas que
+no refrescaron o no se agregaron". Ahora las carpetas que Emby no conoce se clasifican
+con ffprobe (audio_es_en_disco) y van directo al estante correcto; el complemento se
+refresca cuando cambian sus enlaces; y el script corre también desde el hook de import
+de Radarr/Sonarr (es_shelf_hook.sh) y cada 15 min de respaldo, todo bajo el mismo flock.
 """
-import json, os, pathlib, sys, time, urllib.parse, urllib.request
+import json, os, pathlib, subprocess, sys, time, urllib.parse, urllib.request
 
 VIRTUAL_ROOT = pathlib.Path("/APPBOX_DATA/storage/virtual")
 MEDIA_ROOT = "/APPBOX_DATA/storage/media"
@@ -159,6 +169,32 @@ def has_es_audio(item):
                for s in (item.get("MediaStreams") or []))
 
 
+VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".avi", ".ts", ".webm", ".mov"}
+
+
+def audio_es_en_disco(carpeta, tope=3):
+    """ffprobe de hasta `tope` videos (los mas grandes) de una carpeta que Emby aun no conoce.
+
+    Lee solo la cabecera, es cosa de un segundo por archivo. Cuando Emby ya tenga el item
+    manda su MediaStreams (has_es_audio), asi que esto solo decide el primer enlace.
+    """
+    try:
+        vids = sorted((p for p in carpeta.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXT),
+                      key=lambda p: p.stat().st_size, reverse=True)[:tope]
+    except OSError:
+        return False
+    for v in vids:
+        try:
+            r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a",
+                                "-show_entries", "stream_tags=language", "-of", "csv=p=0", str(v)],
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if {l.strip().lower() for l in r.stdout.split()} & ES_LANGS:
+            return True
+    return False
+
+
 def title_dir(path):
     """La carpeta del titulo y el estante donde vive, leidos de su ruta REAL.
 
@@ -181,17 +217,29 @@ def wanted(uid):
     """{clave de estante: {carpeta: ruta}} para todo lo que tiene audio en espanol."""
     out = {k: {} for k in SHELVES}
     index = {s["kind"]: k for k, s in SHELVES.items()}
+    conocidas = set()
     for kind in ("Movie", "Episode"):
         items = api("GET", f"/Users/{uid}/Items", Recursive="true", IncludeItemTypes=kind,
                     Fields="MediaStreams,Path", Limit=50000)["Items"]
         for it in items:
-            if not has_es_audio(it):
-                continue
             d, shelf = title_dir(it.get("Path"))
-            if not d or shelf in EXCLUSIVAS:
+            if not d:
+                continue
+            conocidas.add(d)
+            if shelf in EXCLUSIVAS or not has_es_audio(it):
                 continue
             out[index[kind]][d.name] = d
+    # Carpetas del catch-all que Emby todavia no conoce (recien importadas): se
+    # clasifican en disco para que entren al estante correcto desde el primer enlace.
+    for spec in RESTO.values():
+        for name, d in folders_de(spec["carpeta"]).items():
+            if d not in conocidas and audio_es_en_disco(d):
+                out[spec["shelf"]][name] = d
+                print(f"{name}: nuevo, audio en español (ffprobe) -> {SHELVES[spec['shelf']]['name']}")
     return out
+
+
+PENDIENTES = []   # (ruta del enlace, "Created"/"Deleted") de esta corrida, para avisar a Emby
 
 
 def sync_links(sub, targets):
@@ -207,11 +255,29 @@ def sync_links(sub, targets):
             link.unlink()
         link.symlink_to(dest)
         added += 1
+        PENDIENTES.append((str(link), "Created"))
     for name, link in have.items():
         if name not in targets and link.is_symlink():
             link.unlink()
             removed += 1
+            PENDIENTES.append((str(link), "Deleted"))
     return added, removed
+
+
+def avisar_emby():
+    """Le cuenta a Emby las carpetas enlazadas/desenlazadas (POST /Library/Media/Updated).
+
+    Es lo mismo que hacen Radarr/Sonarr al importar: Emby lo mete en la cola del vigilante
+    y refresca SOLO esas carpetas, agrupado con lo que el propio vigilante haya visto. Un
+    refresco de biblioteca entera lanzado a la vez que el vigilante crea cada item DOS
+    veces (12-sep-2026: Me Before You y Vampires; 10-sep: 351 pares). Nunca mas.
+    """
+    if not PENDIENTES:
+        return
+    api("POST", "/Library/Media/Updated",
+        {"Updates": [{"Path": p, "UpdateType": t} for p, t in PENDIENTES]})
+    print(f"aviso a Emby: {len(PENDIENTES)} carpeta(s) cambiada(s)")
+    PENDIENTES.clear()
 
 
 def library(name):
@@ -272,7 +338,7 @@ def set_root(lib, poner, quitar):
     return cambio
 
 
-def sync_resto(sub, spec, en_idioma):
+def sync_resto(sub, spec, en_idioma, grande=False):
     """Publica la biblioteca ancha sobre el complemento del estante de idioma.
 
     en_idioma vacio (estante bajo el minimo o retirado) significa que no hay nada que
@@ -290,14 +356,14 @@ def sync_resto(sub, spec, en_idioma):
         movida = set_root(lib, poner=media, quitar=virtual)
         if movida:
             print(f"{spec['lib']:24}      sin estante de idioma que restar -> vuelve a /media")
-        return bool(added or removed or movida)
+        return bool(added or removed or movida), movida
     resto = {n: d for n, d in folders_de(spec["carpeta"]).items() if n not in en_idioma}
     added, removed = sync_links(sub, resto)
     movida = set_root(lib, poner=virtual, quitar=media)
     print(f"{spec['lib']:24} {len(resto):4} titulos  (+{added} -{removed})"
           f"  = {spec['carpeta']} menos los {len(en_idioma)} del estante de idioma"
           f"{'  [biblioteca mudada al complemento]' if movida else ''}")
-    return bool(added or removed or movida)
+    return bool(added or removed or movida), movida
 
 
 def plan_grande(targets):
@@ -391,25 +457,26 @@ def _aplicar(targets, grande):
         changed = changed or bool(added or removed or created)
         print(f"{spec['name']:24} {len(want):4} titulos  (+{added} -{removed})"
               f"{'  [estante creado]' if created else ''}")
-        if (added or removed or created) and not grande:
-            api("POST", f"/Items/{lib_id}/Refresh", None, Recursive="true",
-                ImageRefreshMode="Default", MetadataRefreshMode="Default")
     # El complemento va DESPUES de los estantes de idioma: resta lo que aquellos se
     # acaban de llevar, asi que leerlo antes lo dejaria un dia por detras.
     raiz_movida = False
     for sub, spec in RESTO.items():
         vivo = library(SHELVES[spec["shelf"]]["name"]) is not None
-        raiz_movida = sync_resto(sub, spec, targets[spec["shelf"]] if vivo else {}) or raiz_movida
-    changed = changed or raiz_movida
+        cambio, movida = sync_resto(sub, spec, targets[spec["shelf"]] if vivo else {}, grande)
+        changed = changed or cambio
+        raiz_movida = raiz_movida or movida
     if changed and (grande or raiz_movida):
         # UN solo escaneo global, y esperamos a que termine antes de devolver el vigilante:
         # cualquier refresco concurrente sobre las mismas carpetas duplica items.
         # Cambiar la RAIZ re-crea los items: el "visto" se devuelve con userdata_rel.py.
+        PENDIENTES.clear()
         api("POST", "/Library/Refresh", {})
         print("escaneo unico lanzado; esperando a que termine...", flush=True)
         print("escaneo terminado" if escaneo() else "AVISO: el escaneo no termino antes del tope")
+    elif changed:
+        avisar_emby()
     else:
-        print("escaneo lanzado" if changed else "sin cambios")
+        print("sin cambios")
 
 
 if __name__ == "__main__":
