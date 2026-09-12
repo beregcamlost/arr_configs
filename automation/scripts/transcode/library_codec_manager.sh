@@ -1388,7 +1388,7 @@ LEFT JOIN (
          MAX(CASE WHEN stream_type='video' THEN is_hdr ELSE 0 END) AS has_hdr,
          SUM(CASE WHEN stream_type='video' AND codec IN ($codec_list_sql) AND pix_fmt='yuv420p' THEN 1 ELSE 0 END) AS compliant_v,
          SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END) AS total_v,
-         SUM(CASE WHEN stream_type='audio' AND codec IN ('aac','ac3') AND channels<=2 THEN 1 ELSE 0 END) AS good_a,
+         SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END) AS good_a,
          SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END) AS total_a,
          SUM(CASE WHEN stream_type='audio' AND LOWER(language) IN ('spa','es','lat','esp','es-la','spa-la','la','lat-am') THEN 1 ELSE 0 END) AS spa_a
   FROM probe_streams
@@ -1412,8 +1412,13 @@ ORDER BY m.path${where_limit};
       skip_reason="missing_file"
     elif [[ "$probe_ok" -ne 1 ]]; then
       skip_reason="probe_failed"
-    elif [[ "${spa_a:-0}" -ge 1 ]]; then
-      # AUDIO EN ESPANOL PROTEGIDO. Ampliado el 2026-08-21 por orden de Beren:
+    elif [[ "${spa_a:-0}" -ge 1 && "${good_a:-0}" -eq "${total_a:-0}" ]]; then
+      # AUDIO EN ESPANOL PROTEGIDO. ACOTADO EL 2026-09-06: el guard solo aplica si el
+      # audio YA es conforme. Beren reviso la regla de agosto tras medir los perfiles de
+      # los clientes reales: AAC 5.1 no hace direct play en Emby Web / Samsung / LG y
+      # obligaria a transcodificar en el appbox (2 vCPU). El downmix a estereo se queda
+      # como estandar A PROPOSITO; lo que se protege es la PISTA latina, no su surround.
+      # Un dual latino en EAC3/AC3 ahora SI se convierte, conservando todas las pistas. Ampliado el 2026-08-21 por orden de Beren:
       # "no toques nada que tenga esp latino de ninguna forma". Antes la condicion
       # exigia total_a>=2, asi que 213 archivos con UNA sola pista en espanol
       # quedaban expuestos a un transcode que los habria bajado a estereo.
@@ -1801,9 +1806,9 @@ audio_streams_already_compliant() {
         {
           n++
           gsub(/[[:space:]]+/, "", $1)
-          # AAC stereo/mono OR AC3 stereo/mono at 48kHz are both compliant.
-          # AC3 5.1+ (channels>2) still triggers downmix to AAC stereo.
-          if (($1 != "aac" && $1 != "ac3") || $2 > 2 || $3 != 48000) ok=0
+          # Solo AAC estereo/mono a 48 kHz (2026-09-06): AC3/EAC3 dejaron de contar
+          # como conformes. El estereo es deliberado — ver la nota del guard.
+          if ($1 != "aac" || $2 > 2 || $3 != 48000) ok=0
         }
         END { exit (n > 0 && ok) ? 0 : 1 }
       '
@@ -2307,7 +2312,7 @@ reprobe_after_swap() {
     db -separator $'\t' "SELECT
       COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' AND pix_fmt='yuv420p' THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END),0),
-      COALESCE(SUM(CASE WHEN stream_type='audio' AND codec IN ('aac','ac3') AND channels<=2 THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0)
     FROM probe_streams WHERE media_id=$media_id;"
   )
@@ -2828,7 +2833,7 @@ enqueue_import_cmd() {
       COALESCE(MAX(CASE WHEN stream_type='video' THEN is_hdr ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='video' AND codec='h264' AND pix_fmt='yuv420p' THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='video' THEN 1 ELSE 0 END),0),
-      COALESCE(SUM(CASE WHEN stream_type='audio' AND codec IN ('aac','ac3') AND channels<=2 THEN 1 ELSE 0 END),0),
+      COALESCE(SUM(CASE WHEN stream_type='audio' AND codec='aac' AND channels<=2 THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='audio' THEN 1 ELSE 0 END),0),
       COALESCE(SUM(CASE WHEN stream_type='audio' AND LOWER(language) IN ('spa','es','lat','esp','es-la','spa-la','la','lat-am') THEN 1 ELSE 0 END),0)
     FROM probe_streams WHERE media_id=$media_id;"
@@ -2843,8 +2848,8 @@ enqueue_import_cmd() {
     target_container="$DEFAULT_TARGET_CONTAINER"
   fi
 
-  if [[ "${spa_a:-0}" -ge 1 ]]; then
-    # DUAL LATINO PROTEGIDO — ver la nota extensa en plan_cmd. Un import nuevo con
+  if [[ "${spa_a:-0}" -ge 1 && "${good_a:-0}" -eq "${total_a:-0}" ]]; then
+    # DUAL LATINO PROTEGIDO — acotado 2026-09-06: solo si el audio ya es conforme. — ver la nota extensa en plan_cmd. Un import nuevo con
     # pista latina no entra a la cola: la conversion haria downmix a estereo.
     if [[ "$total_a" -ge 2 ]]; then
       skip_reason="dual_latino_protegido"
