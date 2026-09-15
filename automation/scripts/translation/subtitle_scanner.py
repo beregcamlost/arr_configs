@@ -219,14 +219,83 @@ def find_best_source_srt(
     return candidates[0][0]
 
 
+# ── BAD-sidecar awareness (2026-09-15) ───────────────────────────────────────
+# A .es.srt that SQM rated BAD (unresolved row in sqm_needs_upgrade) used to
+# count as "present", so it was never re-translated. Treat it as missing when
+# it is safe to replace it (same guards as subtitle_quality_manager.sh's
+# quarantine_bad_sidecar): not keep-local, and fewer than QUARANTINE_MAX prior
+# automatic rejects of that sidecar.
+QUARANTINE_MAX = int(os.environ.get("SQM_QUARANTINE_MAX", "2"))
+KEEP_LOCAL_JSON = os.environ.get(
+    "SQM_KEEP_LOCAL_JSON",
+    "/APPBOX_DATA/storage/.subtitle-intake-state/keep_local.json")
+
+
+def _sqm_bad_unresolved_langs(video_path: str) -> set:
+    db = os.environ.get("PIPELINE_DB", "").strip()
+    if not db or not os.path.isfile(db):
+        return set()
+    try:
+        conn = sqlite3.connect(db)
+        conn.execute("PRAGMA busy_timeout=30000")
+        rows = conn.execute(
+            "SELECT lang FROM sqm_needs_upgrade WHERE file_path=? AND forced=0 "
+            "AND current_rating='BAD' AND resolved_ts IS NULL", (video_path,)).fetchall()
+        conn.close()
+        return {r[0] for r in rows}
+    except sqlite3.Error as e:
+        log.debug("sqm_needs_upgrade lookup failed for %s: %s", video_path, e)
+        return set()
+
+
+def _is_keep_local(video_path: str) -> bool:
+    try:
+        data = json.load(open(KEEP_LOCAL_JSON, encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    for entry in data.get("paths", []):
+        p = entry.get("path") if isinstance(entry, dict) else entry
+        if p and video_path.startswith(p.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _prior_rejects(directory: str, stem: str, lang: str) -> int:
+    pat = os.path.join(glob.escape(directory), glob.escape(f"{stem}.{lang}") + "*.srt.*-rejected-*")
+    return len(glob.glob(pat))
+
+
+def can_replace_bad_sidecar(directory: str, stem: str, lang: str, video_path: str) -> bool:
+    return (lang == "es" and not _is_keep_local(video_path)
+            and _prior_rejects(directory, stem, lang) < QUARANTINE_MAX)
+
+
+def quarantine_sidecar(srt_path: str) -> Optional[str]:
+    """Rename an existing (BAD) sidecar out of the way before overwriting it."""
+    if not os.path.isfile(srt_path):
+        return None
+    dest = srt_path + ".sqm-rejected-" + time.strftime("%Y%m%d%H%M%S")
+    os.rename(srt_path, dest)
+    log.info("quarantined BAD sidecar %s -> %s", os.path.basename(srt_path), os.path.basename(dest))
+    return dest
+
+
 def find_missing_langs_on_disk(
-    directory: str, stem: str, profile_langs: List[str]
+    directory: str, stem: str, profile_langs: List[str], video_path: Optional[str] = None
 ) -> List[str]:
-    """Return profile languages that don't have an SRT on disk."""
+    """Return profile languages that don't have an SRT on disk.
+
+    If video_path is given, an ES sidecar that SQM rated BAD (unresolved) also
+    counts as missing when it is safe to replace it (see can_replace_bad_sidecar).
+    """
     missing = []
+    bad = _sqm_bad_unresolved_langs(video_path) if video_path else set()
     for lang in profile_langs:
         srt_path = os.path.join(directory, f"{stem}.{lang}.srt")
         if not os.path.isfile(srt_path):
+            missing.append(lang)
+        elif lang in bad and can_replace_bad_sidecar(directory, stem, lang, video_path):
+            log.info("BAD-rated %s.%s.srt treated as missing (will be quarantined and re-translated)", stem, lang)
             missing.append(lang)
     return missing
 

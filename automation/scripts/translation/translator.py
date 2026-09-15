@@ -27,6 +27,7 @@ from translation.discord import notify_translations
 from translation.srt_parser import parse_srt, write_srt
 from translation.subtitle_scanner import (
     find_best_source_srt, find_missing_langs_on_disk, get_profile_langs,
+    quarantine_sidecar,
     parse_missing_subtitles, scan_recent_missing,
 )
 
@@ -236,6 +237,51 @@ def _looks_like_spanish(srt_path: str) -> bool:
     return es_count >= 30 and es_count >= en_count * 3
 
 
+_CUE_TIME_RE = re.compile(
+    r"(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})")
+
+
+def _video_duration_s(video_path: str) -> float:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        return float(out or 0)
+    except Exception:
+        return 0.0
+
+
+def _srt_structurally_ok(srt_path: str, video_path: str) -> tuple:
+    """Same BAD thresholds as subtitle_quality_manager.sh:score_subtitle.
+
+    Returns (ok, reason). Rejects: mojibake, <200 cues/hour, <50% coverage.
+    (2026-09-15: the embedded fast path used to accept any Spanish-looking
+    track, re-feeding garbage tracks in a loop while SQM kept rating them BAD.)
+    """
+    try:
+        text = open(srt_path, encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        return False, f"unreadable: {e}"
+    if text.count("�") + text.count("Ã") > 20:
+        return False, "mojibake"
+    times = _CUE_TIME_RE.findall(text)
+    if not times:
+        return False, "no cues"
+    duration = _video_duration_s(video_path)
+    if duration <= 0:
+        return True, "no duration (check skipped)"
+    cues_per_hour = len(times) / (duration / 3600.0)
+    if cues_per_hour < 200:
+        return False, f"sparse: {cues_per_hour:.0f} cues/h"
+    h, m, s, ms = times[-1][4:8]
+    last_end = int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+    coverage = last_end / duration * 100
+    if coverage < 50:
+        return False, f"coverage {coverage:.0f}%"
+    return True, f"{cues_per_hour:.0f} cues/h, coverage {coverage:.0f}%"
+
+
 def _try_embedded_spanish(video_path: str, target_srt: str) -> bool:
     """Extract a genuine Spanish embedded subtitle track to target_srt.
 
@@ -256,6 +302,12 @@ def _try_embedded_spanish(video_path: str, target_srt: str) -> bool:
                           track_id, os.path.basename(video_path))
                 continue
             if _looks_like_spanish(tmp_path):
+                ok, why = _srt_structurally_ok(tmp_path, video_path)
+                if not ok:
+                    log.info("embedded-extract: track %d is Spanish but REJECTED (%s) in %s — falling through to NMT",
+                             track_id, why, os.path.basename(video_path))
+                    continue
+                quarantine_sidecar(target_srt)  # only exists here when SQM rated it BAD
                 shutil.move(tmp_path, target_srt)
                 log.info(
                     "embedded-extract: used track %d (tag=%s codec=%s) from %s -> %s",
@@ -344,7 +396,7 @@ def translate_file(cfg: Config, media_path: str, chars_remaining=None,
         log.info("Empty profile for %s, skipping", basename)
         return [], []
 
-    missing = find_missing_langs_on_disk(directory, stem, profile_langs)
+    missing = find_missing_langs_on_disk(directory, stem, profile_langs, video_path=media_path)
     if not missing:
         log.info("All profile langs present for %s", basename)
         return [], []
@@ -431,6 +483,7 @@ def translate_file(cfg: Config, media_path: str, chars_remaining=None,
             )
 
             output_path = os.path.join(directory, f"{stem}.{base_lang}.srt")
+            quarantine_sidecar(output_path)  # only exists here when SQM rated it BAD
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(write_srt(translated_cues))
             marker_ext = MARKER_EXTENSIONS.get(provider, ".ollama")

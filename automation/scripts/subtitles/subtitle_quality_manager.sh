@@ -35,7 +35,13 @@ DEEPL_API_KEY="${DEEPL_API_KEY:-}"
 BAZARR_MIN_SCORE="${BAZARR_MIN_SCORE:-80}"
 UPGRADE_TRANSLATE_RETRY="${UPGRADE_TRANSLATE_RETRY:-3}"
 UPGRADE_ALERT_RETRY="${UPGRADE_ALERT_RETRY:-4}"
+# 2026-09-15: re-alert every N retries (~N days) while a row stays unresolved,
+# instead of a single one-shot alert that goes silent for weeks (Marshals case).
+UPGRADE_ALERT_REPEAT="${UPGRADE_ALERT_REPEAT:-7}"
 UPGRADE_MAX_RETRY="${UPGRADE_MAX_RETRY:-5}"
+# 2026-09-15: BAD es sidecar quarantine (see quarantine_bad_sidecar)
+SQM_QUARANTINE_MAX="${SQM_QUARANTINE_MAX:-2}"
+SQM_KEEP_LOCAL_JSON="${SQM_KEEP_LOCAL_JSON:-/APPBOX_DATA/storage/.subtitle-intake-state/keep_local.json}"
 # Dead-end sources (embedded_desync/missing) cap at UPGRADE_MAX_RETRY; other
 # sources use a higher ceiling before abandonment.
 UPGRADE_PROVIDER_MAX_RETRY="${UPGRADE_PROVIDER_MAX_RETRY:-30}"
@@ -1439,6 +1445,79 @@ check_deepl_quota() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# BAD sidecar quarantine (2026-09-15)
+# Root cause of the Marshals incident (Apr-Jun 2026): a BAD .es.srt was left in
+# place "for review", so Emby kept serving it for weeks while the translator
+# never re-did it (it only translates languages MISSING on disk). Now a BAD es
+# sidecar is renamed to <name>.es.srt.sqm-rejected-<stamp> (same convention as
+# subtitle_intake_gate.py) so translator.py sees ES missing and rebuilds it from
+# the EN source on its next lane run (<=30 min).
+# Guards: es only, not forced, not keep-local, EN source must exist (sidecar or
+# embedded text track), and at most SQM_QUARANTINE_MAX automatic rejects per
+# file — after that we ESCALATE (Discord) and leave the file alone (no loops).
+# ---------------------------------------------------------------------------
+
+is_keep_local_path() {  # $1=media path -> 0 if under a keep-local dir
+  local fp="$1" kl_dir
+  [[ -f "$SQM_KEEP_LOCAL_JSON" ]] || return 1
+  while IFS= read -r kl_dir; do
+    [[ -n "$kl_dir" && "$fp" == "$kl_dir"/* ]] && return 0
+  done < <(jq -r '.paths[]?.path // empty' "$SQM_KEEP_LOCAL_JSON" 2>/dev/null)
+  return 1
+}
+
+has_en_source() {  # $1=mkv $2=dir $3=stem -> 0 if an EN text source exists
+  local mkv="$1" dir="$2" stem="$3"
+  [[ -f "$dir/$stem.en.srt" || -f "$dir/$stem.en.sdh.srt" ]] && return 0
+  ffprobe -v quiet -print_format json -show_streams -select_streams s "$mkv" 2>/dev/null \
+    | jq -e '[.streams[] | select(((.tags.language // "") | ascii_downcase | test("^(en|eng)$")) and (.codec_name | test("subrip|ass|ssa|mov_text|webvtt")))] | length > 0' >/dev/null 2>&1
+}
+
+# $1=state_db $2=mkv $3=srt $4=lang_norm $5=forced $6=dir $7=stem
+# Returns 0 if the sidecar was quarantined (or would be, in dry-run), 1 if kept.
+quarantine_bad_sidecar() {
+  local state_db="$1" mkv="$2" srt="$3" lang="$4" forced="$5" dir="$6" stem="$7"
+  local srt_base
+  srt_base="$(basename "$srt")"
+  [[ "$lang" == "es" && "$forced" == "0" ]] || return 1
+  if is_keep_local_path "$mkv"; then
+    log "QUARANTINE_SKIP keep-local: $srt_base"
+    return 1
+  fi
+  if ! has_en_source "$mkv" "$dir" "$stem"; then
+    log "QUARANTINE_SKIP no EN source to re-translate from: $srt_base"
+    return 1
+  fi
+  local prior
+  prior="$(find "$dir" -maxdepth 1 \( -name "$stem.es*.srt.sqm-rejected-*" -o -name "$stem.es*.srt.intake-rejected-*" \) 2>/dev/null | wc -l)"
+  if [[ "$prior" -ge "$SQM_QUARANTINE_MAX" ]]; then
+    log "QUARANTINE_ESCALATE: $prior prior auto-rejects, BAD sub kept for manual review: $srt_base"
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+      upsert_sqm_needs_upgrade "$state_db" "$mkv" "$lang" "$forced" "BAD" 0 "external"
+      notify_discord_embed "🟠 Subtitle BAD — manual review needed" \
+        "Auto-quarantine limit reached; the BAD subtitle is still being served" \
+        15105570 "Subtitle Quality Manager" \
+        "$(jq -nc --arg f "$srt_base" --arg l "$lang" --arg n "$prior" '[{name:"📁 File",value:$f,inline:false},{name:"🌐 Language",value:$l,inline:true},{name:"🔁 Auto-rejects",value:$n,inline:true}]')" \
+        || log "WARN: Discord escalate alert failed (non-fatal)"
+    fi
+    return 1
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] QUARANTINE would rename BAD sidecar -> ${srt_base}.sqm-rejected-<stamp> (prior=$prior)"
+    return 0
+  fi
+  local stamp
+  stamp="$(date +%Y%m%d%H%M%S)"
+  if mv -n "$srt" "$srt.sqm-rejected-$stamp"; then
+    log "QUARANTINE: BAD sidecar renamed -> ${srt_base}.sqm-rejected-$stamp (prior=$prior); translator will redo ES from EN"
+    upsert_sqm_needs_upgrade "$state_db" "$mkv" "$lang" "$forced" "BAD" 0 "quarantined"
+    file_modified=1   # caller's flag: triggers Emby refresh + Bazarr rescan (Phase 3)
+    return 0
+  fi
+  log "WARN: quarantine rename failed: $srt_base"
+  return 1
+}
 
 run_upgrade_retries() {
   local state_db="$1"
@@ -1468,11 +1547,21 @@ run_upgrade_retries() {
       log "UPGRADE_ABANDONED: max retries ($effective_max) reached lang=$nu_lang source=$nu_source: $(basename "$nu_path")"
       sqm_db "$state_db" "UPDATE sqm_needs_upgrade SET source='accepted_fallback', resolved_ts=$(date +%s) WHERE file_path='$(sql_escape "$nu_path")' AND lang='$(sql_escape "$nu_lang")' AND forced=$nu_forced;" 2>/dev/null || true
       abandoned=$((abandoned + 1))
+      # 2026-09-15: abandonment used to be silent (row looks "resolved" in the DB).
+      if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+        notify_discord_embed "⚫ Subtitle Upgrade Abandoned" \
+          "Gave up after $effective_max retries — the subtitle is still BAD/WARN. Fix by hand." \
+          10038562 "Subtitle Quality Manager" \
+          "$(jq -nc --arg f "$(basename "$nu_path")" --arg l "$nu_lang" --arg s "$nu_source" '[{name:"📁 File",value:$f,inline:false},{name:"🌐 Language",value:$l,inline:true},{name:"📋 Source",value:$s,inline:true}]')" \
+          || log "WARN: Discord abandon alert failed (non-fatal)"
+      fi
       continue
     fi
 
-    # Stage 2: Discord alert at retry threshold
-    if [[ "$nu_retries" -eq "$((UPGRADE_ALERT_RETRY - 1))" ]] && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+    # Stage 2: Discord alert at retry threshold, then again every UPGRADE_ALERT_REPEAT retries
+    if [[ "$nu_retries" -ge "$((UPGRADE_ALERT_RETRY - 1))" ]] \
+       && [[ $(( (nu_retries - (UPGRADE_ALERT_RETRY - 1)) % UPGRADE_ALERT_REPEAT )) -eq 0 ]] \
+       && [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
       local _alert_fields
       _alert_fields="$(jq -nc \
         --arg file "$(basename "$nu_path")" \
@@ -1971,13 +2060,18 @@ cmd_auto_maintain() {
           fi
           ;;
         BAD)
-          if [[ "$DRY_RUN" -eq 1 ]]; then
-            log "[DRY-RUN] BAD external (would keep, needs manual replacement): $srt_basename"
+          if quarantine_bad_sidecar "$state_db" "$mkv_file" "$srt_file" "$ext_lang_norm" "$ext_forced_num" "$dir" "$name_stem"; then
+            exhausted_count=$((exhausted_count + 1))
+            exhausted_summary="${exhausted_summary}${basename} [${ext_lang_norm}] — bad sub, quarantined for re-translation\n"
           else
-            log "BAD external (kept, needs manual replacement): $srt_basename"
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+              log "[DRY-RUN] BAD external (would keep, needs manual replacement): $srt_basename"
+            else
+              log "BAD external (kept, needs manual replacement): $srt_basename"
+            fi
+            exhausted_count=$((exhausted_count + 1))
+            exhausted_summary="${exhausted_summary}${basename} [${ext_lang_norm}] — bad sub, kept for review\n"
           fi
-          exhausted_count=$((exhausted_count + 1))
-          exhausted_summary="${exhausted_summary}${basename} [${ext_lang_norm}] — bad sub, kept for review\n"
           ;;
       esac
     done < <(find "$dir" -maxdepth 1 -name "${name_stem}.*.srt" -type f 2>/dev/null | sort)
