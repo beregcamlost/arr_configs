@@ -288,8 +288,8 @@ def sqm_enqueue(video_paths):
 # ---------------------------------------------------------------- releases por idioma (Radarr/Sonarr)
 def _release_row(x, lang_key):
     langs = [l.get("name") for l in x.get("languages") or []]
-    want = LANGS[lang_key][0]
-    hint = re.search(LANG_TITLE_HINTS[lang_key], x.get("title", ""), re.I) is not None
+    want = LANGS[lang_key][0] if lang_key else None
+    hint = lang_key is None or re.search(LANG_TITLE_HINTS[lang_key], x.get("title", ""), re.I) is not None
     return {"title": x.get("title", ""), "size_gb": round((x.get("size") or 0) / 1e9, 1), "seeders": x.get("seeders") or 0,
             "langs": langs, "quality": ((x.get("quality") or {}).get("quality") or {}).get("name", "?"),
             "indexer": x.get("indexer", "?"), "score": x.get("customFormatScore", 0), "rejected": bool(x.get("rejected")),
@@ -308,7 +308,10 @@ def releases(kind, arr_id, lang_key, season=None, limit=8):
         raw = _arr(SONARR_URL, SONARR_KEY, "GET", "release", params=params, timeout=120)
     rows = [_release_row(x, lang_key) for x in raw]
     rows = [r for r in rows if r["lang_match"] and r["seeders"] > 0]
-    rows.sort(key=lambda r: (r["lang_sure"], not r["rejected"], r["score"], r["seeders"]), reverse=True)
+    if lang_key:
+        rows.sort(key=lambda r: (r["lang_sure"], not r["rejected"], r["score"], r["seeders"]), reverse=True)
+    else:  # sin idioma: la mejor copia (no rechazada, mejor custom format, mas seeders)
+        rows.sort(key=lambda r: (not r["rejected"], r["score"], r["seeders"]), reverse=True)
     return rows[:limit], len(raw)
 
 
@@ -396,3 +399,258 @@ def recent_log(name, n=25):
         return f"no existe {name}"
     lines = p.read_text(errors="ignore").splitlines()[-n:]
     return "\n".join(l[:160] for l in lines)
+
+
+# ================================================================ v4: ver y tocar todo desde el bot
+# ---------------------------------------------------------------- cola de descargas (Radarr + Sonarr)
+def _iso_ts(s):
+    """'2026-09-15T13:50:16.0000000Z' -> epoch (UTC). 0 si no parsea."""
+    try:
+        return time.mktime(time.strptime(str(s)[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+    except Exception:
+        return 0
+
+
+def arr_queue():
+    """Lo que esta en las colas de Radarr y Sonarr, una fila por descarga (una temporada = 1 fila).
+    -> [ {kind, ids:[queue ids], title, arr_id, release, status, tstate, tstatus, size_gb, pct, eta, msgs, protocol, client, eps} ]
+    Problemas primero, luego lo menos avanzado."""
+    out = {}
+    for kind, base, key, extra in (("m", RADARR_URL, RADARR_KEY, {"includeMovie": "true", "includeUnknownMovieItems": "true"}),
+                                   ("s", SONARR_URL, SONARR_KEY, {"includeSeries": "true", "includeEpisode": "true",
+                                                                  "includeUnknownSeriesItems": "true"})):
+        try:
+            recs = _arr(base, key, "GET", "queue", params=dict(pageSize=500, **extra), timeout=60).get("records", [])
+        except Exception as e:
+            out[(kind, "err")] = {"kind": kind, "ids": [], "title": f"no pude leer la cola de {'Radarr' if kind == 'm' else 'Sonarr'}: {e}",
+                                  "arr_id": None, "release": "", "status": "error", "tstate": "", "tstatus": "error", "size_gb": 0,
+                                  "pct": 0, "eta": "", "msgs": [], "protocol": "", "client": "", "eps": []}
+            continue
+        for r in recs:
+            k = (kind, r.get("downloadId") or str(r.get("id")))
+            row = out.get(k)
+            if not row:
+                if kind == "m":
+                    mv = r.get("movie") or {}
+                    title = f"{mv.get('title')} ({mv.get('year')})" if mv.get("title") else "(peli que Radarr no reconoce)"
+                    arr_id = r.get("movieId")
+                else:
+                    se = r.get("series") or {}
+                    title = se.get("title") or "(serie que Sonarr no reconoce)"
+                    arr_id = r.get("seriesId")
+                size, left = float(r.get("size") or 0), float(r.get("sizeleft") or 0)
+                msgs = [r["errorMessage"]] if r.get("errorMessage") else []
+                for sm in r.get("statusMessages") or []:
+                    msgs += [m for m in (sm.get("messages") or []) if m]
+                row = out[k] = {"kind": kind, "ids": [], "title": title, "arr_id": arr_id, "release": r.get("title") or "",
+                                "status": r.get("status") or "", "tstate": r.get("trackedDownloadState") or "",
+                                "tstatus": r.get("trackedDownloadStatus") or "", "size_gb": round(size / 1e9, 1),
+                                "pct": int(100 * (1 - left / size)) if size else 0, "eta": r.get("timeleft") or "",
+                                "msgs": msgs[:3], "protocol": r.get("protocol") or "", "client": r.get("downloadClient") or "", "eps": []}
+            row["ids"].append(r["id"])
+            ep = r.get("episode") or {}
+            if ep:
+                row["eps"].append(f"S{ep.get('seasonNumber', 0):02d}E{ep.get('episodeNumber', 0):02d}")
+    rows = list(out.values())
+    rows.sort(key=lambda r: (r["tstatus"] == "ok" and not r["msgs"], r["pct"]))
+    return rows
+
+
+def queue_remove(kind, queue_ids, blocklist=False, search=True):
+    """Quita una descarga de la cola (y del cliente). blocklist=True la veta y search=True vuelve a buscar otra."""
+    base, key = (RADARR_URL, RADARR_KEY) if kind == "m" else (SONARR_URL, SONARR_KEY)
+    return _arr(base, key, "DELETE", "queue/bulk", timeout=60, json={"ids": [int(i) for i in queue_ids]},
+                params={"removeFromClient": "true", "blocklist": "true" if blocklist else "false",
+                        "skipRedownload": "false" if search else "true"})
+
+
+# ---------------------------------------------------------------- Transmission
+TRANSMISSION_URL = os.environ.get("TRANSMISSION_URL", "")
+_TR_STATUS = {0: "parado", 1: "cola verif.", 2: "verificando", 3: "cola", 4: "bajando", 5: "cola seed", 6: "seed"}
+
+
+class _Transmission:
+    """RPC minimo (mismo esquema que transmission_cleanup_manual.py)."""
+    def __init__(self):
+        import base64
+        self.url = TRANSMISSION_URL
+        if not self.url:
+            raise RuntimeError("TRANSMISSION_URL vacio en .env")
+        self.auth = "Basic " + base64.b64encode(f"{os.environ.get('TRANSMISSION_USER', '')}:{os.environ.get('TRANSMISSION_PASS', '')}".encode()).decode()
+        self.sid = ""
+
+    def call(self, method, arguments=None):
+        for _ in range(2):
+            r = requests.post(self.url, json={"method": method, "arguments": arguments or {}},
+                              headers={"Authorization": self.auth, "X-Transmission-Session-Id": self.sid}, timeout=60)
+            if r.status_code == 409:
+                self.sid = r.headers.get("X-Transmission-Session-Id", "")
+                continue
+            r.raise_for_status()
+            return r.json()
+        raise RuntimeError("Transmission: 409 persistente")
+
+
+def transmission_list():
+    """-> [ {id, name, cat, state, pct, rate_mb, eta_min, err, stalled, size_gb, age_d, idle_d} ] problemas primero."""
+    fields = ["id", "name", "status", "percentDone", "rateDownload", "eta", "error", "errorString", "isStalled", "labels",
+              "downloadDir", "addedDate", "activityDate", "totalSize", "peersSendingToUs"]
+    ts = _Transmission().call("torrent-get", {"fields": fields})["arguments"]["torrents"]
+    now = time.time()
+    out = []
+    for t in ts:
+        cat = (t.get("labels") or [""])[0] or (t.get("downloadDir") or "").rstrip("/").split("/")[-1]
+        pct = int(100 * float(t.get("percentDone") or 0))
+        stalled = bool(t.get("isStalled")) or (pct < 100 and not t.get("rateDownload") and now - (t.get("activityDate") or now) > 3 * 86400)
+        out.append({"id": t["id"], "name": t.get("name", "?"), "cat": cat, "state": _TR_STATUS.get(t.get("status"), "?"), "pct": pct,
+                    "rate_mb": round((t.get("rateDownload") or 0) / 1e6, 1), "eta_min": (t["eta"] // 60) if (t.get("eta") or 0) > 0 else None,
+                    "err": t.get("errorString") or "", "stalled": stalled, "size_gb": round((t.get("totalSize") or 0) / 1e9, 1),
+                    "age_d": int((now - (t.get("addedDate") or now)) / 86400), "idle_d": int((now - (t.get("activityDate") or now)) / 86400),
+                    "peers": t.get("peersSendingToUs") or 0})
+    out.sort(key=lambda r: (not (r["err"] or r["stalled"]), r["pct"] == 100, r["pct"]))
+    return out
+
+
+def transmission_remove(ids, delete_data=True):
+    return _Transmission().call("torrent-remove", {"ids": [int(i) for i in ids], "delete-local-data": bool(delete_data)})
+
+
+# ---------------------------------------------------------------- Emby: recientes, cifras, usuarios
+def emby_recent(hours=48, limit=40):
+    """Lo agregado en las ultimas `hours` horas, agrupado (peli = 1 fila; serie = 1 fila con n episodios).
+    -> [ {kind, id, name, n, no_es, ts, eps:[...]} ] mas nuevo primero. no_es = episodios/peli sin subs ni audio es."""
+    since = time.time() - hours * 3600
+    data = emby("GET", "Items", IncludeItemTypes="Movie,Episode", Recursive="true", SortBy="DateCreated", SortOrder="Descending",
+                Limit=400, Fields="DateCreated,SeriesName,SeriesId,MediaStreams,ParentIndexNumber,IndexNumber,ProductionYear,Path",
+                timeout=90).get("Items", [])
+    es_codes = LANGS["espanol"][1]
+    groups = {}
+    for it in data:
+        ts = _iso_ts(it.get("DateCreated"))
+        if ts and ts < since:
+            break
+        a, s = streams_summary(it)
+        has_es = bool((a | s) & es_codes)
+        if not has_es and it.get("Path"):
+            has_es = "es" in sidecars(it["Path"])
+        if it.get("Type") == "Movie":
+            groups[("m", it["Id"])] = {"kind": "m", "id": it["Id"], "name": f"{it.get('Name')} ({it.get('ProductionYear') or '?'})",
+                                       "n": 1, "no_es": 0 if has_es else 1, "ts": ts, "eps": [], "path": it.get("Path")}
+        else:
+            g = groups.setdefault(("s", it.get("SeriesName")), {"kind": "s", "id": it.get("SeriesId"), "name": it.get("SeriesName") or "?",
+                                                                 "n": 0, "no_es": 0, "ts": ts, "eps": [], "path": it.get("Path")})
+            g["n"] += 1
+            g["no_es"] += 0 if has_es else 1
+            g["eps"].append(f"S{it.get('ParentIndexNumber', 0):02d}E{it.get('IndexNumber', 0):02d}")
+    rows = sorted(groups.values(), key=lambda g: g["ts"], reverse=True)
+    return rows[:limit]
+
+
+def emby_counts():
+    """-> {'Movie': n, 'Series': n, 'Episode': n}"""
+    out = {}
+    for t in ("Movie", "Series", "Episode"):
+        try:
+            out[t] = emby("GET", "Items", IncludeItemTypes=t, Recursive="true", Limit=0).get("TotalRecordCount", 0)
+        except Exception:
+            out[t] = -1
+    return out
+
+
+def emby_users_activity():
+    """-> (total, activos 7 d, activos 30 d, [(nombre, dias desde ultima actividad)] ordenado por reciente)"""
+    users = emby("GET", "Users")
+    now = time.time()
+    rows = []
+    for u in users:
+        ts = _iso_ts(u.get("LastActivityDate"))
+        rows.append((u.get("Name"), int((now - ts) / 86400) if ts else None))
+    rows.sort(key=lambda r: (r[1] is None, r[1] or 0))
+    a7 = sum(1 for _, d in rows if d is not None and d <= 7)
+    a30 = sum(1 for _, d in rows if d is not None and d <= 30)
+    return len(rows), a7, a30, rows
+
+
+# ---------------------------------------------------------------- Bazarr: que falta, historial, tareas, sync
+def bazarr_wanted(limit=60):
+    """Lo que Bazarr sabe que le falta. -> (pelis:[{title, radarrId, missing}], series:{serie: [(SxxEyy, sonarrEpisodeId)]}, tot_m, tot_e)"""
+    mv = bazarr("GET", "movies/wanted", start=0, length=limit)
+    ep = bazarr("GET", "episodes/wanted", start=0, length=limit * 3)
+    movies = [{"title": r.get("title"), "radarrId": r.get("radarrId"),
+               "missing": [m.get("code2") for m in (r.get("missing_subtitles") or [])]} for r in (mv.get("data") or [])]
+    series = {}
+    for r in ep.get("data") or []:
+        series.setdefault(r.get("seriesTitle") or "?", []).append((r.get("episode_number") or "?", r.get("sonarrEpisodeId"), r.get("sonarrSeriesId")))
+    return movies, series, mv.get("total") or len(movies), ep.get("total") or sum(len(v) for v in series.values())
+
+
+def bazarr_history(n=10):
+    """Ultimas acciones de Bazarr (pelis + episodios) -> [texto]"""
+    out = []
+    for path in ("movies/history", "episodes/history"):
+        try:
+            for r in (bazarr("GET", path, start=0, length=n).get("data") or []):
+                lang = (r.get("language") or {}).get("code2", "?")
+                out.append(f"{r.get('timestamp', '')}: {r.get('seriesTitle') + ' ' if r.get('seriesTitle') else ''}{r.get('title') or r.get('episodeTitle') or '?'} "
+                           f"[{lang}] {r.get('provider') or ''} — {(r.get('description') or '')[:70]}")
+        except Exception as e:
+            out.append(f"{path}: {e}")
+    return out[: n * 2]
+
+
+def bazarr_tasks():
+    return bazarr("GET", "system/tasks").get("data") or []
+
+
+def bazarr_run_task(task_id):
+    return bazarr("POST", "system/tasks", taskid=task_id)
+
+
+def bazarr_search_wanted():
+    """Dispara en Bazarr la busqueda de TODO lo que falta (pelis y series). -> [ids lanzados]"""
+    fired = []
+    for t in bazarr_tasks():
+        tid = str(t.get("job_id") or t.get("id") or "")
+        if "wanted" in tid.lower() or "missing" in tid.lower():
+            try:
+                bazarr_run_task(tid)
+                fired.append(tid)
+            except Exception:
+                pass
+    return fired
+
+
+def bazarr_sync(kind, media_id, srt_path, code2="es"):
+    """Re-sincroniza un .srt contra el audio (ffsubsync/alass de Bazarr)."""
+    return bazarr("PATCH", "subtitles", action="sync", language=code2, path=str(srt_path),
+                  type="movie" if kind == "m" else "episode", id=media_id, forced="False", hi="False", timeout=900)
+
+
+# ---------------------------------------------------------------- Sonarr: temporadas
+def sonarr_season_status(series_id, season):
+    """-> (episodios de la temporada, con archivo, monitoreados)"""
+    eps = _arr(SONARR_URL, SONARR_KEY, "GET", "episode", params={"seriesId": series_id, "seasonNumber": season})
+    return len(eps), sum(1 for e in eps if e.get("hasFile")), sum(1 for e in eps if e.get("monitored"))
+
+
+def sonarr_want_season(series_id, season):
+    """Monitorea la temporada (y la serie) y lanza SeasonSearch."""
+    s = arr_series(series_id)
+    s["monitored"] = True
+    found = False
+    for se in s.get("seasons", []):
+        if se.get("seasonNumber") == season:
+            se["monitored"], found = True, True
+    if not found:
+        return False
+    _arr(SONARR_URL, SONARR_KEY, "PUT", f"series/{series_id}", json=s)
+    _arr(SONARR_URL, SONARR_KEY, "POST", "command", json={"name": "SeasonSearch", "seriesId": series_id, "seasonNumber": season})
+    return True
+
+
+# ---------------------------------------------------------------- borrar
+def arr_delete(kind, arr_id, files=True):
+    """Borra el titulo de Radarr/Sonarr y (files=True) sus archivos; Emby lo quita al ver desaparecer la carpeta."""
+    if kind == "m":
+        return _arr(RADARR_URL, RADARR_KEY, "DELETE", f"movie/{arr_id}", params={"deleteFiles": "true" if files else "false", "addImportExclusion": "false"}, timeout=120)
+    return _arr(SONARR_URL, SONARR_KEY, "DELETE", f"series/{arr_id}", params={"deleteFiles": "true" if files else "false", "addImportListExclusion": "false"}, timeout=120)

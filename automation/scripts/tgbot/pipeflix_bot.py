@@ -47,6 +47,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
 from streaming.arr_client import add_movie, ensure_tag
 from streaming.media_shelf import classify as classify_shelf, shelf_path
 from tgbot import pipeflix_ops as ops
+from tgbot import pipeflix_nlu as nlu
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                     level=logging.INFO)
@@ -104,7 +105,12 @@ PERMS = {
     "search": "user", "add": "user", "report": "user", "pending_all": "mod", "users": "mod",
     "subs": "mod", "cover": "mod", "releases": "mod", "system": "mod", "sessions": "mod", "reports": "mod",
     "restart": "admin", "tasks": "admin", "roles": "admin", "unlink": "admin", "logs": "admin", "subs_redo": "admin",
+    # v4
+    "recent": "user", "menu": "user", "season": "user", "subs_self": "user",
+    "queue": "mod", "queue_rm": "mod", "wanted": "mod", "stats": "mod", "releases_any": "mod",
+    "torrents": "admin", "delete": "admin",
 }
+AUTO_SUBS_MAX_EPS = 10        # episodios por titulo en los arreglos automaticos (el resto lo hace el cron)
 
 
 # ---------------------------------------------------------------- helpers
@@ -292,27 +298,7 @@ def parse_query(text):
     return q or text.strip(), year, season, want_es, lang
 
 
-# ---------------------------------------------------------------- 1b. intenciones (antes de buscar)
-_INTENTS = [
-    ("restart", re.compile(r"^\s*(?:reinicia(?:r)?|restart|resetea(?:r)?)\s+(?:el\s+)?emby\s*[.!]*$", re.I)),
-    ("status", re.compile(r"^\s*(?:estado|status|salud|sistema|health|como (?:esta|va) (?:todo|el sistema|el servidor|emby))\s*[?¿!.]*$", re.I)),
-    ("sessions", re.compile(r"^\s*(?:sesiones|qui[eé]n(?:es)? (?:est[aá]n?|anda) viendo|qu[eé] est[aá]n viendo|viendo ahora)\s*[?¿!.]*$", re.I)),
-    ("covers_all", re.compile(r"^\s*(?:arregla|corrige|repara|refresca|actualiza|revisa)\w*\s+(?:las\s+)?(?:car[aá]tulas|portadas|posters|im[aá]genes)(?:\s+(?:faltantes|que faltan|rotas))?\s*[.!]*$|^\s*car[aá]tulas faltantes\s*$", re.I)),
-    ("cover", re.compile(r"^\s*(?:arregla|arreglar|corrige|corregir|repara|reparar|refresca|refrescar|actualiza|actualizar|cambia|cambiar)\w*\s+(?:la\s+|el\s+)?(?:car[aá]tula|portada|poster|imagen|metadata|metadatos|info)\s+(?:de\s+|del\s+|a\s+)?(.+)$", re.I)),
-    ("translate", re.compile(r"^\s*(?:traduce|traducir|traduceme|tradu[zc]\w*)\s+(?:los\s+|las\s+|el\s+|la\s+)?(?:sub(?:t[ií]tulos?|s)?\s+)?(?:de\s+|del\s+|a\s+|para\s+)?(.+)$", re.I)),
-    ("subs", re.compile(r"^\s*(?:arregla|arreglar|mejora|mejorar|repara|reparar|busca|buscar|consigue|conseguir|baja|bajar|revisa|revisar|corrige|corregir|sincroniza)\w*\s+(?:los\s+|las\s+|el\s+|la\s+|unos\s+)?(?:mejores\s+)?sub(?:t[ií]tulos?|s)?(?:\s+(?:en\s+)?(?:espa[nñ]ol|es|latino))?\s+(?:de\s+|del\s+|a\s+|para\s+)?(.+)$", re.I)),
-    ("subs2", re.compile(r"^(.+?)\s+(?:no tiene|sin|le faltan?)\s+(?:los\s+)?sub(?:t[ií]tulos?|s)?(?:\s+(?:en\s+)?espa[nñ]ol)?\s*[.!]*$", re.I)),
-]
-
-
-def parse_intent(text):
-    """-> (intent, argumento) o (None, None)."""
-    for name, rx in _INTENTS:
-        m = rx.match(text)
-        if m:
-            arg = (m.group(1).strip(" .!¡¿?") if m.groups() else None)
-            return ("subs" if name == "subs2" else name), arg
-    return None, None
+# ---------------------------------------------------------------- 1b. intenciones: tgbot/pipeflix_nlu.py (reglas + Claude opcional)
 
 
 # ---------------------------------------------------------------- 2. TMDB
@@ -791,8 +777,10 @@ def new_report(update, kind, tmdb, title, rtype, lang=None):
     return rid
 
 
-REPORT_TYPES = {"nosubs": "💬 sin subtitulos en espanol", "noaudio": "🔊 sin audio en espanol", "noplay": "▶️ no reproduce / se traba",
-                "cover": "🖼 caratula o info mal", "lang": "🌐 la quiero en otro idioma", "other": "❓ otra cosa"}
+REPORT_TYPES = {"nosubs": "💬 sin subtitulos en espanol", "subsbad": "⏱ subtitulos mal (desincronizados / idioma / traduccion)",
+                "noaudio": "🔊 sin audio en espanol", "noplay": "▶️ no reproduce / se traba",
+                "cover": "🖼 caratula o info mal", "lang": "🌐 la quiero en otro idioma", "quality": "📉 se ve mal / mejor calidad",
+                "other": "❓ otra cosa"}
 
 
 def emby_authenticate(username, password):
@@ -816,10 +804,13 @@ async def notify_staff(app, text, markup=None, only_admins=False):
 
 
 # ---------------------------------------------------------------- pendientes: avisar cuando YA se ve en Emby
-def remember_pending(chat_id, kind, arr_id, tmdb, title, who_label):
+def remember_pending(chat_id, kind, arr_id, tmdb, title, who_label, season=None, have=0):
     p = _load_json(PENDING_FILE, {})
-    p[f"{kind}:{arr_id}"] = {"chat_id": chat_id, "kind": kind, "arr_id": arr_id, "tmdb": tmdb, "title": title,
-                             "who": who_label, "since": time.time(), "stage": "arr"}
+    key = f"{kind}:{arr_id}" + (f":s{season}" if season is not None else "")
+    p[key] = {"chat_id": chat_id, "kind": kind, "arr_id": arr_id, "tmdb": tmdb, "title": title,
+              "who": who_label, "since": time.time(), "stage": "arr"}
+    if season is not None:
+        p[key].update(season=season, have=have)
     _save_json(PENDING_FILE, p)
 
 
@@ -835,12 +826,22 @@ async def pending_loop(app):
                 kind, title, chat = req["kind"], req["title"], req["chat_id"]
                 drop = False
                 try:
-                    if req.get("stage", "arr") == "arr":
+                    if req.get("season") is not None:
+                        # temporada pedida de una serie que ya existe: contamos episodios con archivo
+                        total, have, _m = await asyncio.to_thread(ops.sonarr_season_status, req["arr_id"], req["season"])
+                        if have > req.get("have", 0):
+                            done = bool(total) and have >= total
+                            await app.bot.send_message(chat, f"📺 <b>{_h(title)}</b>: {'temporada completa, ' if done else 'ya llegaron '}"
+                                                             f"{have}/{total} episodios{' 🍿' if done else '; sigo pendiente del resto.'}",
+                                                       parse_mode=ParseMode.HTML)
+                            req["have"], changed = have, True
+                            drop = done
+                    elif req.get("stage", "arr") == "arr":
                         ok, obj = await asyncio.to_thread(_arrived, kind, req["arr_id"])
                         if ok:
                             req["stage"], req["downloaded_at"] = "emby", time.time()
                             changed = True
-                    if req.get("stage") == "emby":
+                    if req.get("season") is None and req.get("stage") == "emby":
                         item = idx.get((kind, "tmdb", req.get("tmdb")))
                         if item:
                             what = "pelicula" if kind == "m" else "serie (ya hay episodios)"
@@ -878,31 +879,38 @@ ONBOARD = ("👋 Soy <b>PIPEFLIX</b>, el bot del Emby.\n\n"
            "<code>/vincular tu_usuario tu_contrasena</code>\n\n"
            "Borro ese mensaje en cuanto lo leo. Despues solo escribes el nombre de lo que quieras ver 🍿")
 
-HELP_USER = ("Escribeme el nombre de una pelicula o serie (en espanol o en ingles, con o sin ano) y te digo si ya esta "
-             "en Emby; si no, la pides con un toque y te aviso cuando ya se pueda ver.\n\n"
-             "Ejemplos: <i>merlina</i> · <i>dune 2021</i> · <i>stranger things temporada 5</i> · <i>la sirenita en frances</i>\n\n"
-             "Si algo esta mal (sin subs, sin audio en espanol, no reproduce, caratula), abre la tarjeta y toca "
-             "<b>🚩 Reportar un problema</b>.\n\n"
-             "/pendientes — lo que pediste y aun no llega\n/id — tu id de Telegram")
+HELP_USER = ("Escribeme lo que quieras en lenguaje normal 🙂\n\n"
+             "🎬 <b>Ver algo</b>: <i>merlina</i> · <i>dune 2021</i> · <i>la sirenita en frances</i> → te digo si esta en Emby; "
+             "si no, la pides con un toque y te aviso cuando se pueda ver.\n"
+             "📺 <b>Temporadas</b>: <i>temporada 3 de dark</i> · <i>pide la temporada 5 de stranger things</i>\n"
+             "💬 <b>Subtitulos</b>: <i>arregla los subs de dune</i> · <i>the boys no tiene subtitulos</i> → los busco y si no hay "
+             "los traduzco yo, y te aviso. <i>los subs de moana estan desincronizados</i> → lo revisa un moderador.\n"
+             "🖼 <b>Caratula</b>: <i>la caratula de moana esta mal</i>\n"
+             "🆕 <i>que llego hoy</i> · ⏳ <i>que pedi</i> · 🧭 <i>menu</i>\n\n"
+             "Tambien puedes abrir la tarjeta de un titulo y tocar <b>🚩 Reportar un problema</b>.\n"
+             "/recientes — lo nuevo · /pendientes — lo que pediste · /menu — botones · /id — tu id")
 
-HELP_MOD = ("\n\n<b>Moderador</b> — sin cupo, y en cada tarjeta: 💬 Subs (bajar de Bazarr, traducir con nuestro modelo, "
-            "encolar mantenimiento), 🖼 Caratula (refrescar imagen y metadatos), 🌐 Otra copia (buscar y bajar una copia "
-            "en un idioma).\n"
-            "Tambien en lenguaje normal: <i>traduce los subs de dune</i> · <i>arregla la caratula de moana</i> · "
-            "<i>busca subs de merlina</i> · <i>dune en frances</i>\n"
-            "/sistema — salud del pipeline y de Emby\n/sesiones — quien esta viendo\n/reportes — problemas abiertos\n"
-            "/usuarios — vinculados y roles\n/pendientes — de todos")
+HELP_MOD = ("\n\n<b>Moderador</b> — sin cupo. En cada tarjeta: 💬 Subs (⚡ automatico, Bazarr, nuestro modelo, sincronizar), "
+            "🖼 Caratula, 🌐 Otra copia.\n"
+            "Escribiendo: <i>que esta bajando</i> · <i>cuanto falta a superman</i> · <i>que llego hoy</i> · "
+            "<i>que falta de subs</i> · <i>busca mejor calidad de barbie</i> · <i>dune en frances</i> · "
+            "<i>traduce los subs de dune</i> · <i>arregla la caratula de moana</i> · <i>quien esta viendo</i> · <i>estado</i> · <i>cuantas pelis hay</i>\n"
+            "/cola — descargas (quitar, vetar y buscar otra) · /recientes [horas] · /faltantes — sin subs es · /stats\n"
+            "/sistema · /sesiones · /reportes · /usuarios · /pendientes (de todos)")
 
-HELP_ADMIN = ("\n\n<b>Admin</b>\n/emby — reiniciar, caratulas faltantes, salud\n/tareas — scripts del pipeline (estante, previews, "
-              "huerfanas, torrents, faststart…)\n/log &lt;nombre&gt; — cola de un log\n"
-              "/rol &lt;id o usuario&gt; admin|mod|usuario\n/desvincular &lt;id o usuario&gt;\n"
-              "Y escribiendo: <i>reinicia emby</i> · <i>caratulas faltantes</i> · <i>estado</i>")
+HELP_ADMIN = ("\n\n<b>Admin</b>\n/torrents — Transmission (estancados, borrar) · /borrar &lt;titulo&gt; — quitar del servidor con archivos\n"
+              "/emby — reiniciar, caratulas faltantes, salud · /tareas — scripts del pipeline · /log &lt;nombre&gt;\n"
+              "/rol &lt;id o usuario&gt; admin|mod|usuario · /desvincular &lt;id o usuario&gt;\n"
+              "Escribiendo: <i>reinicia emby</i> · <i>caratulas faltantes</i> · <i>borra scary movie 2</i> · <i>torrents</i> · "
+              "<i>log de faststart</i> · <i>corre salud</i>"
+              + ("\n🧠 Claude activo para frases libres." if nlu.llm_available() else
+                 "\n💡 Sin ANTHROPIC_API_KEY en .env: entiendo las frases de arriba (reglas); con clave entiendo cualquier redaccion."))
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     role, label = who(update)
     if not role:
-        return await update.message.reply_text(ONBOARD, parse_mode=ParseMode.HTML)
+        return await update.effective_message.reply_text(ONBOARD, parse_mode=ParseMode.HTML)
     text = f"🎬 <b>PIPEFLIX</b> — hola, {_h(label)} ({ROLE_LABEL[role]})\n\n" + HELP_USER
     if role == "user":
         text += f"\n\nTienes {max(0, DAILY_QUOTA - quota_used(update.effective_user.id))} peticiones disponibles hoy."
@@ -910,11 +918,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text += HELP_MOD
     if role == "admin":
         text += HELP_ADMIN
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Tu id: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(f"Tu id: <code>{update.effective_user.id}</code>", parse_mode=ParseMode.HTML)
 
 
 async def cmd_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -966,7 +974,7 @@ async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             continue
         lines.append(f"• <b>{_h(r['emby_user'])}</b> ← @{_h(r.get('tg_name'))} <code>{tid}</code> · {r.get('linked', '')[:10]} · "
                      f"hoy {quota_used(int(tid))}/{DAILY_QUOTA}")
-    await update.message.reply_text("👥 <b>Usuarios</b>\n" + "\n".join(lines), parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text("👥 <b>Usuarios</b>\n" + "\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 def _find_tg_id(target):
@@ -985,10 +993,10 @@ async def cmd_role(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     args = ctx.args or []
     if len(args) != 2 or args[1].lower() not in ("admin", "mod", "moderador", "usuario", "user"):
-        return await update.message.reply_text("Uso: <code>/rol &lt;id o usuario&gt; admin|mod|usuario</code>", parse_mode=ParseMode.HTML)
+        return await update.effective_message.reply_text("Uso: <code>/rol &lt;id o usuario&gt; admin|mod|usuario</code>", parse_mode=ParseMode.HTML)
     tid = _find_tg_id(args[0])
     if not tid:
-        return await update.message.reply_text("No encuentro ese usuario (usa el id de Telegram o el usuario de Emby vinculado).")
+        return await update.effective_message.reply_text("No encuentro ese usuario (usa el id de Telegram o el usuario de Emby vinculado).")
     new = {"moderador": "mod", "user": "usuario"}.get(args[1].lower(), args[1].lower())
     roles = load_roles()
     if new == "usuario":
@@ -997,7 +1005,7 @@ async def cmd_role(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         roles[tid] = new
     _save_json(ROLES_FILE, roles)
     log_request("role", update, target=tid, role=new)
-    await update.message.reply_text(f"✅ <code>{tid}</code> ahora es <b>{new}</b>.", parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(f"✅ <code>{tid}</code> ahora es <b>{new}</b>.", parse_mode=ParseMode.HTML)
     try:
         await ctx.application.bot.send_message(int(tid), f"🛡 Ahora eres <b>{ROLE_LABEL.get(new, new)}</b> en PIPEFLIX. Escribe /start para ver que puedes hacer.",
                                                parse_mode=ParseMode.HTML)
@@ -1015,18 +1023,18 @@ async def cmd_unlink(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for tid in gone:
         users.pop(tid, None)
     _save_json(USERS_FILE, users)
-    await update.message.reply_text(f"Desvinculados: {len(gone)}")
+    await update.effective_message.reply_text(f"Desvinculados: {len(gone)}")
 
 
 async def cmd_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     role, _ = who(update)
     if not role:
-        return await update.message.reply_text(ONBOARD, parse_mode=ParseMode.HTML)
+        return await update.effective_message.reply_text(ONBOARD, parse_mode=ParseMode.HTML)
     p = _load_json(PENDING_FILE, {})
     all_ = can(role, "pending_all")
     mine = [r for r in p.values() if all_ or r["chat_id"] == update.effective_chat.id]
     if not mine:
-        return await update.message.reply_text("Nada pendiente 👌")
+        return await update.effective_message.reply_text("Nada pendiente 👌")
     prog = await asyncio.to_thread(queue_progress)
     lines = []
     for r in sorted(mine, key=lambda r: r["since"]):
@@ -1038,7 +1046,7 @@ async def cmd_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             state = f"⬇️ {pct}%" if pct is not None else "🔎 buscando copia"
         owner = f" · {_h(r.get('who'))}" if all_ else ""
         lines.append(f"• {ico} {_h(r['title'])} — {state} · hace {_ago(r['since'])}{owner}")
-    await update.message.reply_text("⏳ <b>Pendientes</b>\n" + "\n".join(lines), parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text("⏳ <b>Pendientes</b>\n" + "\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 # ---------------------------------------------------------------- sistema / emby / tareas (staff)
@@ -1060,7 +1068,7 @@ async def cmd_sistema(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = await asyncio.to_thread(_sistema_text)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🩺 Salud de Emby ahora (20 s)", callback_data="task:salud"),
                                 InlineKeyboardButton("👀 Sesiones", callback_data="sess")]])
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 def _sesiones_text():
@@ -1079,7 +1087,7 @@ async def cmd_sesiones(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     role, _ = who(update)
     if not can(role, "sessions"):
         return
-    await update.message.reply_text(await asyncio.to_thread(_sesiones_text), parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(await asyncio.to_thread(_sesiones_text), parse_mode=ParseMode.HTML)
 
 
 async def cmd_emby(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1091,7 +1099,7 @@ async def cmd_emby(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                 InlineKeyboardButton("🩺 Salud", callback_data="task:salud")],
                                [InlineKeyboardButton("👀 Sesiones", callback_data="sess"),
                                 InlineKeyboardButton("🗂 Estante idioma", callback_data="task:estante")]])
-    await update.message.reply_text("🎛 <b>Emby</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+    await update.effective_message.reply_text("🎛 <b>Emby</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def cmd_tareas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1099,7 +1107,7 @@ async def cmd_tareas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not can(role, "tasks"):
         return
     rows = [[InlineKeyboardButton(lbl, callback_data=f"task:{name}")] for name, (lbl, _a, _t) in ops.TASKS.items()]
-    await update.message.reply_text("🧰 <b>Tareas del pipeline</b> (corren en mubuntu; las marcadas BORRAR piden confirmacion)",
+    await update.effective_message.reply_text("🧰 <b>Tareas del pipeline</b> (corren en mubuntu; las marcadas BORRAR piden confirmacion)",
                                     parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
 
 
@@ -1112,7 +1120,7 @@ async def cmd_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not name.endswith(".log"):
         name += ".log"
     text = await asyncio.to_thread(ops.recent_log, name, 25)
-    await update.message.reply_text(f"📄 <b>{_h(name)}</b>\n<pre>{_h(text)[-3600:]}</pre>", parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(f"📄 <b>{_h(name)}</b>\n<pre>{_h(text)[-3600:]}</pre>", parse_mode=ParseMode.HTML)
 
 
 async def cmd_reportes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1121,9 +1129,9 @@ async def cmd_reportes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     reps = [r for r in _load_json(REPORTS_FILE, {}).values() if r.get("open")]
     if not reps:
-        return await update.message.reply_text("Sin reportes abiertos 👌")
+        return await update.effective_message.reply_text("Sin reportes abiertos 👌")
     for r in sorted(reps, key=lambda r: r["since"])[:15]:
-        await update.message.reply_text(_report_text(r), parse_mode=ParseMode.HTML, reply_markup=_report_kb(r))
+        await update.effective_message.reply_text(_report_text(r), parse_mode=ParseMode.HTML, reply_markup=_report_kb(r))
 
 
 def _report_text(r):
@@ -1134,14 +1142,347 @@ def _report_text(r):
 
 def _report_kb(r):
     k, t = r["kind"], r["tmdb"]
-    row = []
-    if r["type"] in ("nosubs", "other", "noplay"):
+    row, row2 = [], []
+    if r["type"] in ("nosubs", "subsbad", "other", "noplay"):
         row.append(InlineKeyboardButton("💬 Subs", callback_data=f"sub:menu:{k}:{t}"))
+    if r["type"] == "nosubs":
+        row.append(InlineKeyboardButton("⚡ Auto", callback_data=f"sub:auto:{k}:{t}"))
+    if r["type"] == "subsbad":
+        row.append(InlineKeyboardButton("⏱ Sincronizar", callback_data=f"sub:sync:{k}:{t}"))
+        row2.append(InlineKeyboardButton("🔁 Rehacer es", callback_data=f"sub:trr:{k}:{t}"))
     if r["type"] in ("cover", "other"):
         row.append(InlineKeyboardButton("🖼 Caratula", callback_data=f"cov:{k}:{t}"))
     if r["type"] in ("lang", "noaudio", "noplay", "other"):
         row.append(InlineKeyboardButton("🌐 Otra copia", callback_data=f"relq:{k}:{t}:{r.get('lang') or '-'}"))
-    return InlineKeyboardMarkup([row, [InlineKeyboardButton("✅ Resuelto", callback_data=f"repok:{r['id']}")]])
+    if r["type"] in ("quality", "noplay"):
+        row2.append(InlineKeyboardButton("🏆 Mejor copia", callback_data=f"rela:{k}:{t}"))
+    rows = [row] + ([row2] if row2 else []) + [[InlineKeyboardButton("✅ Resuelto", callback_data=f"repok:{r['id']}")]]
+    return InlineKeyboardMarkup(rows)
+
+
+# ---------------------------------------------------------------- v4: ver todo desde el bot (cola, recientes, faltantes, torrents, stats, menu)
+_q_lists = {}   # clave corta -> filas de la cola (para los botones)
+_t_lists = {}   # clave corta -> torrents
+
+
+def _stash(store, rows):
+    _rel_seq[0] += 1
+    key = str(_rel_seq[0])
+    store[key] = rows
+    for k in list(store)[:-20]:
+        store.pop(k, None)
+    return key
+
+
+def _cola_text(filter_title=None):
+    rows = ops.arr_queue()
+    if filter_title:
+        f = _fold(filter_title)
+        rows = [r for r in rows if f in _fold(r["title"]) or f in _fold(r["release"])]
+    if not rows:
+        return "📥 Nada en la cola" + (f" que se parezca a «{_h(filter_title)}»" if filter_title else "") + " 👌", \
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Actualizar", callback_data="q:refresh")]])
+    key = _stash(_q_lists, rows)
+    lines = [f"📥 <b>Cola</b> — {len(rows)} descarga(s)"]
+    btns = []
+    for i, r in enumerate(rows[:25], 1):
+        ico = "🎬" if r["kind"] == "m" else "📺"
+        st = {"downloading": "⬇️", "queued": "🕓", "paused": "⏸", "completed": "✅", "warning": "⚠️", "failed": "❌", "delay": "⏳"}.get(r["status"], r["status"])
+        eps = f" {r['eps'][0]}…{r['eps'][-1]}" if len(r["eps"]) > 1 else (f" {r['eps'][0]}" if r["eps"] else "")
+        extra = f" · {_h(r['tstate'])}" if r["tstate"] not in ("downloading", "") else ""
+        lines.append(f"<b>{i}.</b> {ico} <b>{_h(r['title'])}</b>{_h(eps)} — {st} {r['pct']}% · {r['size_gb']} GB"
+                     + (f" · ⏱ {_h(r['eta'])}" if r["eta"] else "") + extra)
+        if r["msgs"]:
+            lines.append("    ⚠️ " + _h(" | ".join(r["msgs"])[:160]))
+        if r["ids"]:
+            btns.append(InlineKeyboardButton(f"🔁 {i}", callback_data=f"q:bl:{key}:{i - 1}"))
+            btns.append(InlineKeyboardButton(f"🗑 {i}", callback_data=f"q:rm:{key}:{i - 1}"))
+    lines.append("\n🔁 = quitar, vetar esa copia y buscar otra · 🗑 = solo quitar")
+    kb_rows = [btns[j:j + 6] for j in range(0, len(btns), 6)]
+    kb_rows.append([InlineKeyboardButton("🔄 Actualizar", callback_data="q:refresh"), InlineKeyboardButton("🧲 Torrents", callback_data="tor:list")])
+    return "\n".join(lines)[:4000], InlineKeyboardMarkup(kb_rows)
+
+
+def _recientes_text(hours, staff=False):
+    rows = ops.emby_recent(hours)
+    kb = [[InlineKeyboardButton("24 h", callback_data="rec:24"), InlineKeyboardButton("48 h", callback_data="rec:48"),
+           InlineKeyboardButton("7 dias", callback_data="rec:168")]]
+    if not rows:
+        return f"🆕 Nada nuevo en las ultimas {hours} h.", InlineKeyboardMarkup(kb)
+    lines = [f"🆕 <b>Nuevo en las ultimas {hours} h</b> — {len(rows)} titulo(s)"]
+    no_es = 0
+    for r in rows[:30]:
+        ico = "🎬" if r["kind"] == "m" else "📺"
+        det = f" · {r['n']} ep" if r["kind"] == "s" else ""
+        flag = "✅ es" if not r["no_es"] else ("❌ sin es" + (f" ({r['no_es']} ep)" if r["kind"] == "s" and r["no_es"] != r["n"] else ""))
+        lines.append(f"• {ico} <b>{_h(r['name'])}</b>{det} — {flag} · hace {_ago(r['ts'])}")
+        no_es += 1 if r["no_es"] else 0
+    if staff and no_es:
+        kb.append([InlineKeyboardButton(f"⚡ Arreglar subs de los {no_es} sin es (max 8)", callback_data=f"wnt:fixrecent:{hours}")])
+    return "\n".join(lines)[:4000], InlineKeyboardMarkup(kb)
+
+
+def _faltantes_text():
+    movies, series, tm, te = ops.bazarr_wanted()
+    lines = [f"💬 <b>Sin subs en espanol (segun Bazarr)</b> — {tm} pelis · {te} episodios"]
+    for m in movies[:15]:
+        lines.append(f"• 🎬 {_h(m['title'])} (falta {', '.join(m['missing']) or 'es'})")
+    for s, eps in list(series.items())[:15]:
+        lines.append(f"• 📺 {_h(s)}: {len(eps)} ep ({', '.join(str(e[0]) for e in eps[:6])}{'…' if len(eps) > 6 else ''})")
+    if not movies and not series:
+        lines.append("• Bazarr no tiene nada pendiente 👌")
+    hist = ops.bazarr_history(5)
+    if hist:
+        lines.append("\n🕘 <b>Ultimo de Bazarr</b>\n" + "\n".join(f"• {_h(h)}" for h in hist[:6]))
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Bazarr: buscar todo lo que falta", callback_data="wnt:search")],
+                               [InlineKeyboardButton("🤖 Traducir pelis faltantes con nuestro modelo (max 8)", callback_data="wnt:translate")],
+                               [InlineKeyboardButton("📄 Estado del traductor", callback_data="task:traductor"),
+                                InlineKeyboardButton("🔄 Actualizar", callback_data="wnt:list")]])
+    return "\n".join(lines)[:4000], kb
+
+
+def _translate_wanted(limit=8):
+    """Hilo largo: las pelis que Bazarr no pudo resolver -> nuestro modelo."""
+    movies, _s, _tm, _te = ops.bazarr_wanted()
+    idx = emby_index()
+    lib_m, _ = library_ids()
+    out, n = [], 0
+    for m in movies:
+        if n >= limit:
+            break
+        try:
+            mv = ops.arr_movie(m["radarrId"])
+        except Exception as e:
+            out.append(f"⚠️ {m['title']}: Radarr {e}")
+            continue
+        item = idx.get(("m", "tmdb", mv.get("tmdbId")))
+        if not item:
+            out.append(f"⚠️ {m['title']}: no esta en Emby")
+            continue
+        n += 1
+        ok, txt = _auto_subs("m", item, lib_m.get(mv.get("tmdbId")), skip_bazarr=True)
+        out.append(f"{'✅' if ok else '⚠️'} {m['title']}: {txt.splitlines()[0]}")
+    return "\n".join(out) or "Bazarr no tiene pelis pendientes"
+
+
+def _fix_recent(hours, limit=8):
+    """Hilo largo: lo recien llegado sin es -> Bazarr y luego nuestro modelo."""
+    rows = [r for r in ops.emby_recent(hours) if r["no_es"]][:limit]
+    lib_m, lib_s = library_ids()
+    out = []
+    for r in rows:
+        it = ops.emby_item(r["id"]) or {"Id": r["id"]}
+        try:
+            tmdb = int((it.get("ProviderIds") or {}).get("Tmdb") or 0)
+        except ValueError:
+            tmdb = 0
+        lib = (lib_m if r["kind"] == "m" else lib_s).get(tmdb)
+        ok, txt = _auto_subs(r["kind"], it, lib)
+        out.append(f"{'✅' if ok else '⚠️'} {r['name']}: {txt.splitlines()[0]}")
+    return "\n".join(out) or "nada que arreglar"
+
+
+def _torrents_text():
+    rows = ops.transmission_list()
+    if not rows:
+        return "🧲 Transmission esta vacio.", None
+    key = _stash(_t_lists, rows)
+    bad = sum(1 for r in rows if r["err"] or r["stalled"])
+    lines = [f"🧲 <b>Torrents</b> — {len(rows)} · bajando {sum(1 for r in rows if r['pct'] < 100)} · "
+             f"completos {sum(1 for r in rows if r['pct'] == 100)} · ⚠️ {bad}"]
+    btns = []
+    for i, r in enumerate(rows[:25], 1):
+        flag = "❌" if r["err"] else ("🐌" if r["stalled"] else ("✅" if r["pct"] == 100 else "⬇️"))
+        eta = f" · ⏱ {r['eta_min']} min" if r["eta_min"] else ""
+        lines.append(f"<b>{i}.</b> {flag} {_h(r['name'][:60])}\n    {_h(r['cat'] or 'manual')} · {r['pct']}% · {r['size_gb']} GB · "
+                     f"{r['rate_mb']} MB/s{eta} · {r['state']} · {r['age_d']} d" + (f" · ⚠️ {_h(r['err'][:60])}" if r["err"] else ""))
+        btns.append(InlineKeyboardButton(f"🗑 {i}", callback_data=f"tor:rm:{key}:{i - 1}"))
+    lines.append("\n🐌 = estancado · 🗑 = borrar con sus datos (pide confirmacion)")
+    kb_rows = [btns[j:j + 6] for j in range(0, len(btns), 6)]
+    kb_rows.append([InlineKeyboardButton("🔄 Actualizar", callback_data="tor:list"),
+                    InlineKeyboardButton("🧹 Limpiar importados (simulacro)", callback_data="task:torrents")])
+    return "\n".join(lines)[:4000], InlineKeyboardMarkup(kb_rows)
+
+
+def _stats_text():
+    c = ops.emby_counts()
+    tot, a7, a30, users = ops.emby_users_activity()
+    p = _load_json(PENDING_FILE, {})
+    reps = [r for r in _load_json(REPORTS_FILE, {}).values() if r.get("open")]
+    since, ev = time.time() - 7 * 86400, {}
+    try:
+        with REQUESTS_LOG.open() as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get("ts", 0) > since:
+                    ev[r.get("event")] = ev.get(r.get("event"), 0) + 1
+    except FileNotFoundError:
+        pass
+    lines = ["📊 <b>PIPEFLIX en numeros</b>",
+             f"🎬 {c['Movie']} pelis · 📺 {c['Series']} series · {c['Episode']} episodios",
+             f"👥 {tot} usuarios de Emby · activos 7 d: {a7} · 30 d: {a30} · vinculados a Telegram: {len(load_users())}",
+             f"⏳ pendientes: {len(p)} · 🚩 reportes abiertos: {len(reps)}",
+             f"📈 Ultimos 7 d: {ev.get('search', 0)} busquedas · {ev.get('add', 0)} peticiones · "
+             f"{ev.get('sub_req', 0) + ev.get('subs', 0)} acciones de subs · {ev.get('report', 0)} reportes"]
+    for pth, tb, pct in ops.disk():
+        lines.append(f"💽 {pth}: {tb} TB libres ({pct}%)")
+    lines.append("\n🕒 <b>Ultima actividad</b>: " + ", ".join(f"{_h(n)} ({d} d)" if d is not None else f"{_h(n)} (nunca)" for n, d in users[:14]))
+    return "\n".join(lines)
+
+
+def _menu_kb(role):
+    rows = [[InlineKeyboardButton("🆕 Recientes", callback_data="rec:48"), InlineKeyboardButton("⏳ Pendientes", callback_data="menu:pending")]]
+    if LEVEL[role] >= LEVEL["mod"]:
+        rows += [[InlineKeyboardButton("📥 Cola", callback_data="q:refresh"), InlineKeyboardButton("💬 Subs faltantes", callback_data="wnt:list"),
+                  InlineKeyboardButton("🚩 Reportes", callback_data="menu:reports")],
+                 [InlineKeyboardButton("🩺 Sistema", callback_data="menu:system"), InlineKeyboardButton("👀 Sesiones", callback_data="sess"),
+                  InlineKeyboardButton("📊 Stats", callback_data="menu:stats")]]
+    if role == "admin":
+        rows += [[InlineKeyboardButton("🧲 Torrents", callback_data="tor:list"), InlineKeyboardButton("🧰 Tareas", callback_data="menu:tasks"),
+                  InlineKeyboardButton("🎛 Emby", callback_data="menu:emby")]]
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_cola(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    role, _ = who(update)
+    if not can(role, "queue"):
+        return
+    text, kb = await asyncio.to_thread(_cola_text, " ".join(ctx.args or []) or None)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cmd_recientes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    role, _ = who(update)
+    if not role:
+        return await update.effective_message.reply_text(ONBOARD, parse_mode=ParseMode.HTML)
+    hours = int(ctx.args[0]) if ctx.args and ctx.args[0].isdigit() else 48
+    text, kb = await asyncio.to_thread(_recientes_text, min(hours, 720), can(role, "wanted"))
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cmd_faltantes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    role, _ = who(update)
+    if not can(role, "wanted"):
+        return
+    text, kb = await asyncio.to_thread(_faltantes_text)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cmd_torrents(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    role, _ = who(update)
+    if not can(role, "torrents"):
+        return
+    text, kb = await asyncio.to_thread(_torrents_text)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    role, _ = who(update)
+    if not can(role, "stats"):
+        return
+    await update.effective_message.reply_text(await asyncio.to_thread(_stats_text), parse_mode=ParseMode.HTML)
+
+
+async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    role, label = who(update)
+    if not role:
+        return await update.effective_message.reply_text(ONBOARD, parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(f"🧭 <b>Menu</b> ({ROLE_LABEL[role]}) — o escribeme lo que necesites.", parse_mode=ParseMode.HTML,
+                                              reply_markup=_menu_kb(role))
+
+
+async def cmd_borrar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    role, label = who(update)
+    if not can(role, "delete"):
+        return
+    title = " ".join(ctx.args or []).strip()
+    if not title:
+        return await update.effective_message.reply_text("Uso: <code>/borrar titulo</code>", parse_mode=ParseMode.HTML)
+    await handle_intent(update, ctx, role, label, dict(nlu.EMPTY, intent="delete", title=title))
+
+
+# ---------------------------------------------------------------- v4: autoservicio de subs (usuarios) y temporadas
+async def subs_self_service(update, ctx, details, status, bad=False):
+    """Usuario normal: «arregla los subs de X». Ticket para el staff y, si X esta en Emby y no es «estan mal»,
+    intento automatico (Bazarr → nuestro modelo) avisandole al terminar."""
+    msg, app = update.effective_message, ctx.application
+    role, label = who(update)
+    kind, tmdb = details["kind"], details["tmdb"]
+    title = f"{details['title']}{_year(details.get('year'))}"
+    if status["status"] != "emby":
+        caption, markup, poster = build_card(details, status, [], {}, role=role)
+        await msg.reply_text(f"«{_h(title)}» todavia no esta en Emby, asi que no hay subs que arreglar 🙂 Si quieres, pidela aqui:",
+                             parse_mode=ParseMode.HTML)
+        return await send_card(msg, caption, markup, poster)
+    if role == "user" and quota_used(update.effective_user.id) >= DAILY_QUOTA:
+        return await msg.reply_text(f"Ya usaste tus {DAILY_QUOTA} peticiones de hoy; manana se renuevan 🙂")
+    rid = new_report(update, kind, tmdb, title, "subsbad" if bad else "nosubs")
+    log_request("sub_req", update, kind=kind, tmdb=tmdb, title=title, bad=bad)
+    r = _load_json(REPORTS_FILE, {}).get(rid)
+    if bad:
+        await msg.reply_text(f"🚩 Anotado (#{rid}): subtitulos de <b>{_h(title)}</b> con problemas. Un moderador los revisa y te aviso.",
+                             parse_mode=ParseMode.HTML)
+        return await notify_staff(app, _report_text(r), _report_kb(r))
+    await msg.reply_text(f"🔧 Voy a intentar arreglar los subs de <b>{_h(title)}</b> yo solo: primero busco en Bazarr y, si no hay, "
+                         f"los traduzco con nuestro modelo. Te aviso aqui mismo (puede tardar unos minutos"
+                         f"{'; en series hago hasta %d episodios ahora y el resto de noche' % AUTO_SUBS_MAX_EPS if kind == 's' else ''}).",
+                         parse_mode=ParseMode.HTML)
+    await notify_staff(app, f"🔧 <b>{_h(label)}</b> pidio subs de <b>{_h(title)}</b> (#{rid}); intentando automatico…")
+    item, lib, chat_id = status["emby"], status.get("lib"), update.effective_chat.id
+
+    async def job():
+        try:
+            ok, txt = await run_long(_auto_subs, kind, item, lib)
+        except Exception as e:
+            log.exception("auto subs %s", title)
+            ok, txt = False, f"error: {e}"
+        reps = _load_json(REPORTS_FILE, {})
+        rr = reps.get(rid)
+        if ok:
+            if rr:
+                rr["open"], rr["closed_by"], rr["closed"] = False, "auto", time.time()
+                _save_json(REPORTS_FILE, reps)
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 Abrir en Emby", url=emby_link(item["Id"]))]])
+            await app.bot.send_message(chat_id, f"✅ Listo: subs de <b>{_h(title)}</b> — {_h(txt.splitlines()[0])}.\n"
+                                                f"Si no aparecen, cierra y abre la peli (Emby tarda un minuto en verlos).",
+                                       parse_mode=ParseMode.HTML, reply_markup=kb)
+            await notify_staff(app, f"✅ Auto #{rid} <b>{_h(title)}</b>: {_h(txt.splitlines()[0])}")
+        else:
+            await app.bot.send_message(chat_id, f"😕 No pude arreglar solo los subs de <b>{_h(title)}</b> ({_h(txt.splitlines()[0][:120])}). "
+                                                f"Queda el reporte #{rid} para un moderador; te aviso cuando lo resuelvan.", parse_mode=ParseMode.HTML)
+            if rr:
+                await notify_staff(app, f"⚠️ Auto #{rid} fallo: {_h(txt[:300])}\n" + _report_text(rr), _report_kb(rr))
+
+    app.create_task(job())
+
+
+async def season_flow(update, ctx, details, status, season, role, label):
+    """Temporada N de una serie que YA esta (Emby o Sonarr). -> True si respondio; False = que siga la tarjeta normal."""
+    msg = update.effective_message
+    if details["kind"] != "s" or status["status"] == "missing":
+        return False
+    lib = status.get("lib")
+    title = details["title"]
+    if not lib:
+        await msg.reply_text(f"«{_h(title)}» esta en Emby pero no en Sonarr; no puedo pedir temporadas sueltas.", parse_mode=ParseMode.HTML)
+        return True
+    total, have, mon = await asyncio.to_thread(ops.sonarr_season_status, lib["arr_id"], season)
+    if total == 0:
+        await msg.reply_text(f"📺 Sonarr no conoce la temporada {season} de <b>{_h(title)}</b> (¿todavia no existe o no esta anunciada?).",
+                             parse_mode=ParseMode.HTML)
+        return True
+    if have >= total:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 Abrir en Emby", url=emby_link(status["emby"]["Id"]))]]) if status.get("emby") else None
+        await msg.reply_text(f"✅ <b>{_h(title)}</b> — temporada {season} ya esta completa ({have} episodios).", parse_mode=ParseMode.HTML, reply_markup=kb)
+        return True
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"➕ {'Volver a buscar' if mon else 'Pedir'} temporada {season}",
+                                                     callback_data=f"sea:{details['tmdb']}:{lib['arr_id']}:{season}:{have}")]])
+    await msg.reply_text(f"📺 <b>{_h(title)}</b> — temporada {season}: {have}/{total} episodios"
+                         f"{' (ya monitoreada, Sonarr la esta buscando)' if mon else ' (no monitoreada)'}.", parse_mode=ParseMode.HTML, reply_markup=kb)
+    return True
 
 
 # ---------------------------------------------------------------- acciones sobre un titulo (staff)
@@ -1184,10 +1525,12 @@ async def subs_menu(q, kind, tmdb, role):
         return
     txt, vids = await asyncio.to_thread(_subs_status_text, kind, details, item, status.get("lib"))
     lib = status.get("lib")
-    rows = [[InlineKeyboardButton("🔎 Bazarr: bajar es", callback_data=f"sub:dl:{kind}:{tmdb}"),
+    rows = [[InlineKeyboardButton("⚡ Automatico: Bazarr y si no, nuestro modelo", callback_data=f"sub:auto:{kind}:{tmdb}")],
+            [InlineKeyboardButton("🔎 Bazarr: bajar es", callback_data=f"sub:dl:{kind}:{tmdb}"),
              InlineKeyboardButton("🤖 Traducir en→es (nuestro modelo)", callback_data=f"sub:tr:{kind}:{tmdb}")],
-            [InlineKeyboardButton("🧹 Encolar mantenimiento (01:00Z)", callback_data=f"sub:q:{kind}:{tmdb}"),
-             InlineKeyboardButton("🌍 Bazarr: traducir de otro idioma", callback_data=f"sub:bz:{kind}:{tmdb}")]]
+            [InlineKeyboardButton("⏱ Sincronizar es (Bazarr)", callback_data=f"sub:sync:{kind}:{tmdb}"),
+             InlineKeyboardButton("🌍 Bazarr: traducir de otro idioma", callback_data=f"sub:bz:{kind}:{tmdb}")],
+            [InlineKeyboardButton("🧹 Encolar mantenimiento (01:00Z)", callback_data=f"sub:q:{kind}:{tmdb}")]]
     if can(role, "subs_redo"):
         rows.append([InlineKeyboardButton("🔁 Rehacer es con nuestro modelo (aparta el actual)", callback_data=f"sub:trr:{kind}:{tmdb}")])
     note = "" if lib else "\n⚠️ No esta en Radarr/Sonarr: Bazarr no lo conoce; solo sirve nuestro modelo."
@@ -1265,7 +1608,93 @@ def _do_subs(action, kind, item, lib, redo=False):
             except Exception as ex:
                 out.append(f"{os.path.basename(path)[:40]}: {ex}")
         out.insert(0, f"🌍 Bazarr tradujo (Google) {n} archivo(s) desde otro idioma")
+    elif action == "auto":
+        ok, txt = _auto_subs(kind, item, lib)
+        out.append(("✅ " if ok else "⚠️ ") + txt)
+    elif action == "sync":
+        if not lib:
+            return "no esta en Radarr/Sonarr; Bazarr no puede sincronizarlo"
+        eps = {} if kind == "m" else {os.path.basename(e.get("path") or ""): e for e in ops.bazarr_episodes(lib["arr_id"])}
+        n = 0
+        for ep, path in vids[:SERIES_SUB_MAX]:
+            srts = ops.sidecars(path).get("es") or []
+            if not srts:
+                continue
+            mid = lib["arr_id"] if kind == "m" else (eps.get(os.path.basename(path)) or {}).get("sonarrEpisodeId")
+            if mid is None:
+                continue
+            try:
+                ops.bazarr_sync(kind, mid, srts[0], "es")
+                n += 1
+            except Exception as ex:
+                out.append(f"{os.path.basename(path)[:40]}: {ex}")
+        out.insert(0, f"⏱ Bazarr re-sincronizo {n} subtitulo(s) es contra el audio (ffsubsync)")
     return "\n".join(out) or "nada que hacer"
+
+
+def _auto_subs(kind, item, lib, max_eps=AUTO_SUBS_MAX_EPS, skip_bazarr=False):
+    """Hilo largo. Para lo que no tenga es: Bazarr primero y, lo que quede, nuestro modelo. -> (ok, resumen)"""
+    vids = video_paths(kind, item)
+    if not vids:
+        return False, "no encuentro el archivo en disco"
+
+    def has_es(it, path):
+        a, s = ops.streams_summary(it)
+        return "es" in ops.sidecars(path) or bool(s & ES_LANGS) or bool(a & ES_LANGS)
+
+    targets = [(it, p) for it, p in vids if not has_es(it, p)]
+    if not targets:
+        return True, "ya tenia subtitulos (o audio) en espanol; si se ven mal, reportalo como «subtitulos mal»"
+    got_bz, got_tr, fails = 0, 0, []
+    if lib and not skip_bazarr:
+        try:
+            if kind == "m":
+                ops.bazarr_download_movie(lib["arr_id"], "es")
+            else:
+                eps = {os.path.basename(e.get("path") or ""): e for e in ops.bazarr_episodes(lib["arr_id"])}
+                for it, p in targets[:max_eps]:
+                    e = eps.get(os.path.basename(p))
+                    if e and any(m.get("code2") == "es" for m in e.get("missing_subtitles") or []):
+                        try:
+                            ops.bazarr_download_episode(lib["arr_id"], e["sonarrEpisodeId"], "es")
+                        except Exception as ex:
+                            fails.append(f"bazarr {os.path.basename(p)[:40]}: {ex}")
+        except Exception as ex:
+            fails.append(f"bazarr: {ex}")
+        still = []
+        for it, p in targets:
+            if "es" in ops.sidecars(p):
+                got_bz += 1
+            else:
+                still.append((it, p))
+        targets = still
+    for it, p in targets[:max_eps]:
+        ok, msg = ops.translate_with_model(p)
+        if ok:
+            got_tr += 1
+        else:
+            fails.append(f"{os.path.basename(p)[:40]}: {(msg.splitlines() or ['?'])[-1][:80]}")
+    left = len(targets) - got_tr
+    if left > 0 and len(targets) > max_eps:
+        try:
+            ops.sqm_enqueue([p for _, p in targets[max_eps:]][:200])
+        except Exception:
+            pass
+    if got_bz or got_tr:
+        for d in {os.path.dirname(p) for _, p in vids}:
+            try:
+                ops.emby_scan_folder(d)
+            except Exception:
+                pass
+    parts = []
+    if got_bz:
+        parts.append(f"Bazarr encontro {got_bz}")
+    if got_tr:
+        parts.append(f"nuestro modelo tradujo {got_tr}")
+    if left > 0:
+        parts.append(f"quedan {left} sin resolver" + (" (encolados para esta noche)" if len(targets) > max_eps else ""))
+    txt = ("; ".join(parts) or "nada que hacer") + ("\n" + "\n".join(fails[:4]) if fails else "")
+    return (got_bz + got_tr) > 0 and left <= 0, txt
 
 
 async def do_cover(q, kind, tmdb):
@@ -1302,7 +1731,8 @@ async def do_releases(q, kind, tmdb, lang, role):
             lib = {"arr_id": obj["id"]}
         else:
             return await q.message.reply_text("No esta en Radarr/Sonarr; no puedo buscar copias.")
-    wait = await q.message.reply_text(f"🔎 Buscando copias de <b>{_h(details['title'])}</b> en {ops.LANG_LABEL[lang]} en todos los indexers (hasta 1 min)…",
+    what = f"en {ops.LANG_LABEL[lang]}" if lang else "(cualquier idioma, mejor copia primero)"
+    wait = await q.message.reply_text(f"🔎 Buscando copias de <b>{_h(details['title'])}</b> {what} en todos los indexers (hasta 1 min)…",
                                       parse_mode=ParseMode.HTML)
     try:
         rows, total = await asyncio.to_thread(ops.releases, kind, lib["arr_id"], lang, None, 8)
@@ -1310,13 +1740,14 @@ async def do_releases(q, kind, tmdb, lang, role):
         log.exception("releases")
         return await wait.edit_text(f"💥 La busqueda fallo: {_h(e)}", parse_mode=ParseMode.HTML)
     if not rows:
-        return await wait.edit_text(f"🤷 {total} resultados y ninguno parece traer {ops.LANG_LABEL[lang]} (con seeders).", parse_mode=ParseMode.HTML)
+        return await wait.edit_text(f"🤷 {total} resultados y ninguno sirve" + (f" (que traiga {ops.LANG_LABEL[lang]} con seeders)" if lang else " (con seeders)") + ".",
+                                    parse_mode=ParseMode.HTML)
     _rel_seq[0] += 1
     key = str(_rel_seq[0])
     _rel_lists[key] = (kind, rows)
     for k in list(_rel_lists)[:-30]:
         _rel_lists.pop(k, None)
-    lines = [f"🌐 <b>{_h(details['title'])}</b> en {ops.LANG_LABEL[lang]} — {len(rows)} de {total}:"]
+    lines = [f"🌐 <b>{_h(details['title'])}</b> {what} — {len(rows)} de {total}:"]
     btns = []
     for i, r in enumerate(rows, 1):
         sure = "✅" if r["lang_sure"] else "❔"
@@ -1333,20 +1764,21 @@ async def do_releases(q, kind, tmdb, lang, role):
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     role, label = who(update)
     if not role:
-        return await update.message.reply_text(ONBOARD, parse_mode=ParseMode.HTML)
+        return await update.effective_message.reply_text(ONBOARD, parse_mode=ParseMode.HTML)
     text = update.message.text.strip()
     if len(text) < 2:
-        return await update.message.reply_text("Escribe al menos 2 letras 🙂")
+        return await update.effective_message.reply_text("Escribe al menos 2 letras 🙂")
 
-    intent, arg = parse_intent(text)
-    if intent and LEVEL[role] >= LEVEL["mod"]:
-        return await handle_intent(update, ctx, role, label, intent, arg)
-    if intent in ("restart", "covers_all", "status", "sessions") and role == "user":
-        return await update.message.reply_text("Eso solo lo hacen los moderadores 🙂 Si un titulo tiene un problema, abre su tarjeta y toca 🚩 Reportar.")
-    if intent in ("translate", "subs", "cover") and role == "user" and arg:
-        text = arg  # el usuario busca el titulo y reporta desde la tarjeta
+    it = await asyncio.to_thread(nlu.understand, text)
+    log.info("nlu %s: %r -> %s %s", label, text, it["intent"], {k: v for k, v in it.items() if v and k not in ("intent",)})
+    if it["intent"] != "search":
+        if await handle_intent(update, ctx, role, label, it):
+            return
+    # busqueda: si Claude limpio el titulo, usalo (y conserva el idioma que detecto)
+    if it["via"] == "llm" and it.get("title"):
+        text = it["title"] + (f" en {it['lang']}" if it.get("lang") else "")
 
-    wait = await update.message.reply_text("🔎 Buscando…")
+    wait = await update.effective_message.reply_text("🔎 Buscando…")
     try:
         clean, year, season, want_es, lang, results, details, status, alts = await asyncio.to_thread(do_search, text)
     except Exception as e:
@@ -1360,55 +1792,190 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await wait.edit_text(
             f"🤷 No encontre nada para «{_h(clean)}».\nPrueba con el titulo original (en ingles), sin tildes, o agrega el ano.",
             parse_mode=ParseMode.HTML)
-    caption, markup, poster = build_card(details, status, results[1:], alts, season, want_es, role, lang)
     try:
         await wait.delete()
     except TelegramError:
         pass
+    # "dark temporada 3" de una serie que ya existe -> flujo de temporada, no tarjeta de "ya esta en Emby"
+    if season and details["kind"] == "s" and status["status"] != "missing":
+        if await season_flow(update, ctx, details, status, season, role, label):
+            return
+    caption, markup, poster = build_card(details, status, results[1:], alts, season, want_es, role, lang)
     await send_card(update.message, caption, markup, poster)
 
 
-async def handle_intent(update, ctx, role, label, intent, arg):
-    msg = update.message
-    if intent == "restart":
-        if not can(role, "restart"):
-            return await msg.reply_text("Reiniciar Emby es solo del admin.")
-        return await ask_restart(msg)
-    if intent == "status":
-        return await cmd_sistema(update, ctx)
-    if intent == "sessions":
-        return await cmd_sesiones(update, ctx)
-    if intent == "covers_all":
-        if not can(role, "restart"):
-            return await msg.reply_text("El barrido de caratulas es del admin; para un titulo concreto: «arregla la caratula de X».")
-        wait = await msg.reply_text("🖼 Buscando items sin caratula y pidiendo refresco…")
-        total, n, names = await run_long(_covers_all)
-        return await wait.edit_text(f"🖼 Sin caratula: {total}; refresco pedido para {n}.\n" + "\n".join(f"• {_h(x)}" for x in names),
-                                    parse_mode=ParseMode.HTML)
-    # intenciones sobre un titulo: cover / translate / subs
-    wait = await msg.reply_text(f"🔎 Buscando «{_h(arg)}»…", parse_mode=ParseMode.HTML)
+_STAFF_ONLY = "Eso es de moderadores 🙂 Si un titulo tiene un problema, escribeme «arregla los subs de X» o abre su tarjeta y toca 🚩 Reportar."
+_CHAT_REPLIES = ["🙂 Aqui estoy. Escribeme el nombre de una peli o serie, o «menu».", "👋 Dime que quieres ver o arreglar.",
+                 "🍿 Cuando quieras: un titulo, «que llego hoy», «arregla los subs de X»…"]
+
+
+async def handle_intent(update, ctx, role, label, it):
+    """Ejecuta una intencion de nlu.understand. -> True si respondio; False = que siga como busqueda."""
+    msg, intent = update.effective_message, it["intent"]
+    app = ctx.application
+    staff = LEVEL[role] >= LEVEL["mod"]
+    admin = role == "admin"
+
+    # ---- sin titulo
+    if intent == "chat":
+        await msg.reply_text(_CHAT_REPLIES[int(time.time()) % len(_CHAT_REPLIES)])
+        return True
+    if intent == "help":
+        await cmd_start(update, ctx)
+        return True
+    if intent == "menu":
+        await cmd_menu(update, ctx)
+        return True
+    if intent == "pending":
+        await cmd_pending(update, ctx)
+        return True
+    if intent == "recent":
+        text, kb = await asyncio.to_thread(_recientes_text, it.get("hours") or 48, staff)
+        await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return True
+    if intent in ("status", "sessions", "queue", "wanted", "reports", "users", "stats", "torrents", "log", "task", "restart", "covers_all"):
+        need_admin = intent in ("torrents", "log", "task", "restart", "covers_all")
+        if not staff or (need_admin and not admin):
+            await msg.reply_text(_STAFF_ONLY if not staff else "Eso es solo del admin 🙂")
+            return True
+        if intent == "status":
+            await cmd_sistema(update, ctx)
+        elif intent == "sessions":
+            await cmd_sesiones(update, ctx)
+        elif intent == "queue":
+            text, kb = await asyncio.to_thread(_cola_text, it.get("title"))
+            await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        elif intent == "wanted":
+            await cmd_faltantes(update, ctx)
+        elif intent == "reports":
+            await cmd_reportes(update, ctx)
+        elif intent == "users":
+            await cmd_users(update, ctx)
+        elif intent == "stats":
+            await cmd_stats(update, ctx)
+        elif intent == "torrents":
+            await cmd_torrents(update, ctx)
+        elif intent == "log":
+            ctx.args = [it.get("name") or "pipeline_health"]
+            await cmd_log(update, ctx)
+        elif intent == "task":
+            if not it.get("name"):
+                await cmd_tareas(update, ctx)
+            else:
+                name = it["name"]
+                if name.endswith("-borrar"):
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Si, borrar", callback_data=f"task:{name}:yes"),
+                                                InlineKeyboardButton("✖️ Cancelar", callback_data="nop")]])
+                    await msg.reply_text(f"¿Seguro? <b>{_h(ops.TASKS[name][0])}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+                else:
+                    wait = await msg.reply_text(f"⏳ {_h(ops.TASKS[name][0])}…", parse_mode=ParseMode.HTML)
+                    log_request("task", update, task=name)
+                    ok, out = await run_long(ops.run_task, name)
+                    await wait.edit_text(f"{'✅' if ok else '❌'} <b>{_h(ops.TASKS[name][0])}</b>\n<pre>{_h(out)}</pre>", parse_mode=ParseMode.HTML)
+        elif intent == "restart":
+            await ask_restart(msg)
+        elif intent == "covers_all":
+            wait = await msg.reply_text("🖼 Buscando items sin caratula y pidiendo refresco…")
+            total, n, names = await run_long(_covers_all)
+            await wait.edit_text(f"🖼 Sin caratula: {total}; refresco pedido para {n}.\n" + "\n".join(f"• {_h(x)}" for x in names),
+                                 parse_mode=ParseMode.HTML)
+        return True
+
+    # ---- sobre un titulo
+    title = (it.get("title") or "").strip()
+    if not title:
+        return False
+    if intent == "delete" and not admin:
+        await msg.reply_text("Borrar titulos es solo del admin 🙂")
+        return True
+    wait = await msg.reply_text(f"🔎 Buscando «{_h(title)}»…", parse_mode=ParseMode.HTML)
     try:
-        details, status = await asyncio.to_thread(find_one, arg)
+        details, status = await asyncio.to_thread(find_one, title)
     except Exception as e:
-        log.exception("find_one %r", arg)
-        return await wait.edit_text(f"💥 {_h(e)}", parse_mode=ParseMode.HTML)
+        log.exception("find_one %r", title)
+        await wait.edit_text(f"💥 {_h(e)}", parse_mode=ParseMode.HTML)
+        return True
     if not details:
-        return await wait.edit_text(f"🤷 No encontre «{_h(arg)}».", parse_mode=ParseMode.HTML)
-    if status["status"] != "emby":
-        return await wait.edit_text(f"«{_h(details['title'])}» no esta en Emby ({status['status']}); primero hay que tenerla.", parse_mode=ParseMode.HTML)
+        await wait.edit_text(f"🤷 No encontre «{_h(title)}».", parse_mode=ParseMode.HTML)
+        return True
     kind, tmdb = details["kind"], details["tmdb"]
+    full = f"{details['title']}{_year(details.get('year'))}"
+    try:
+        await wait.delete()
+    except TelegramError:
+        pass
+
+    if intent == "add_season":
+        if details["kind"] != "s":
+            await msg.reply_text(f"«{_h(full)}» es una pelicula; no tiene temporadas 🙂")
+            return True
+        if not await season_flow(update, ctx, details, status, it["season"], role, label):
+            caption, markup, poster = build_card(details, status, [], {}, it["season"], False, role, it.get("lang"))
+            await send_card(msg, caption, markup, poster)
+        return True
+
+    if intent == "delete":
+        if status["status"] == "missing":
+            await msg.reply_text(f"«{_h(full)}» no esta en el servidor.", parse_mode=ParseMode.HTML)
+            return True
+        lib = status.get("lib")
+        where = f"{app_name(kind)}" + (" y Emby" if status["status"] == "emby" else "")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Si, borrar con archivos", callback_data=f"del:{kind}:{tmdb}:yes"),
+                                    InlineKeyboardButton("✖️ Cancelar", callback_data="nop")]])
+        note = "" if lib else "\n⚠️ No esta en Radarr/Sonarr: solo puedo avisarte la ruta, no borrar."
+        await msg.reply_text(f"¿Borro <b>{_h(full)}</b> de {where} con sus archivos?{note}", parse_mode=ParseMode.HTML, reply_markup=kb)
+        return True
+
+    if intent == "releases":
+        if not staff:
+            rid = new_report(update, kind, tmdb, full, "quality" if it.get("quality") or not it.get("lang") else "lang", it.get("lang"))
+            log_request("report", update, kind=kind, tmdb=tmdb, title=full, type="quality", lang=it.get("lang"))
+            await msg.reply_text(f"🚩 Anotado (#{rid}): quieres otra copia de <b>{_h(full)}</b>"
+                                 f"{' en ' + ops.LANG_LABEL[it['lang']] if it.get('lang') else ' de mejor calidad'}. Un moderador la busca y te aviso.",
+                                 parse_mode=ParseMode.HTML)
+            r = _load_json(REPORTS_FILE, {}).get(rid)
+            await notify_staff(app, _report_text(r), _report_kb(r))
+            return True
+        await do_releases(FakeQuery(msg), kind, tmdb, it.get("lang"), role)
+        return True
+
+    if status["status"] != "emby":
+        if not staff:
+            await msg.reply_text(f"«{_h(full)}» todavia no esta en Emby ({status['status']}); no hay nada que arreglar aun. Si quieres, pidela:")
+            caption, markup, poster = build_card(details, status, [], {}, role=role)
+            await send_card(msg, caption, markup, poster)
+        else:
+            await msg.reply_text(f"«{_h(full)}» no esta en Emby ({status['status']}); primero hay que tenerla.", parse_mode=ParseMode.HTML)
+        return True
+
     if intent == "cover":
-        await wait.delete()
-        return await do_cover(FakeQuery(msg), kind, tmdb)
-    if intent == "subs":
-        await wait.delete()
-        return await subs_menu(FakeQuery(msg), kind, tmdb, role)
-    if intent == "translate":
-        await wait.edit_text(f"🤖 Traduciendo subs de <b>{_h(details['title'])}</b> con nuestro modelo (en→es)… "
-                             f"{'una peli tarda 1-3 min' if kind == 'm' else 'una serie puede tardar bastante'}.", parse_mode=ParseMode.HTML)
-        res = await run_long(_do_subs, "tr", kind, status["emby"], status.get("lib"), False)
-        log_request("subs", update, action="tr", kind=kind, tmdb=tmdb, title=details["title"])
-        return await msg.reply_text(f"🤖 <b>{_h(details['title'])}</b>\n{_h(res)}", parse_mode=ParseMode.HTML)
+        if not staff:
+            rid = new_report(update, kind, tmdb, full, "cover")
+            log_request("report", update, kind=kind, tmdb=tmdb, title=full, type="cover")
+            await msg.reply_text(f"🚩 Anotado (#{rid}): caratula/info de <b>{_h(full)}</b>. Un moderador la refresca y te aviso.", parse_mode=ParseMode.HTML)
+            r = _load_json(REPORTS_FILE, {}).get(rid)
+            await notify_staff(app, _report_text(r), _report_kb(r))
+            return True
+        log_request("cover", update, kind=kind, tmdb=tmdb)
+        await do_cover(FakeQuery(msg), kind, tmdb)
+        return True
+
+    if intent in ("subs_fix", "subs_bad", "translate"):
+        if not staff:
+            await subs_self_service(update, ctx, details, status, bad=(intent == "subs_bad"))
+            return True
+        if intent == "translate":
+            wait = await msg.reply_text(f"🤖 Traduciendo subs de <b>{_h(full)}</b> con nuestro modelo (en→es)… "
+                                        f"{'una peli tarda 1-3 min' if kind == 'm' else 'una serie puede tardar bastante'}.", parse_mode=ParseMode.HTML)
+            res = await run_long(_do_subs, "tr", kind, status["emby"], status.get("lib"), False)
+            log_request("subs", update, action="tr", kind=kind, tmdb=tmdb, title=full)
+            await wait.edit_text(f"🤖 <b>{_h(full)}</b>\n{_h(res)}", parse_mode=ParseMode.HTML)
+            return True
+        if intent == "subs_bad":
+            await msg.reply_text("Para subs que estan mal: ⏱ Sincronizar (Bazarr los cuadra con el audio) o 🔁 Rehacer con nuestro modelo.")
+        await subs_menu(FakeQuery(msg), kind, tmdb, role)
+        return True
+    return False
 
 
 class FakeQuery:
@@ -1537,9 +2104,139 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             return
 
+        # ---- v4: para todos los perfiles
+        if action == "rec":
+            await q.answer()
+            text, kb = await asyncio.to_thread(_recientes_text, int(parts[1]), can(role, "wanted"))
+            try:
+                return await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            except TelegramError:
+                return await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+        if action == "menu":
+            await q.answer()
+            fn = {"pending": cmd_pending, "reports": cmd_reportes, "system": cmd_sistema, "stats": cmd_stats,
+                  "tasks": cmd_tareas, "emby": cmd_emby}.get(parts[1])
+            return await fn(update, ctx) if fn else None
+
+        if action == "sea":
+            tmdb, arr_id, season, have = int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])
+            if role == "user" and quota_used(update.effective_user.id) >= DAILY_QUOTA:
+                return await q.answer(f"Ya usaste tus {DAILY_QUOTA} peticiones de hoy 🙂", show_alert=True)
+            await q.answer("Pidiendo…")
+            ok = await asyncio.to_thread(ops.sonarr_want_season, arr_id, season)
+            if not ok:
+                return await q.message.reply_text("Sonarr no tiene esa temporada en la serie.")
+            s = await asyncio.to_thread(ops.arr_series, arr_id)
+            title = f"{s.get('title')}{_year(s.get('year'))}"
+            remember_pending(chat_id, "s", arr_id, tmdb, f"{title} · T{season}", label, season=season, have=have)
+            log_request("add", update, kind="s", tmdb=tmdb, arr_id=arr_id, title=title, mode=season)
+            await q.edit_message_reply_markup(None)
+            await q.message.reply_text(f"➕ Temporada {season} de <b>{_h(title)}</b> pedida; Sonarr ya la busca y te aviso cuando lleguen episodios.",
+                                       parse_mode=ParseMode.HTML)
+            if role == "user":
+                await notify_staff(ctx.application, f"➕ <b>{_h(label)}</b> pidio 📺 <b>{_h(title)}</b> temporada {season}")
+            return
+
         # ---- de aqui en adelante: staff
         if not can(role, "subs"):
             return await q.answer("Eso es de moderadores 🙂", show_alert=True)
+
+        if action == "q":
+            sub = parts[1]
+            if sub == "refresh":
+                await q.answer("Leyendo colas…")
+                text, kb = await asyncio.to_thread(_cola_text)
+                return await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            key, i = parts[2], int(parts[3])
+            if key not in _q_lists or i >= len(_q_lists[key]):
+                return await q.answer("Esa lista ya caduco; toca 🔄 Actualizar", show_alert=True)
+            r = _q_lists[key][i]
+            if len(parts) == 4:
+                await q.answer()
+                what = "quitar, VETAR esta copia y buscar otra" if sub == "bl" else "quitar de la cola (sin buscar otra)"
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Si", callback_data=f"q:{sub}:{key}:{i}:yes"),
+                                            InlineKeyboardButton("✖️ Cancelar", callback_data="nop")]])
+                return await q.message.reply_text(f"¿{what}?\n<b>{_h(r['title'])}</b>\n<i>{_h(r['release'][:90])}</i>",
+                                                  parse_mode=ParseMode.HTML, reply_markup=kb)
+            await q.answer("Voy…")
+            await asyncio.to_thread(ops.queue_remove, r["kind"], r["ids"], sub == "bl", sub == "bl")
+            log_request("queue_rm", update, kind=r["kind"], title=r["title"], release=r["release"], blocklist=(sub == "bl"))
+            await q.edit_message_reply_markup(None)
+            return await q.message.reply_text(f"{'🔁 Vetada y buscando otra copia' if sub == 'bl' else '🗑 Quitada de la cola'}: <b>{_h(r['title'])}</b>",
+                                              parse_mode=ParseMode.HTML)
+
+        if action == "wnt":
+            sub = parts[1]
+            if sub == "list":
+                await q.answer("Preguntando a Bazarr…")
+                text, kb = await asyncio.to_thread(_faltantes_text)
+                return await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            if sub == "search":
+                await q.answer("Lanzando…")
+                fired = await asyncio.to_thread(ops.bazarr_search_wanted)
+                return await q.message.reply_text(f"🔎 Bazarr busca lo que falta ({', '.join(fired) or 'no encontre la tarea; revisa /system/tasks'}). "
+                                                  f"Tarda unos minutos; vuelve a mirar «que falta de subs».")
+            if sub == "translate":
+                await q.answer("Traduciendo…")
+                wait = await q.message.reply_text("🤖 Traduciendo con nuestro modelo las pelis que Bazarr no resolvio (max 8, 1-3 min cada una)…")
+                log_request("subs", update, action="wanted_translate")
+                out = await run_long(_translate_wanted, 8)
+                return await wait.edit_text(f"🤖 <b>Faltantes</b>\n{_h(out)}", parse_mode=ParseMode.HTML)
+            if sub == "fixrecent":
+                await q.answer("Arreglando…")
+                wait = await q.message.reply_text("⚡ Arreglando subs de lo recien llegado (Bazarr → nuestro modelo; max 8 titulos)…")
+                log_request("subs", update, action="fix_recent", hours=int(parts[2]))
+                out = await run_long(_fix_recent, int(parts[2]), 8)
+                return await wait.edit_text(f"⚡ <b>Recientes</b>\n{_h(out)}", parse_mode=ParseMode.HTML)
+
+        if action == "rela":
+            await q.answer("Buscando…")
+            return await do_releases(q, parts[1], int(parts[2]), None, role)
+
+        if action == "tor":
+            if not can(role, "torrents"):
+                return await q.answer("Solo el admin", show_alert=True)
+            sub = parts[1]
+            if sub == "list":
+                await q.answer("Leyendo Transmission…")
+                text, kb = await asyncio.to_thread(_torrents_text)
+                return await q.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+            key, i = parts[2], int(parts[3])
+            if key not in _t_lists or i >= len(_t_lists[key]):
+                return await q.answer("Esa lista ya caduco; toca 🔄 Actualizar", show_alert=True)
+            t = _t_lists[key][i]
+            if len(parts) == 4:
+                await q.answer()
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Si, borrar con datos", callback_data=f"tor:rm:{key}:{i}:yes"),
+                                            InlineKeyboardButton("✖️ Cancelar", callback_data="nop")]])
+                return await q.message.reply_text(f"¿Borro de Transmission (con sus archivos)?\n<b>{_h(t['name'][:90])}</b> · {t['pct']}% · {t['size_gb']} GB",
+                                                  parse_mode=ParseMode.HTML, reply_markup=kb)
+            await q.answer("Borrando…")
+            await asyncio.to_thread(ops.transmission_remove, [t["id"]], True)
+            log_request("torrent_rm", update, name=t["name"])
+            await q.edit_message_reply_markup(None)
+            return await q.message.reply_text(f"🗑 Borrado: <b>{_h(t['name'][:90])}</b>", parse_mode=ParseMode.HTML)
+
+        if action == "del":
+            if not can(role, "delete"):
+                return await q.answer("Solo el admin", show_alert=True)
+            kind, tmdb = parts[1], int(parts[2])
+            await q.answer("Borrando…")
+            await q.edit_message_reply_markup(None)
+            details, status = await asyncio.to_thread(locate, kind, tmdb)
+            lib, item = status.get("lib"), status.get("emby")
+            full = f"{details['title']}{_year(details.get('year'))}"
+            if not lib:
+                paths = await asyncio.to_thread(video_paths, kind, item) if item else []
+                where = os.path.dirname(paths[0][1]) if paths else "?"
+                return await q.message.reply_text(f"⚠️ <b>{_h(full)}</b> no esta en {app_name(kind)}; borra a mano la carpeta:\n<code>{_h(where)}</code>",
+                                                  parse_mode=ParseMode.HTML)
+            await asyncio.to_thread(ops.arr_delete, kind, lib["arr_id"], True)
+            _library_cache["at"] = _emby_idx["at"] = 0
+            log_request("delete", update, kind=kind, tmdb=tmdb, title=full)
+            return await q.message.reply_text(f"🗑 <b>{_h(full)}</b> borrada de {app_name(kind)} con sus archivos; Emby la quita en unos minutos.",
+                                              parse_mode=ParseMode.HTML)
 
         if action == "sub":
             sub, kind, tmdb = parts[1], parts[2], int(parts[3])
@@ -1553,7 +2250,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not item:
                 return
             what = {"dl": "🔎 Bazarr buscando es", "tr": "🤖 traduciendo con nuestro modelo (1-3 min por archivo)",
-                    "trr": "🔁 rehaciendo es con nuestro modelo", "q": "🧹 encolando", "bz": "🌍 Bazarr traduciendo"}[sub]
+                    "trr": "🔁 rehaciendo es con nuestro modelo", "q": "🧹 encolando", "bz": "🌍 Bazarr traduciendo",
+                    "auto": "⚡ automatico: Bazarr y, lo que falte, nuestro modelo", "sync": "⏱ Bazarr sincronizando con el audio"}[sub]
             wait = await q.message.reply_text(f"{what} — <b>{_h(details['title'])}</b>…", parse_mode=ParseMode.HTML)
             res = await run_long(_do_subs, sub, kind, item, status.get("lib"), sub == "trr")
             log_request("subs", update, action=sub, kind=kind, tmdb=tmdb, title=details["title"])
@@ -1661,11 +2359,14 @@ async def post_init(app):
         log.exception("Emby System/Info")
     PIDFILE.write_text(str(os.getpid()))
     app.bot_data["pending_task"] = asyncio.get_running_loop().create_task(pending_loop(app))
-    base = [BotCommand("start", "Como funciona"), BotCommand("pendientes", "Lo que pediste y aun no llega"),
+    base = [BotCommand("start", "Como funciona"), BotCommand("menu", "Botones"), BotCommand("recientes", "Lo nuevo en Emby"),
+            BotCommand("pendientes", "Lo que pediste y aun no llega"),
             BotCommand("vincular", "Vincular tu cuenta de Emby"), BotCommand("id", "Tu id de Telegram")]
-    mod = base + [BotCommand("sistema", "Salud del pipeline y Emby"), BotCommand("sesiones", "Quien esta viendo"),
-                  BotCommand("reportes", "Problemas abiertos"), BotCommand("usuarios", "Vinculados y roles")]
-    adm = mod + [BotCommand("emby", "Reiniciar, caratulas, salud"), BotCommand("tareas", "Scripts del pipeline"),
+    mod = base + [BotCommand("cola", "Descargas en curso"), BotCommand("faltantes", "Sin subs en espanol"),
+                  BotCommand("sistema", "Salud del pipeline y Emby"), BotCommand("sesiones", "Quien esta viendo"),
+                  BotCommand("reportes", "Problemas abiertos"), BotCommand("usuarios", "Vinculados y roles"), BotCommand("stats", "Numeros")]
+    adm = mod + [BotCommand("torrents", "Transmission"), BotCommand("borrar", "Quitar un titulo con archivos"),
+                 BotCommand("emby", "Reiniciar, caratulas, salud"), BotCommand("tareas", "Scripts del pipeline"),
                  BotCommand("log", "Cola de un log"), BotCommand("rol", "Cambiar rol"), BotCommand("desvincular", "Quitar usuario")]
     try:
         await app.bot.set_my_commands(base)
@@ -1676,7 +2377,8 @@ async def post_init(app):
                 log.warning("set_my_commands scope %s fallo", tid)
     except Exception:
         log.warning("set_my_commands fallo")
-    log.info("listo v3; admins=%s staff=%s usuarios=%d cupo=%d/dia", sorted(ADMINS) or "NINGUNO", sorted(staff_ids()), len(load_users()), DAILY_QUOTA)
+    log.info("listo v4; admins=%s staff=%s usuarios=%d cupo=%d/dia nlu_llm=%s", sorted(ADMINS) or "NINGUNO", sorted(staff_ids()),
+             len(load_users()), DAILY_QUOTA, nlu.NLU_MODEL if nlu.llm_available() else "off")
 
 
 async def post_shutdown(app):
@@ -1706,6 +2408,13 @@ def main():
     app.add_handler(CommandHandler("emby", cmd_emby))
     app.add_handler(CommandHandler("tareas", cmd_tareas))
     app.add_handler(CommandHandler("log", cmd_log))
+    app.add_handler(CommandHandler(["cola", "descargas"], cmd_cola))
+    app.add_handler(CommandHandler(["recientes", "nuevo"], cmd_recientes))
+    app.add_handler(CommandHandler(["faltantes", "subs"], cmd_faltantes))
+    app.add_handler(CommandHandler("torrents", cmd_torrents))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("menu", cmd_menu))
+    app.add_handler(CommandHandler("borrar", cmd_borrar))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
