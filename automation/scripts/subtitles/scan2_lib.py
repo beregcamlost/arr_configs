@@ -132,12 +132,42 @@ def series_of(path):
                 return ("%s/%s" % (key, parts[i + 1]))
     return "?"
 
+ANCHOR = re.compile(r"\b[A-Z][a-z]{3,}\b|\b\d{2,}\b")
+
+def _anchors(text):
+    if not isinstance(text, str):
+        text = " ".join(text)  # cues de scan2: texto como lista de lineas
+    return set(ANCHOR.findall(TAG.sub("", text)))
+
 def sync_offset(es_cues, en_cues):
-    """Median |delta| ms between each ES cue midpoint and the nearest EN cue midpoint."""
+    """Offset ES<->EN en ms.
+
+    Preferente: mediana FIRMADA de (inicio EN - inicio ES) entre pares de cues que
+    comparten un ancla unica (nombre propio / numero) a menos de 8 s. Detecta
+    desfases de varios segundos que la mediana al 'cue mas cercano' esconde: con
+    dialogo denso siempre hay un cue EN a <1 s aunque sea OTRA linea (Marshals S01
+    E01-E11 con 2-8 s de desfase pasaron el gate como GREEN, 2026-09-16).
+    Fallback (<15 anclas, p.ej. subs cortos o sin nombres): el metodo viejo,
+    mediana de |delta| al punto medio EN mas cercano.
+    """
     if not es_cues or not en_cues:
         return None
-    en_mid = sorted((s + e) // 2 for s, e, _ in en_cues)
     import bisect
+    en_starts = [s for s, _, _ in en_cues]
+    en_anch = [_anchors(t) for _, _, t in en_cues]
+    deltas = []
+    for s, _, t in es_cues:
+        a = _anchors(t)
+        if not a:
+            continue
+        lo = bisect.bisect_left(en_starts, s - 8000)
+        hi = bisect.bisect_right(en_starts, s + 8000)
+        cand = [en_starts[j] - s for j in range(lo, hi) if a & en_anch[j]]
+        if len(cand) == 1:
+            deltas.append(cand[0])
+    if len(deltas) >= 15:
+        return abs(statistics.median(deltas))
+    en_mid = sorted((s + e) // 2 for s, e, _ in en_cues)
     deltas = []
     for s, e, _ in es_cues:
         m = (s + e) // 2

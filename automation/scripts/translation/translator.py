@@ -741,12 +741,14 @@ def _trigger_bazarr_rescan(cfg: Config, media_path: str):
         series_id = row[0]
         conn.close()
         try:
-            req.post(
-                f"{cfg.bazarr_url}/api/series/action",
+            # Bazarr 1.6: PATCH /api/series?seriesid=&action=scan-disk
+            # (POST /api/series/action devolvia 405 y solo dejaba un warning, 2026-09-16)
+            req.patch(
+                f"{cfg.bazarr_url}/api/series",
                 headers=headers,
-                json={"seriesid": series_id, "action": "scan-disk"},
+                params={"seriesid": series_id, "action": "scan-disk"},
                 timeout=30,
-            )
+            ).raise_for_status()
         except Exception as e:
             log.warning("Bazarr series rescan failed: %s", e)
         return
@@ -760,12 +762,12 @@ def _trigger_bazarr_rescan(cfg: Config, media_path: str):
     if row:
         movie_id = row[0]
         try:
-            req.post(
-                f"{cfg.bazarr_url}/api/movies/action",
+            req.patch(
+                f"{cfg.bazarr_url}/api/movies",
                 headers=headers,
-                json={"radarrid": movie_id, "action": "scan-disk"},
+                params={"radarrid": movie_id, "action": "scan-disk"},
                 timeout=30,
-            )
+            ).raise_for_status()
         except Exception as e:
             log.warning("Bazarr movie rescan failed: %s", e)
 

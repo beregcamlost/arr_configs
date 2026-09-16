@@ -5,8 +5,11 @@ Puntua cada .es.srt modificado recientemente (proveedores de Bazarr, extraccion
 embebida o traduccion) con los detectores estructurales de scan2 (scan2_lib.py,
 copia sincronizada del canonico en berentendo D:\\emby\\subtitle-pipeline\\
 overnight\\scan2.py). Si el archivo sale RED/SEVERE y hay fuente EN al lado, lo
-renombra a .es.srt.intake-rejected-<stamp>: translator.py (lane del
-media_pipeline) ve el ES faltante y lo rehace desde el EN en <=30 min.
+renombra a .es.srt.intake-rejected-<stamp> y pide a Bazarr un scan-disk de la
+serie/pelicula (2026-09-16): translator.py (lane del media_pipeline) lee
+missing_subtitles de Bazarr, y sin el scan-disk Bazarr seguia creyendo que el
+ES existia (Reacher S04E08, 12 h sin ES). Si a las 3 h no hay reposicion,
+avisa una vez por log + Discord (ALERT_MISSING_ES).
 
 Salvaguardas:
   - keep-local (manifests de Sonarr/Radarr + manuales) JAMAS se toca.
@@ -47,6 +50,101 @@ def load_json(path, default):
         return default
 
 
+ENV_FILE = "/config/berenstuff/.env"
+PENDING_ALERT_HOURS = 3.0   # ES rechazado y aun sin reposicion -> alerta (una vez)
+
+
+def load_env(path=ENV_FILE):
+    """Lee las lineas 'export K=V' del .env del pipeline (sin ejecutar nada)."""
+    env = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export ") and "=" in line:
+                    k, v = line[7:].split("=", 1)
+                    env[k.strip()] = v.split(" #")[0].strip().strip("'\"")
+    except Exception as e:
+        log("WARN: no pude leer %s: %s" % (path, e))
+    return env
+
+
+def bazarr_scan_disk(env, video_base):
+    """Pide a Bazarr un scan-disk de la serie/pelicula del archivo rechazado.
+
+    Sin esto Bazarr sigue creyendo que el ES existe (missing_subtitles=[]) y
+    translator.py --since, que consulta ESA tabla, nunca ve el hueco: Reacher
+    S04E08 estuvo 12 h sin ES tras el rechazo de las 09:00 (2026-09-16).
+    """
+    import sqlite3
+    import urllib.request
+    url, key, db = env.get("BAZARR_URL"), env.get("BAZARR_API_KEY"), env.get("BAZARR_DB_RO") or env.get("BAZARR_DB")
+    if not (url and key and db):
+        return "sin BAZARR_URL/API_KEY/DB en .env"
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=30)
+        conn.execute("PRAGMA busy_timeout=30000")
+        prefix = video_base + "."
+        row = conn.execute("SELECT sonarrSeriesId FROM table_episodes WHERE substr(path,1,?)=? LIMIT 1",
+                           (len(prefix), prefix)).fetchone()
+        if row:
+            query = "/api/series?seriesid=%d&action=scan-disk" % row[0]
+        else:
+            row = conn.execute("SELECT radarrId FROM table_movies WHERE substr(path,1,?)=? LIMIT 1",
+                               (len(prefix), prefix)).fetchone()
+            if not row:
+                conn.close()
+                return "no encontrado en Bazarr DB"
+            query = "/api/movies?radarrid=%d&action=scan-disk" % row[0]
+        conn.close()
+        # Bazarr 1.6: PATCH con query params (POST /api/series/action responde 405)
+        req = urllib.request.Request(url.rstrip("/") + query, method="PATCH",
+                                     headers={"X-API-KEY": key})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return "bazarr scan-disk %s http=%d" % (query, r.status)
+    except Exception as e:
+        return "bazarr scan-disk FALLO: %s" % e
+
+
+def discord(env, msg):
+    hook = env.get("DISCORD_WEBHOOK_URL")
+    if not hook:
+        return False
+    try:
+        import urllib.request
+        req = urllib.request.Request(hook, data=json.dumps({"content": msg[:1900]}).encode(),
+                                     headers={"Content-Type": "application/json", "User-Agent": "intake-gate"})
+        urllib.request.urlopen(req, timeout=20).read()
+        return True
+    except Exception as e:
+        log("WARN: discord fallo: %s" % e)
+        return False
+
+
+def check_pending_rejections(state, env, dry_run):
+    """Rechazados cuya reposicion no llego: si el .es.srt sigue sin existir tras
+    PENDING_ALERT_HOURS, avisa UNA vez (log + Discord) en vez de callar para siempre."""
+    n = 0
+    for path, rec in state.items():
+        if rec.get("action") != "rejected" or rec.get("alerted") or os.path.exists(path):
+            continue
+        try:
+            when = time.mktime(time.strptime(rec.get("when", ""), "%Y-%m-%d %H:%M"))
+        except Exception:
+            continue
+        age_h = (time.time() - when) / 3600.0
+        if age_h < PENDING_ALERT_HOURS:
+            continue
+        msg = ("ALERT_MISSING_ES %s: rechazado hace %.1f h y el translator no lo ha repuesto "
+               "(revisar lane translation / Bazarr)" % (os.path.basename(path), age_h))
+        log(msg)
+        if not dry_run:
+            rec["alerted"] = True
+            discord(env, ":rotating_light: intake-gate — " + msg)
+        n += 1
+    return n
+
+
 def recent_es_files(prefix, hours):
     r = subprocess.run(
         ["find", prefix, "-name", "*.es.srt", "-mmin", "-%d" % int(hours * 60)],
@@ -70,6 +168,8 @@ def main():
     if not keep:
         log("WARN: manifiesto keep-local vacio o ausente (%s) — sin exenciones" % KEEP_LOCAL)
 
+    env = load_env()
+    n_alert = check_pending_rejections(state, env, a.dry_run)
     files = recent_es_files(a.path_prefix, a.hours)
     stamp = time.strftime("%Y%m%d-%H%M")
     n_ok = n_rej = n_esc = n_skip = n_keep = n_qe = 0
@@ -140,6 +240,7 @@ def main():
                     os.rename(path, path + ".intake-rejected-" + stamp)
                     log("REJECTED [%s] %s — %s -> translator lo rehace del EN"
                         % (sev, name, ",".join(flags)))
+                    log("  %s" % bazarr_scan_disk(env, base))
         else:
             rec["action"] = "ok"
             n_ok += 1
@@ -152,8 +253,9 @@ def main():
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=0)
     log("resumen: recientes=%d ok=%d rechazados=%d escalados=%d keep_local=%d "
-        "qe_locked=%d sin_cambio=%d%s" % (len(files), n_ok, n_rej, n_esc, n_keep,
-                                          n_qe, n_skip, " (DRY-RUN)" if a.dry_run else ""))
+        "qe_locked=%d sin_cambio=%d alertas_pendientes=%d%s"
+        % (len(files), n_ok, n_rej, n_esc, n_keep, n_qe, n_skip, n_alert,
+           " (DRY-RUN)" if a.dry_run else ""))
 
 
 if __name__ == "__main__":
