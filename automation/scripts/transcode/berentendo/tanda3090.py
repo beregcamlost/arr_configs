@@ -128,7 +128,7 @@ def claim(mid):
     if not mid:
         return True
     tag = CLAIM + str(int(time.time()))
-    r = dbq("UPDATE conversion_plan SET claimed_by=%s WHERE media_id=%d AND claimed_by IS NULL; SELECT changes();"
+    r = dbq("UPDATE conversion_plan SET claimed_by=%s WHERE media_id=%d AND (claimed_by IS NULL OR claimed_by LIKE 'gpu3090@%%'); SELECT changes();"
             % (sq(tag), int(mid)))
     return (r.stdout or "").strip().splitlines()[-1:] == ["1"]
 
@@ -182,7 +182,7 @@ def worklist(limit=0):
          "  ON r.media_id=cp.media_id "
          "LEFT JOIN conversion_runs cr ON cr.id=r.mx "
          "WHERE cp.eligible=1 AND cp.reason='needs_transcode' AND m.deleted_at IS NULL "
-         "AND cp.claimed_by IS NULL "
+         "AND (cp.claimed_by IS NULL OR cp.claimed_by LIKE 'gpu3090@%') "
          "AND COALESCE(cr.status,'') NOT IN ('swapped','running','attempt_limit_reached') "
          "ORDER BY COALESCE(NULLIF(m.added_ts,0), m.mtime) DESC")
     if limit:
@@ -249,6 +249,10 @@ def build_cmd(inf, outf, info, orig):
         vc = ["-c:v", "copy"]
     else:
         vc = ["-c:v", "h264_nvenc", "-profile:v", "high", "-pix_fmt", "yuv420p", "-preset", "p5", "-cq", "19"]
+        # UHD -> 1080p (2026-10-06): la biblioteca es 1080p; un h264 4K seria enorme y
+        # pesado de reproducir. -2 mantiene el aspecto con ancho par.
+        if int(vs.get("height") or 0) > 1080:
+            vc += ["-vf", "scale=-2:1080"]
     cmd += vc
     keep = []
     tagged_orig = [s for s in a if s.get("tags", {}).get("language", "und") == orig]
@@ -273,7 +277,7 @@ def build_cmd(inf, outf, info, orig):
             si += 1
     cmd += ["-map_chapters", "0", outf]
     dropped = len(a) - len(keep)
-    return cmd, "v=%s a_keep=%d a_drop=%d img_subs=%d" % (vc[1], len(keep), dropped, si)
+    return cmd, "v=%s%s a_keep=%d a_drop=%d img_subs=%d" % (vc[1], " scale1080" if "-vf" in vc else "", len(keep), dropped, si)
 
 
 def extract_sidecars(inf, info, base_remote):
