@@ -124,7 +124,7 @@ if ! flock -n 9; then
   exit 0
 fi
 
-sqlite3 "$DB_PATH" '
+sqlite3 -cmd ".timeout ${SQLITE_TIMEOUT_MS:-30000}" "$DB_PATH" '
 CREATE TABLE IF NOT EXISTS dedupe_media_state (
   media_path TEXT PRIMARY KEY,
   media_dir TEXT,
@@ -470,7 +470,7 @@ while IFS= read -r -d '' media; do
   sig_before="$(subtitle_signature "$stem")"
 
   esc_media="$(sql_escape "$media")"
-  row="$(sqlite3 "$DB_PATH" "SELECT media_size || '|' || media_mtime || '|' || sub_sig FROM dedupe_media_state WHERE media_path='$esc_media' LIMIT 1;")"
+  row="$(sqlite3 -cmd ".timeout ${SQLITE_TIMEOUT_MS:-30000}" "$DB_PATH" "SELECT media_size || '|' || media_mtime || '|' || sub_sig FROM dedupe_media_state WHERE media_path='$esc_media' LIMIT 1;")"
   last_size="${row%%|*}"
   rest="${row#*|}"
   if [[ "$row" == "$rest" ]]; then
@@ -516,7 +516,7 @@ while IFS= read -r -d '' media; do
     esc_sig="$(sql_escape "$sig_after")"
     esc_status="$(sql_escape "$status")"
 
-    sqlite3 "$DB_PATH" "
+    sqlite3 -cmd ".timeout ${SQLITE_TIMEOUT_MS:-30000}" "$DB_PATH" "
       INSERT INTO dedupe_media_state (
         media_path, media_dir, media_size, media_mtime, sub_sig,
         last_status, last_scan_ts, renamed_count, removed_count
