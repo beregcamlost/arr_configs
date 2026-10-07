@@ -209,11 +209,14 @@ def find_best_source_srt(
 
     # Sort by size descending
     candidates.sort(key=lambda x: x[2], reverse=True)
-    largest_size = candidates[0][2]
 
-    # Prefer English if within 20% of largest
+    # Prefer English whenever a dialogue English sidecar exists (2026-10-07).
+    # Before, English only won if it was within 20% of the largest candidate;
+    # Bazarr dropping 8 languages for Suikoden S01E01 made the French file win,
+    # the fr->es output was rejected by the intake gate, and the "success" row
+    # put the episode on a 24 h cooldown. The pipeline is tuned for en->es.
     for path, lang, size in candidates:
-        if lang == "en" and size >= largest_size * 0.8:
+        if lang == "en":
             return path
 
     return candidates[0][0]

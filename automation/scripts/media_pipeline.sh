@@ -336,7 +336,7 @@ run_subtitle_dedupe() {
       --state-dir    "/APPBOX_DATA/storage/.subtitle-dedupe-state" \
       --bazarr-db    "${BAZARR_DB:-/opt/bazarr/data/db/bazarr.db}" \
       --bazarr-url   "${BAZARR_URL:-http://127.0.0.1:6767/bazarr}" \
-      --since        10 \
+      --since        35 \
       --log          "/config/berenstuff/automation/logs/library_subtitle_dedupe.log"
 }
 
