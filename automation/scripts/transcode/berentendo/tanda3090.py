@@ -249,6 +249,11 @@ def build_cmd(inf, outf, info, orig):
         vc = ["-c:v", "copy"]
     else:
         vc = ["-c:v", "h264_nvenc", "-profile:v", "high", "-pix_fmt", "yuv420p", "-preset", "p5", "-cq", "19"]
+        # HEVC/AV1 (2026-10-15): fuentes eficientes -> cq19 las inflaba ~2x. cq24 + techo 6M,
+        # mismo perfil que las tandas cq24 (FROM S4 sale ~1.3x la fuente HEVC). mubuntu ya no las toma.
+        if vs.get("codec_name") in ("hevc", "av1"):
+            vc = ["-c:v", "h264_nvenc", "-profile:v", "high", "-pix_fmt", "yuv420p", "-preset", "p5",
+                  "-rc", "vbr", "-cq", "24", "-b:v", "0", "-maxrate", "6M", "-bufsize", "12M"]
         # UHD -> 1080p (2026-10-06): la biblioteca es 1080p; un h264 4K seria enorme y
         # pesado de reproducir. -2 mantiene el aspecto con ancho par.
         if int(vs.get("height") or 0) > 1080:
@@ -277,7 +282,7 @@ def build_cmd(inf, outf, info, orig):
             si += 1
     cmd += ["-map_chapters", "0", outf]
     dropped = len(a) - len(keep)
-    return cmd, "v=%s%s a_keep=%d a_drop=%d img_subs=%d" % (vc[1], " scale1080" if "-vf" in vc else "", len(keep), dropped, si)
+    return cmd, "v=%s%s%s a_keep=%d a_drop=%d img_subs=%d" % (vc[1], " cq24" if "24" in vc else "", " scale1080" if "-vf" in vc else "", len(keep), dropped, si)
 
 
 def extract_sidecars(inf, info, base_remote):

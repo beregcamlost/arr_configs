@@ -2583,6 +2583,8 @@ SELECT changes();
   local run_id
   run_id="run_$(date '+%Y%m%d_%H%M%S')"
   log "info" "Starting convert run_id=$run_id dry_run=$DRY_RUN max_attempts=$MAX_ATTEMPTS"
+  local _gpu_only
+  _gpu_only="$(printf '%s' "${CODEC_GPU_ONLY-hevc,av1}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9,')"
 
   local limit_clause=""
   if [[ "$BATCH_SIZE" -gt 0 ]]; then
@@ -2631,6 +2633,12 @@ WHERE cp.eligible=1
   -- worker devolvia processed=0 con 148 archivos pendientes. (2026-08-12)
   AND NOT (COALESCE(cr.status,'')='swapped' AND COALESCE(cr.end_ts,'') >= cp.plan_ts)
   AND (cp.claimed_by IS NULL OR cp.claimed_by = 'mubuntu')
+  -- HEVC/AV1 -> SOLO la 3090 (Beren 2026-10-15): el libx264 crf19 de mubuntu inflaba fuentes
+  -- eficientes (Reincarnated S02E03 425->769 MB, FROM S4 E01 696->1350 MB). La 3090 las toma
+  -- con cq24+maxrate (tanda3090.py). Lista configurable: env CODEC_GPU_ONLY (default hevc,av1; vacio = desactivado).
+  AND NOT (cp.reason='needs_transcode' AND EXISTS (SELECT 1 FROM probe_streams ps
+           WHERE ps.media_id=cp.media_id AND ps.stream_type='video'
+             AND instr(',' || '${_gpu_only}' || ',', ',' || lower(ps.codec) || ',') > 0))
 ORDER BY
   CASE WHEN cp.priority = 0 THEN 0 ELSE 1 END,            -- import-hook (brand-new) absolute top
   COALESCE(NULLIF(mf.added_ts,0), mf.mtime) DESC,          -- NEWEST first (Emby added date, else file mtime)
